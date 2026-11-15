@@ -188,12 +188,18 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
 What it cannot do:
 
 - Make a client accept an X25519 identity key or a signed prekey that the identity did
-  not sign, or accept another X25519 identity key for a contact whose key the client
-  pinned, in a bundle [pending: task 3] or in an initial header (protocol, section 16.8)
-  [pending: task 12].
+  not sign
+  [test: tests/crypto/test_identity.py::test_changed_signed_field_fails_the_bundle_check]
+  [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error],
+  or accept another X25519 identity key for a contact whose key the client pinned, in a
+  bundle
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
+  or in an initial header (protocol, section 16.8) [pending: task 12].
 - Turn a login into a prekey statement or the reverse: the three signed strings have
-  distinct prefixes [pending: task 3]. The relay never chooses all the bytes of a login
-  string, because the client adds a nonce of its own [pending: task 4].
+  distinct prefixes
+  [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
+  The relay never chooses all the bytes of a login string, because the client adds a nonce
+  of its own [pending: task 4].
 - Use a login it received to log in at a relay with another server name, or on another
   connection [pending: task 4]. Relays that clients dial under one host, on different
   ports, share a server name and are not told apart (protocol, section 8.2).
@@ -468,7 +474,9 @@ users who hold each other's ids hold each other's keys.
   comparison of keys after the fact, and no session, pin or warning shows the
   substitution: the client holds exactly the key it was given.
 - The pinned X25519 identity key protects against a later bundle that carries another
-  X25519 key under the same id [pending: task 3]. It says nothing about the id itself.
+  X25519 key under the same id
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
+  It says nothing about the id itself.
 
 ## What the relay sees of the end-to-end layer
 

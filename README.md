@@ -9,7 +9,10 @@ opens one.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 - Nothing is encrypted so far. The repository holds the scaffold of the relay: a process
-  that answers a health check and accepts WebSocket connections on one path.
+  that answers a health check and accepts WebSocket connections on one path. It also
+  holds the identity core, which the relay does not use yet: user ids, the three signed
+  strings and the checks of a prekey bundle, with the shared test vectors in
+  `vectors/identity.json`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
   holds both parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,

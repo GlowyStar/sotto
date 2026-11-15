@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 4]` says that what the statement rests on is not in this revision and
-  gives the number, 3 to 8 or 10 to 14, of the task of the project plan that brings it.
+  gives the number, 4 to 8 or 10 to 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -182,7 +182,7 @@ Both libraries use exactly these raw forms: `Ed25519PrivateKey.from_private_byte
 `private_bytes_raw` and `public_bytes_raw` in the Python package cryptography;
 `Curve25519.Signing.PrivateKey(rawRepresentation:)` and `publicKey.rawRepresentation` in
 CryptoKit. The first shared test vector pins the step from a seed to its identity key
-[pending: task 3].
+[test: tests/crypto/test_identity_vectors.py::test_first_vector_is_rfc_8032_test_1].
 
 Example, RFC 8032 section 7.1, TEST 1:
 
@@ -209,7 +209,8 @@ does not provide one.
 
 A decoder takes a text string and returns 32 bytes or the result INVALID_ID
 (section 11.4). It applies these four steps in order and nothing else, so that every
-implementation accepts the same strings [pending: task 3].
+implementation accepts the same strings
+[test: tests/crypto/test_identity.py::test_decoder_accepts_exactly_what_the_four_steps_allow].
 
 1. The string has exactly 64 characters and each is one of `0123456789abcdef`: the whole
    string matches `[0-9a-f]{64}`. Nothing is trimmed, folded or normalized first:
@@ -240,7 +241,7 @@ What the steps exclude:
   encodings, with the bit set, of the two points that have x = 0. A signature under a key
   of small order can be forged by anyone, so such a key cannot name a user. The points are
   those of Chalkias, Garillot and Nikolaenko, "Taming the many EdDSAs", IACR ePrint
-  2020/1244, tables 1 and 2.
+  2020/1244, table 1; table 2 of that paper lists the 19 values of step 3.
 
 Both steps compare bytes, so their result does not depend on what a library accepts when
 it loads a key.
@@ -281,12 +282,16 @@ X25519 identity key string (4.3) and the signed prekey string (4.4).
    bytes. Whether the two libraries give the same verdict on a signature that no honest
    signer produces, for example one under a key with a component of small order, is not
    settled by this document. Such a signature can verify in one implementation and fail in
-   another; it harms only the identity that made it.
+   another; it harms only the identity that made it. A verifier MAY refuse a signature
+   under an identity key that step 3 or 4 of section 3.3 excludes, before it asks the
+   library; no rule of this document lets such a key reach a verification.
 2. Every signed string is `prefix || 0x00 || fields`. The prefix is ASCII text and holds no
    0x00 byte, so the first 0x00 byte of a signed string ends its prefix. The three
    prefixes differ, so a signed string of one kind is never a signed string of another
-   kind, whatever its fields hold [pending: task 3]. Without the prefixes the relay could
-   choose a login nonce that makes the login string a valid prekey statement.
+   kind, whatever its fields hold
+   [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
+   Without the prefixes the relay could choose a login nonce that makes the login string a
+   valid prekey statement.
 3. An implementation MUST NOT sign any other byte string with the private key of an
    identity.
 4. A signed string is built from raw values: the bytes of each field exactly as they were
@@ -420,14 +425,16 @@ change for the life of the identity.
   section 5.4, when the client made the session (section 16.6), or the key of the initial
   header, when it accepted the first initial message of the contact (section 16.8)
   [pending: task 12]. It refuses every later bundle of that contact that carries another
-  key [pending: task 3] and every later initial header that does (section 16.8)
-  [pending: task 12].
+  key
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
+  and every later initial header that does (section 16.8) [pending: task 12].
 
 ### 5.4 The client's checks
 
 A client that received a Bundle for a contact runs these checks in this order and stops at
-the first that fails [pending: task 3]. The lengths of the fields were checked before, when
-the frame was parsed (section 7.3).
+the first that fails
+[test: tests/crypto/test_identity.py::test_bundle_checks_stop_at_the_first_failure].
+The lengths of the fields were checked before, when the frame was parsed (section 7.3).
 
 | No. | Check                                                                                         | Result on failure     |
 |-----|-----------------------------------------------------------------------------------------------|-----------------------|
@@ -1310,8 +1317,11 @@ too, so that a test vector can state them (section 15.2).
 | IDENTITY_KEY_MISMATCH | The checks of section 5.4     | Check 3 failed: the bundle carries another X25519 identity key than the pinned one |
 | LOGIN_REFUSED         | The checks of section 8.3     | Step 4 or 5 failed                                            |
 
+A check that ends in one of these names hands back nothing else: the decoder returns no
+bytes
+[test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
 A client that gets one of the first three reports it and uses neither the id nor the
-bundle [pending: task 3]. Section 24.2 names the local results of the end-to-end protocol.
+bundle [pending: task 12]. Section 24.2 names the local results of the end-to-end protocol.
 
 ## 12. Limits
 
@@ -1481,10 +1491,12 @@ new prefix, so that a signature made for one layout never verifies for another.
 The implementations share test vectors: files `vectors/*.json` in this repository, written
 by a generator that is run by hand from fixed seeds. An implementation that replays every
 vector and gets the stated results agrees with the others on every byte the vectors cover
-[pending: task 3]. No vector file exists in this revision; the names of the operations and
-the keys of their objects are added to this section together with the first file
-[pending: task 3]. Section 24.3 says what the vectors of the key agreement and of the
-ratchet record.
+[test: tests/crypto/test_identity_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
+The first file is `vectors/identity.json`; section 15.5 names its operations and the keys
+of their objects
+[test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
+Section 24.3 says what the vectors of the key agreement and of the ratchet record.
 
 ### 15.2 The schema of a vector file
 
@@ -1533,6 +1545,47 @@ Protocol releases are tagged in this repository. From the first tag that contain
 file, the vectors of that file are frozen: a later commit appends vectors and never
 changes or removes one. A change to an existing vector is a change of the protocol and
 needs a new number for the version that covers the operation of the vector (section 1.3).
+
+### 15.5 The operations of `vectors/identity.json`
+
+The file covers sections 3 to 5 and the login checks of section 8.3. It is written by
+`scripts/generate_vectors.py`. `user_id`, `contact_id` and `server_name` are text, the two
+prekey ids are numbers, and every other value is a hex string.
+
+| Operation | Rule | `inputs` | `intermediates` | `outputs` | `error` |
+|-----------|------|----------|-----------------|-----------|---------|
+| `identity-key` | 3.1, 3.2 | `seed` | | `identity_key`, `user_id` | |
+| `x25519-public-key` | 5.1 | `private_key` | | `public_key` | |
+| `decode-user-id` | 3.3 | `user_id` | | `identity_key` | INVALID_ID |
+| `verify-login` | 8.3, steps 4 and 5 | `identity_key`, `client_nonce`, `signature`, `server_name`, `server_nonce` | `login_string` | | LOGIN_REFUSED |
+| `check-bundle` | 3.3, 5.4 | `contact_id`, `pinned_identity_dh_key`, `identity`, `identity_dh_key`, `identity_dh_signature`, `signed_prekey_id`, `signed_prekey_key`, `signed_prekey_signature`, `one_time_prekey_id`, `one_time_prekey_key` | `identity_dh_string`, `signed_prekey_string` | | INVALID_ID, BAD_BUNDLE, IDENTITY_KEY_MISMATCH |
+
+- `identity-key`: the identity key of the seed (section 3.1) and its user id
+  (section 3.2).
+- `x25519-public-key`: the public key of a 32-byte X25519 private key, which is X25519 of
+  the private key and the base point 9 (RFC 7748 section 6.1):
+  `X25519PrivateKey.from_private_bytes` and `public_bytes_raw` in the Python package
+  cryptography; `Curve25519.KeyAgreement.PrivateKey(rawRepresentation:)` and
+  `publicKey.rawRepresentation` in CryptoKit.
+- `decode-user-id`: the decoder of section 3.3 on the text `user_id`.
+- `verify-login`: steps 4 and 5 of section 8.3 on the fields of a Login (section 7.6),
+  with `server_name` in the place of RELAY_NAME and `server_nonce` in the place of the
+  nonce of the Hello.
+- `check-bundle`: the decoder of section 3.3 on `contact_id`, which ends the operation
+  with INVALID_ID when the id does not decode, then the four checks of section 5.4 on the
+  fields of a Bundle (section 7.11). `signed_prekey_id`, `signed_prekey_key` and
+  `signed_prekey_signature` are the fields of `signed_prekey`, `one_time_prekey_id` and
+  `one_time_prekey_key` those of `one_time_prekey`; the last two are absent when the
+  bundle has no one-time prekey. `pinned_identity_dh_key` is the pin the client holds for
+  the contact and is absent when it holds none.
+- The intermediates are the signed strings of section 4 that the inputs of a vector
+  determine. A negative vector records them too, whichever step fails.
+- A signature that is expected to fail is a valid signature over another string of
+  section 4, a valid signature by another identity, or a valid signature with the lowest
+  bit of its byte 32 changed. Under a key that step 3 or 4 of section 3.3 excludes it is
+  the 32-byte encoding of the neutral point followed by 32 zero bytes, which a library can
+  accept under such a key for every string; these vectors are refused before any signature
+  is verified.
 
 ## 16. Key agreement
 
