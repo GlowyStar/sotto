@@ -9,10 +9,13 @@ file, a vector is only ever added, at the end of its list (section 15.4).
 """
 
 import json
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from sotto.crypto.identity import (
     Bundle,
+    CryptoError,
     OneTimePrekey,
     SignedPrekey,
     derive_identity_key,
@@ -25,10 +28,24 @@ from sotto.crypto.identity import (
     sign_signed_prekey,
     signed_prekey_string,
 )
+from sotto.crypto.ratchet import (
+    MAX_SKIP,
+    RatchetState,
+    SkippedKey,
+    decrypt,
+    encrypt,
+    init_initiator,
+    init_responder,
+    kdf_ck,
+    kdf_rk,
+)
 from sotto.crypto.x3dh import KeyAgreement, dh, initiate, respond
 
 type Fields = dict[str, str | int]
 type Vector = dict[str, str | Fields]
+type Entry = dict[str, str | int]
+type RatchetFields = dict[str, str | int | list[Entry]]
+type RatchetVector = dict[str, str | RatchetFields]
 
 VECTORS = Path(__file__).parent.parent / "vectors"
 SCHEMA = 1
@@ -690,7 +707,413 @@ def x3dh_vectors() -> list[Vector]:
     ]
 
 
-FILES = {"identity.json": identity_vectors, "x3dh.json": x3dh_vectors}
+INITIATOR = "initiator"
+RESPONDER = "responder"
+FIRST_RATCHET_PRIVATE_KEY = 0x50
+FIRST_MESSAGE_ID = 0x40
+FIRST_NONCE = 0x80
+MESSAGE_ID_LENGTH = 16
+NONCE_LENGTH = 12
+CONTENT_TEXT_TAG = b"\x0a"
+PADDING_START = b"\x80"
+PADDING_BLOCK = 256
+RATCHET_KEY = slice(0, 32)
+PREVIOUS_COUNT = slice(32, 36)
+NUMBER = slice(36, 40)
+LAST_NUMBER = 2**32 - 1
+
+
+@dataclass(slots=True, kw_only=True)
+class Party:
+    state: RatchetState
+    session_associated_data: bytes
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Message:
+    message_id: bytes
+    header: bytes
+    ciphertext: bytes
+
+
+def padded(text: str) -> bytes:
+    """P of section 19.6 for a `Content` with a short `text`: tag, length, UTF-8."""
+    encoded = text.encode()
+    content = CONTENT_TEXT_TAG + bytes([len(encoded)]) + encoded + PADDING_START
+    return content + bytes(-len(content) % PADDING_BLOCK)
+
+
+def present(chain_key: bytes | None) -> bytes:
+    if chain_key is None:
+        raise RuntimeError("a step that succeeded had no chain key")
+    return chain_key
+
+
+def header_of(ratchet_key: bytes, previous_count: int, number: int) -> bytes:
+    return ratchet_key + previous_count.to_bytes(4, "big") + number.to_bytes(4, "big")
+
+
+def entry_of(entry: SkippedKey) -> Entry:
+    return {
+        "ratchet_key": entry.ratchet_key.hex(),
+        "number": entry.number,
+        "message_key": entry.message_key.hex(),
+        "step": entry.step,
+    }
+
+
+def ratchet_vector(
+    name: str,
+    operation: str,
+    inputs: RatchetFields,
+    intermediates: RatchetFields,
+    outcome: RatchetFields | str,
+) -> RatchetVector:
+    vector: RatchetVector = {
+        "name": name,
+        "operation": operation,
+        "inputs": inputs,
+        "intermediates": intermediates,
+    }
+    if isinstance(outcome, str):
+        vector["error"] = outcome
+    else:
+        vector["outputs"] = outcome
+    return vector
+
+
+class Conversation:
+    """Runs the scripted conversation of section 24.3 and records each step as a vector."""
+
+    def __init__(self, sent: KeyAgreement, received: KeyAgreement) -> None:
+        self.vectors: list[RatchetVector] = []
+        self.messages: dict[str, Message] = {}
+        self.random_keys = (
+            bytes([byte]) * 32 for byte in range(FIRST_RATCHET_PRIVATE_KEY, 256)
+        )
+        self.message_numbers = iter(range(256))
+        self.parties: dict[str, Party] = {}
+        self.start(sent, received)
+
+    def start(self, sent: KeyAgreement, received: KeyAgreement) -> None:
+        ratchet_private_key = next(self.random_keys)
+        dh_output = dh(ratchet_private_key, ALICE_SIGNED_PREKEY)
+        root_key, chain_key = kdf_rk(sent.shared_secret, dh_output)
+        initiator = init_initiator(
+            shared_secret=sent.shared_secret,
+            signed_prekey=ALICE_SIGNED_PREKEY,
+            ratchet_private_key=ratchet_private_key,
+        )
+        self.parties[INITIATOR] = Party(
+            state=initiator, session_associated_data=sent.associated_data
+        )
+        self.vectors.append(
+            ratchet_vector(
+                "ratchet-init-initiator-with-a-one-time-prekey",
+                "ratchet-init-initiator",
+                {
+                    "sk": sent.shared_secret.hex(),
+                    "session_associated_data": sent.associated_data.hex(),
+                    "signed_prekey_key": ALICE_SIGNED_PREKEY.hex(),
+                    "ratchet_private_key": ratchet_private_key.hex(),
+                },
+                {
+                    "ratchet_key": initiator.dhs_public_key.hex(),
+                    "dh": dh_output.hex(),
+                    "root_key": root_key.hex(),
+                    "chain_key": chain_key.hex(),
+                },
+                {},
+            )
+        )
+
+        responder = init_responder(
+            shared_secret=received.shared_secret,
+            signed_prekey_private_key=ALICE_SIGNED_PREKEY_PRIVATE_KEY,
+        )
+        self.parties[RESPONDER] = Party(
+            state=responder, session_associated_data=received.associated_data
+        )
+        self.vectors.append(
+            ratchet_vector(
+                "ratchet-init-responder-with-a-one-time-prekey",
+                "ratchet-init-responder",
+                {
+                    "sk": received.shared_secret.hex(),
+                    "session_associated_data": received.associated_data.hex(),
+                    "signed_prekey_private_key": ALICE_SIGNED_PREKEY_PRIVATE_KEY.hex(),
+                },
+                {"ratchet_key": responder.dhs_public_key.hex()},
+                {},
+            )
+        )
+
+    def encrypt(self, party_name: str, label: str, name: str | None = None) -> None:
+        party = self.parties[party_name]
+        number = next(self.message_numbers)
+        message_id = bytes([FIRST_MESSAGE_ID + number]) * MESSAGE_ID_LENGTH
+        nonce = bytes([FIRST_NONCE + number]) * NONCE_LENGTH
+        plaintext = padded(f"message {label}")
+        associated_data = party.session_associated_data + message_id
+        inputs: RatchetFields = {
+            "party": party_name,
+            "message_id": message_id.hex(),
+            "nonce": nonce.hex(),
+            "padded_plaintext": plaintext.hex(),
+        }
+        if name is None:
+            name = f"ratchet-encrypt-{label}"
+
+        before = party.state
+        try:
+            encrypted = encrypt(
+                before, plaintext, associated_data=associated_data, nonce=nonce
+            )
+        except CryptoError as error:
+            self.vectors.append(
+                ratchet_vector(name, "ratchet-encrypt", inputs, {}, error.result)
+            )
+            return
+
+        chain_key = present(before.cks)
+        intermediates: RatchetFields = {
+            "chain_key": chain_key.hex(),
+            "message_key": kdf_ck(chain_key)[0].hex(),
+            "header": encrypted.header.hex(),
+            "associated_data": (associated_data + encrypted.header).hex(),
+        }
+        outputs: RatchetFields = {"ciphertext": encrypted.ciphertext.hex()}
+        self.vectors.append(
+            ratchet_vector(name, "ratchet-encrypt", inputs, intermediates, outputs)
+        )
+        party.state = encrypted.state
+        self.messages[label] = Message(
+            message_id=message_id, header=encrypted.header, ciphertext=encrypted.ciphertext
+        )
+
+    def decrypt(
+        self,
+        party_name: str,
+        name: str,
+        message: Message,
+    ) -> None:
+        party = self.parties[party_name]
+        before = party.state
+        ratchet_key = message.header[RATCHET_KEY]
+        number = int.from_bytes(message.header[NUMBER], "big")
+        is_skipped = any(
+            entry.ratchet_key == ratchet_key and entry.number == number
+            for entry in before.mkskipped
+        )
+        is_new_chain = ratchet_key != before.dhr and not is_skipped
+        ratchet_private_key = next(self.random_keys)
+        associated_data = party.session_associated_data + message.message_id
+        inputs: RatchetFields = {
+            "party": party_name,
+            "message_id": message.message_id.hex(),
+            "header": message.header.hex(),
+            "ciphertext": message.ciphertext.hex(),
+        }
+
+        try:
+            decrypted = decrypt(
+                before,
+                message.header,
+                message.ciphertext,
+                associated_data=associated_data,
+                ratchet_private_key=ratchet_private_key,
+            )
+        except CryptoError as error:
+            if is_new_chain and error.result == "DECRYPT_FAILED":
+                inputs["ratchet_private_key"] = ratchet_private_key.hex()
+            self.vectors.append(
+                ratchet_vector(name, "ratchet-decrypt", inputs, {}, error.result)
+            )
+            return
+
+        after = decrypted.state
+        intermediates: RatchetFields = {}
+        chain_key = before.ckr
+        first_number = before.nr
+        if is_new_chain:
+            inputs["ratchet_private_key"] = ratchet_private_key.hex()
+            dh_receiving = dh(before.dhs_private_key, ratchet_key)
+            root_key, chain_key = kdf_rk(before.rk, dh_receiving)
+            dh_sending = dh(ratchet_private_key, ratchet_key)
+            root_key_sending, chain_key_sending = kdf_rk(root_key, dh_sending)
+            first_number = 0
+            intermediates |= {
+                "dh_receiving": dh_receiving.hex(),
+                "root_key_receiving": root_key.hex(),
+                "chain_key_receiving": chain_key.hex(),
+                "ratchet_key": after.dhs_public_key.hex(),
+                "dh_sending": dh_sending.hex(),
+                "root_key_sending": root_key_sending.hex(),
+                "chain_key_sending": chain_key_sending.hex(),
+            }
+
+        used = None
+        if is_skipped:
+            used = next(
+                entry
+                for entry in before.mkskipped
+                if entry.ratchet_key == ratchet_key and entry.number == number
+            )
+            message_key = used.message_key
+        else:
+            message_chain_key = present(chain_key)
+            for _ in range(first_number, number):
+                message_chain_key = kdf_ck(message_chain_key)[1]
+            message_key = kdf_ck(message_chain_key)[0]
+            intermediates["chain_key"] = message_chain_key.hex()
+        stored = [entry for entry in after.mkskipped if entry not in before.mkskipped]
+        removed = [entry for entry in before.mkskipped if entry not in after.mkskipped]
+        purged = [entry for entry in removed if entry is not used]
+        if len(purged) != decrypted.purged:
+            raise RuntimeError(f"{name}: the count of purged keys differs from the entries")
+        intermediates |= {
+            "message_key": message_key.hex(),
+            "associated_data": (associated_data + message.header).hex(),
+            "stored_skipped_keys": [entry_of(entry) for entry in stored],
+            "purged_skipped_keys": [entry_of(entry) for entry in purged],
+        }
+
+        outputs: RatchetFields = {
+            "padded_plaintext": decrypted.padded_plaintext.hex(),
+            "purged_count": decrypted.purged,
+        }
+        self.vectors.append(
+            ratchet_vector(name, "ratchet-decrypt", inputs, intermediates, outputs)
+        )
+        party.state = after
+
+    def deliver(self, party_name: str, label: str, name: str | None = None) -> None:
+        if name is None:
+            name = f"ratchet-decrypt-{label}"
+        self.decrypt(party_name, name, self.messages[label])
+
+    def forge(
+        self,
+        party_name: str,
+        name: str,
+        label: str,
+        *,
+        header: bytes | None = None,
+        ciphertext: bytes | None = None,
+        message_id: bytes | None = None,
+    ) -> None:
+        real = self.messages[label]
+        forged = Message(
+            message_id=real.message_id if message_id is None else message_id,
+            header=real.header if header is None else header,
+            ciphertext=real.ciphertext if ciphertext is None else ciphertext,
+        )
+        self.decrypt(party_name, name, forged)
+
+
+def with_flipped_byte(data: bytes, index: int) -> bytes:
+    return data[:index] + bytes([data[index] ^ 0x01]) + data[index + 1 :]
+
+
+def ratchet_vectors() -> list[RatchetVector]:
+    sent = initiate(
+        bundle_of(valid_bundle(ALICE_SEED)),
+        identity_key=BOB,
+        identity_dh_private_key=BOB_IDENTITY_DH_PRIVATE_KEY,
+        ephemeral_private_key=EPHEMERAL_PRIVATE_KEY,
+        contact_identity_key=ALICE,
+        pinned_identity_dh_key=None,
+    )
+    received = respond(
+        identity_key=ALICE,
+        identity_dh_private_key=ALICE_IDENTITY_DH_PRIVATE_KEY,
+        signed_prekey_private_key=ALICE_SIGNED_PREKEY_PRIVATE_KEY,
+        one_time_prekey_private_key=ALICE_ONE_TIME_PREKEY_PRIVATE_KEY,
+        sender_identity_key=BOB,
+        sender_identity_dh_key=BOB_IDENTITY_DH,
+        sender_identity_dh_signature=sign_identity_dh_key(
+            BOB_SEED, identity_dh_key=BOB_IDENTITY_DH
+        ),
+        ephemeral_key=derive_x25519_public_key(EPHEMERAL_PRIVATE_KEY),
+        pinned_identity_dh_key=None,
+    )
+    talk = Conversation(sent, received)
+    talk.encrypt(RESPONDER, "r", "ratchet-encrypt-responder-before-any-message")
+    for number in range(5):
+        talk.encrypt(INITIATOR, f"i{number}")
+    talk.forge(
+        INITIATOR,
+        "ratchet-decrypt-no-receiving-chain",
+        "i0",
+        header=header_of(ALICE_SIGNED_PREKEY, 0, 0),
+    )
+
+    talk.deliver(RESPONDER, "i0", "ratchet-decrypt-i0-first-message")
+    talk.deliver(RESPONDER, "i0", "ratchet-decrypt-i0-again")
+    talk.deliver(RESPONDER, "i2", "ratchet-decrypt-i2-before-i1")
+    talk.deliver(RESPONDER, "i1", "ratchet-decrypt-i1-from-a-skipped-key")
+    talk.deliver(RESPONDER, "i4", "ratchet-decrypt-i4-after-a-lost-i3")
+    for number in range(3):
+        talk.encrypt(RESPONDER, f"r{number}")
+
+    r0 = talk.messages["r0"]
+    talk.forge(
+        INITIATOR,
+        "ratchet-decrypt-tampered-header",
+        "r0",
+        header=with_flipped_byte(r0.header, PREVIOUS_COUNT.stop - 1),
+    )
+    talk.deliver(INITIATOR, "r2", "ratchet-decrypt-r2-before-r0-and-r1")
+    r1 = talk.messages["r1"]
+    tampered = {
+        "tampered-nonce": 0,
+        "tampered-ciphertext": NONCE_LENGTH,
+        "tampered-tag": len(r1.ciphertext) - 1,
+    }
+    for case, index in tampered.items():
+        talk.forge(
+            INITIATOR,
+            f"ratchet-decrypt-{case}",
+            "r1",
+            ciphertext=with_flipped_byte(r1.ciphertext, index),
+        )
+    talk.forge(INITIATOR, "ratchet-decrypt-other-message-id", "r1", message_id=r0.message_id)
+    talk.deliver(INITIATOR, "r1", "ratchet-decrypt-r1-from-a-skipped-key")
+
+    talk.encrypt(INITIATOR, "i5")
+    first_chain = talk.messages["i0"].header[RATCHET_KEY]
+    second_chain = talk.messages["i5"].header[RATCHET_KEY]
+    beyond = 5 + MAX_SKIP + 1
+    refused = {
+        "too-many-skipped-on-the-chain": header_of(first_chain, 0, beyond),
+        "too-many-skipped-before-a-new-key": header_of(second_chain, beyond, 0),
+        "too-many-skipped-on-a-new-key": header_of(second_chain, 5, MAX_SKIP + 1),
+        "chain-exhausted": header_of(second_chain, 5, LAST_NUMBER),
+        "ratchet-key-of-small-order": header_of(X25519_ORDER_8, 5, 0),
+    }
+    for case, header in refused.items():
+        talk.forge(RESPONDER, f"ratchet-decrypt-{case}", "i5", header=header)
+    talk.deliver(RESPONDER, "i5", "ratchet-decrypt-i5-on-a-new-chain")
+
+    talk.encrypt(RESPONDER, "r3")
+    talk.deliver(INITIATOR, "r3")
+    talk.deliver(INITIATOR, "r0", "ratchet-decrypt-r0-after-a-later-dh-ratchet-step")
+    for number in range(6, 10):
+        talk.encrypt(INITIATOR, f"i{number}")
+        name = "ratchet-decrypt-i9-purges-the-key-of-i3" if number == 9 else None
+        talk.deliver(RESPONDER, f"i{number}", name)
+        if number < 9:
+            talk.encrypt(RESPONDER, f"r{number - 2}")
+            talk.deliver(INITIATOR, f"r{number - 2}")
+    talk.deliver(RESPONDER, "i3", "ratchet-decrypt-i3-after-its-key-was-purged")
+    return talk.vectors
+
+
+FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
+    "identity.json": identity_vectors,
+    "x3dh.json": x3dh_vectors,
+    "ratchet.json": ratchet_vectors,
+}
 
 
 def main() -> None:
