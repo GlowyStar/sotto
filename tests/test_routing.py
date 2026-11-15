@@ -38,6 +38,12 @@ async def test_unknown_path_answers_404(relay_url: str) -> None:
     assert status == HTTPStatus.NOT_FOUND
 
 
+async def test_websocket_port_answers_404_for_metrics(relay_url: str) -> None:
+    status = await asyncio.to_thread(fetch_status, relay_url, "/metrics")
+
+    assert status == HTTPStatus.NOT_FOUND
+
+
 async def test_websocket_opens_on_ws(relay_url: str) -> None:
     async with connect(f"{relay_url}/ws", proxy=None) as websocket:
         handshake = websocket.response

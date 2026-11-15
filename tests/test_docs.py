@@ -6,7 +6,9 @@ from pathlib import Path
 from google.protobuf.descriptor_pb2 import FileDescriptorProto, FileDescriptorSet
 from grpc_tools import protoc  # type: ignore[import-untyped]
 
+from sotto.relay.frames import MAX_FRAME_BYTES
 from sotto.relay.server import CloseCode
+from sotto.relay.settings import Settings
 
 ROOT = Path(__file__).parent.parent
 DOCS = sorted((ROOT / "docs").rglob("*.md"))
@@ -14,13 +16,15 @@ CITING_DOCUMENTS = [*DOCS, ROOT / "README.md"]
 
 OPEN_POINT = re.compile(r"(?<!`)OPEN:")
 TEST_CITATION = re.compile(r"\[test: (tests/(?:\w+/)*\w+\.py)::(test_\w+)\]")
-PENDING_CITATION = re.compile(r"\[pending: task (?:8|1[2-4])\]")
+PENDING_CITATION = re.compile(r"\[pending: task 1[2-4]\]")
 CITATION_PART = re.compile(r"\[\w+:|\btests/|::|\bpending\b", re.IGNORECASE)
 
 PROTOCOL = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
 SCHEMA = ROOT / "proto" / "sotto.proto"
 SCHEMA_LISTING = re.compile(r"^```proto\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 CLOSE_CODE_ROW = re.compile(r"^\| (\d{4}) \| (\w+) +\|", re.MULTILINE)
+LIMITS_TABLE = re.compile(r"^### 12\.1 The table\n(.*?)^### ", re.DOTALL | re.MULTILINE)
+LIMIT_ROW = re.compile(r"^\| ([A-Z_]+) +\| (\d+) +\|", re.MULTILINE)
 
 
 def numbered_lines(documents: Iterable[Path]) -> Iterator[tuple[str, str]]:
@@ -78,6 +82,22 @@ def test_close_codes_of_the_relay_are_those_of_the_spec() -> None:
     table = {name: int(number) for number, name in CLOSE_CODE_ROW.findall(PROTOCOL)}
 
     assert table == {code.name: code.value for code in CloseCode}
+
+
+def test_limits_table_is_the_settings_of_the_relay() -> None:
+    section = LIMITS_TABLE.search(PROTOCOL)
+    assert section is not None
+    table = {name: int(default) for name, default in LIMIT_ROW.findall(section.group(1))}
+    settings_names = [name for name in table if name != "MAX_FRAME_BYTES"]
+    environ = {"RELAY_DATABASE": "relay.db"}
+    defaults = Settings.from_env(environ)
+    read = Settings.from_env(environ | {f"RELAY_{name}": "7" for name in settings_names})
+
+    in_code = {name: getattr(defaults, name.lower()) for name in settings_names}
+    assert table == {"MAX_FRAME_BYTES": MAX_FRAME_BYTES, **in_code}
+    assert {name: getattr(read, name.lower()) for name in settings_names} == dict.fromkeys(
+        settings_names, 7
+    )
 
 
 def compile_schema(source: str, folder: Path) -> FileDescriptorProto:

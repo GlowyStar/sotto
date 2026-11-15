@@ -20,6 +20,8 @@ hypothesis_settings.register_profile(
 )
 hypothesis_settings.load_profile("sotto")
 
+STAND_BUCKET_SIZE = 1000
+
 
 @pytest.fixture(autouse=True)
 def wire(caplog: pytest.LogCaptureFixture) -> Iterator[Wire]:
@@ -41,8 +43,17 @@ def wire(caplog: pytest.LogCaptureFixture) -> Iterator[Wire]:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    """The settings of a relay in the process: a free port and a database of the test."""
-    return Settings(database=tmp_path / "relay.db", port=0)
+    """The settings of a relay in the process: a free port and a database of the test.
+
+    The buckets are those of the stand (compose.yaml), large enough for the bursts of the
+    tests; the tests of the limits set their own.
+    """
+    return Settings(
+        database=tmp_path / "relay.db",
+        port=0,
+        frame_bucket_size=STAND_BUCKET_SIZE,
+        handout_bucket_size=STAND_BUCKET_SIZE,
+    )
 
 
 @pytest.fixture

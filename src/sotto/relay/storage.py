@@ -75,6 +75,9 @@ TAKE_OLDEST_ONE_TIME_PREKEY = """
 """
 IS_REGISTERED = "SELECT 1 FROM identities WHERE identity_key = ?"
 IS_MESSAGE_HELD = "SELECT 1 FROM messages WHERE sender = ? AND message_id = ?"
+MEASURE_QUEUE = """
+    SELECT count(*), coalesce(sum(length(payload)), 0) FROM messages WHERE recipient = ?
+"""
 STORE_MESSAGE = """
     INSERT INTO messages (sender, recipient, message_id, payload, stored_at)
     VALUES (?, ?, ?, ?, ?)
@@ -85,6 +88,8 @@ READ_NEXT_MESSAGE = """
 """
 DELETE_MESSAGE = "DELETE FROM messages WHERE recipient = ? AND sender = ? AND message_id = ?"
 DELETE_EXPIRED_MESSAGES = "DELETE FROM messages WHERE stored_at <= ?"
+READ_PAGE_COUNT = "PRAGMA page_count"
+READ_PAGE_SIZE = "PRAGMA page_size"
 # Copies the write-ahead log into the database file and truncates the log to zero length,
 # which removes the old pages of deleted rows (docs/protocol.md, section 13.2).
 CHECKPOINT = "PRAGMA wal_checkpoint(TRUNCATE)"
@@ -96,6 +101,10 @@ class StorageFullError(Exception):
 
 class UnknownRecipientError(Exception):
     """The recipient of a message is not registered."""
+
+
+class QueueFullError(Exception):
+    """The queue of the recipient is at one of its caps."""
 
 
 class Storage:
@@ -174,33 +183,44 @@ class Storage:
         """
         try:
             with self._write():
-                bundle = self._read_bundle(identity)
+                bundle = self.read_bundle(identity)
                 taken = self.connection.execute(TAKE_OLDEST_ONE_TIME_PREKEY, (identity,))
                 one_time_prekey = taken.fetchone()
         except StorageFullError:
-            return self._read_bundle(identity)
+            return self.read_bundle(identity)
 
         if bundle is not None and one_time_prekey is not None:
             bundle.one_time_prekey.id, bundle.one_time_prekey.key = one_time_prekey
         return bundle
 
-    def store_message(self, sender: bytes, send: Send) -> None:
-        """Runs steps 2, 3 and 5 of docs/protocol.md, section 10.2, in one transaction.
+    def store_message(
+        self, sender: bytes, send: Send, *, max_messages: int, max_bytes: int
+    ) -> bool:
+        """Runs steps 2 to 5 of docs/protocol.md, section 10.2, in one transaction.
 
         A message that the relay holds under the sender and the message id stays as it is.
+        Returns whether the message was stored now.
 
         Raises:
             UnknownRecipientError: The recipient is not registered.
+            QueueFullError: The queue of the recipient is at one of its caps.
             StorageFullError: The database is at its page ceiling.
         """
         with self._write():
             if self.connection.execute(IS_MESSAGE_HELD, (sender, send.message_id)).fetchone():
-                return
+                return False
             if self.connection.execute(IS_REGISTERED, (send.recipient,)).fetchone() is None:
                 raise UnknownRecipientError("the recipient is not registered")
 
+            count, size = self.connection.execute(MEASURE_QUEUE, (send.recipient,)).fetchone()
+            is_at_count_cap = count >= max_messages
+            would_pass_bytes_cap = size + len(send.payload) > max_bytes
+            if is_at_count_cap or would_pass_bytes_cap:
+                raise QueueFullError("the queue of the recipient is full")
+
             row = (sender, send.recipient, send.message_id, send.payload, int(self.clock()))
             self.connection.execute(STORE_MESSAGE, row)
+        return True
 
     def next_message(self, recipient: bytes, *, after: int) -> tuple[int, Deliver] | None:
         """Returns the message of the queue that was stored first after the position `after`.
@@ -215,14 +235,16 @@ class Storage:
         position, sender, message_id, payload = row
         return position, Deliver(message_id=message_id, sender=sender, payload=payload)
 
-    def delete_messages(self, recipient: bytes, messages: Iterable[MessageRef]) -> None:
+    def delete_messages(self, recipient: bytes, messages: Iterable[MessageRef]) -> int:
         """Deletes the messages of the queue of `recipient` that the pairs name.
 
-        A pair that names no message of this queue changes nothing.
+        A pair that names no message of this queue changes nothing. Returns the count of
+        the deleted messages.
         """
         rows = [(recipient, message.sender, message.message_id) for message in messages]
         with self._write():
-            self.connection.executemany(DELETE_MESSAGE, rows)
+            deleted = self.connection.executemany(DELETE_MESSAGE, rows)
+        return deleted.rowcount
 
     def sweep(self, *, ttl_seconds: int) -> int:
         """Deletes the messages stored `ttl_seconds` or more ago, then truncates the log.
@@ -238,7 +260,13 @@ class Storage:
             logger.warning("the checkpoint of the sweep did not finish")
         return expired.rowcount
 
-    def _read_bundle(self, identity: bytes) -> Bundle | None:
+    def size_bytes(self) -> int:
+        page_count: int = self.connection.execute(READ_PAGE_COUNT).fetchone()[0]
+        page_size: int = self.connection.execute(READ_PAGE_SIZE).fetchone()[0]
+        return page_count * page_size
+
+    def read_bundle(self, identity: bytes) -> Bundle | None:
+        """Returns the bundle of an identity without a one-time prekey, None when unknown."""
         row = self.connection.execute(READ_IDENTITY, (identity,)).fetchone()
         if row is None:
             return None
