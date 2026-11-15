@@ -3,20 +3,21 @@
 import asyncio
 import logging
 import os
-import sqlite3
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import cast
 
 import pytest
 from relay_harness import (
     PATIENCE_SECONDS,
     WINDOW_BYTES,
+    Clock,
     OpenClient,
     RawClient,
     build_upload,
+    messages_in,
     running_relay,
 )
 from websockets.asyncio.server import ServerConnection
@@ -52,27 +53,8 @@ SWEEP_SECONDS = 0.01
 PAYLOAD_LENGTHS = [100, 5000]
 
 
-@dataclass(slots=True)
-class Clock:
-    """The clock of a relay or a storage, moved by the test."""
-
-    now: int = 1_800_000_000
-
-    def __call__(self) -> float:
-        return self.now
-
-
 def files_of(settings: Settings) -> list[str]:
     return sorted(path.name for path in settings.database.parent.iterdir())
-
-
-def messages_in(settings: Settings) -> list[tuple[bytes, bytes, bytes, bytes, int]]:
-    """Reads the queued messages from the file, beside the connection of a running relay."""
-    with closing(sqlite3.connect(settings.database)) as database:
-        rows = database.execute(
-            "SELECT sender, recipient, message_id, payload, stored_at FROM messages"
-        ).fetchall()
-    return rows
 
 
 def traces_in(settings: Settings, send: Send) -> list[str]:
@@ -106,7 +88,7 @@ def store_one_message(storage: Storage, payload_length: int) -> tuple[bytes, Sen
     send = Send(
         message_id=os.urandom(16), recipient=recipient, payload=os.urandom(payload_length)
     )
-    storage.store_message(sender, send)
+    storage.store_message(sender, send, max_messages=1000, max_bytes=16777216)
     return sender, send
 
 

@@ -5,6 +5,7 @@ project="${1:?usage: scripts/stand.sh <compose project name>}"
 cd "$(dirname "$0")/.."
 
 export RELAY_PORT="${RELAY_PORT:-8765}"
+export RELAY_METRICS_PORT="${RELAY_METRICS_PORT:-$((RELAY_PORT + 1000))}"
 export RELAY_URL="ws://127.0.0.1:${RELAY_PORT}"
 compose=(docker compose -p "$project")
 
@@ -18,6 +19,12 @@ trap finish EXIT
 
 "${compose[@]}" up --build -d --wait --wait-timeout 60
 uv run pytest -m stand
+
+metrics="$(curl -fsS "http://127.0.0.1:${RELAY_METRICS_PORT}/metrics")"
+grep -q '^sotto_messages_stored_total [1-9]' <<<"$metrics" || {
+    echo "the metrics count no stored message" >&2
+    exit 1
+}
 
 # What the tests above stored outlives the relay process because the database is on a volume.
 "${compose[@]}" restart relay

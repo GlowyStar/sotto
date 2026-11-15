@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 8, 13 or 14, of the task of the project plan that brings it.
+  gives the number, 13 or 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -483,7 +483,10 @@ request on any path but `/ws` gets the plain answer of that path
 [test: tests/test_routing.py::test_healthz_answers_200]. Its body is a fixed text that
 does not depend on the request, on a client or on the database
 [test: tests/test_routing.py::test_healthz_body_is_the_same_for_every_request_and_after_an_upload].
-The WebSocket port serves no metrics [pending: task 8].
+The WebSocket port serves no metrics
+[test: tests/test_routing.py::test_websocket_port_answers_404_for_metrics]. The relay serves
+them on a listener of its own, which is off unless it is configured (threat model, "What
+the relay learns").
 
 ### 6.2 Binary frames only
 
@@ -1099,7 +1102,8 @@ The relay handles a well-formed UploadBundle of a logged-in connection in this o
 [test: tests/test_bundles.py::test_upload_checks_stop_at_the_first_that_fails]:
 
 1. It takes a token from the frame bucket of the identity (section 12.2). Without a token
-   the answer is Error RATE_LIMITED [pending: task 8].
+   the answer is Error RATE_LIMITED
+   [test: tests/test_limits.py::test_frames_over_the_bucket_are_rate_limited_and_change_nothing].
 2. It builds the string of section 4.3 from the identity key of the connection and
    `identity_dh_key` and verifies `identity_dh_signature` over it. On failure the answer is
    Error BAD_BUNDLE.
@@ -1147,7 +1151,8 @@ The relay handles a well-formed FetchBundle of a logged-in connection in this or
 [test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte]:
 
 1. It takes a token from the frame bucket of the requesting identity. Without a token the
-   answer is Error RATE_LIMITED [pending: task 8].
+   answer is Error RATE_LIMITED
+   [test: tests/test_limits.py::test_frames_over_the_bucket_are_rate_limited_and_change_nothing].
 2. When the identity of the request is not registered, the answer is Error NOT_FOUND.
 3. It decides the handout of a one-time prekey (section 9.3).
 4. The answer is Bundle: the identity of the request, its X25519 identity key and
@@ -1166,7 +1171,7 @@ at most once
 
 1. When the handout bucket of the target identity (section 12.2) has no token, the bundle
    goes out without a one-time prekey and the stored ones stay untouched
-   [pending: task 8].
+   [test: tests/test_limits.py::test_fetches_past_the_handout_bucket_leave_the_stored_one_time_prekeys].
 2. Otherwise the relay takes the one-time prekey of the target that was stored first and
    deletes it in the same transaction that reads it
    [test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
@@ -1178,7 +1183,9 @@ at most once
    [test: tests/test_storage.py::test_fetch_whose_handout_cannot_be_written_gets_the_bundle_without_one].
 3. When step 2 handed out a key, one token is taken from the handout bucket of the target.
    When the target has no one-time prekey stored, the bundle goes out without one and no
-   token is taken [pending: task 8].
+   token is taken
+   [test: tests/test_limits.py::test_fetches_past_the_handout_bucket_leave_the_stored_one_time_prekeys]
+   [test: tests/test_limits.py::test_fetch_of_a_target_without_one_time_prekeys_takes_no_handout_token].
 
 A fetch never fails for lack of a one-time prekey: a registered identity always gets a
 Bundle [test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
@@ -1218,13 +1225,15 @@ The relay handles a well-formed Send of a logged-in connection in this order
 transaction.
 
 1. It takes a token from the frame bucket of the sender (section 12.2). Without a token
-   the answer is Error RATE_LIMITED [pending: task 8].
+   the answer is Error RATE_LIMITED
+   [test: tests/test_limits.py::test_frames_over_the_bucket_are_rate_limited_and_change_nothing].
 2. When the relay holds a message with this sender and this `message_id`, the answer is
    Stored and nothing else happens (section 10.3).
 3. When `recipient` is not registered, the answer is Error UNKNOWN_RECIPIENT.
 4. When the queue of the recipient holds QUEUE_MAX_MESSAGES messages, or the payloads in
    it together with this payload are more than QUEUE_MAX_BYTES, the answer is Error
-   QUEUE_FULL and nothing is stored [pending: task 8].
+   QUEUE_FULL and nothing is stored
+   [test: tests/test_limits.py::test_send_over_a_queue_cap_answers_queue_full_until_an_ack_makes_room].
 5. The relay stores the sender, the recipient, the message id, the payload and the time
    in whole seconds, and commits. When the transaction fails because the database is at
    its page ceiling, it is rolled back, the answer is Error STORAGE_FULL and nothing is
@@ -1392,7 +1401,8 @@ The relay sends each code under the stated condition and no other
 [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on]
 [test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]
 [test: tests/test_storage.py::test_send_into_a_full_database_answers_storage_full_and_stores_nothing]
-[pending: task 8].
+[test: tests/test_limits.py::test_send_over_a_queue_cap_answers_queue_full_until_an_ack_makes_room]
+[test: tests/test_limits.py::test_frames_over_the_bucket_are_rate_limited_and_change_nothing].
 
 ### 11.3 Close codes
 
@@ -1472,9 +1482,10 @@ bundle
 | MAX_PAGES               | 262144   | pages    | The page ceiling of the database, 1 GiB at pages of 4096 bytes        |
 | SWEEP_INTERVAL_SECONDS  | 60       | seconds  | The time between two sweeps (section 13)                              |
 
-The values are the defaults of the relay's settings. The relay reads each from the
-environment variable of the same name with the prefix `RELAY_`, and a test compares this
-table with the settings, constant by constant [pending: task 8].
+MAX_FRAME_BYTES is a constant of the relay (see below). Every other value is the default
+of a setting that the relay reads from the environment variable of the same name with the
+prefix `RELAY_`. A test compares this table with the code, constant by constant
+[test: tests/test_docs.py::test_limits_table_is_the_settings_of_the_relay].
 
 No frame carries a limit, so a client uses the defaults of the four it needs:
 MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECONDS.
@@ -1498,18 +1509,24 @@ MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECON
 A bucket holds at most its size in tokens and is full when it is made. Tokens return at
 the rate of one per refill time, up to the size. Buckets live in the memory of the relay
 process: a restart of the relay fills them, a new login does not. A bucket that is full
-again is the same as a new one, and the relay MAY forget it [pending: task 8].
+again is the same as a new one, and the relay MAY forget it
+[test: tests/test_limits.py::test_rate_limited_frame_passes_after_the_refill]
+[test: tests/test_limits.py::test_login_and_ack_take_no_token_and_a_new_login_keeps_the_bucket]
+[test: tests/test_limits.py::test_full_bucket_is_forgotten_and_is_the_same_as_a_new_one].
 
 - The frame bucket belongs to an identity. Every Send, UploadBundle and FetchBundle of the
   identity takes one token before anything else is done with the frame, whatever the
   answer turns out to be. A frame that finds no token is refused with RATE_LIMITED and
-  changes nothing. A Login and an Ack take no token [pending: task 8]. A Login comes
+  changes nothing [test: tests/test_limits.py::test_frames_over_the_bucket_are_rate_limited_and_change_nothing].
+  A Login and an Ack take no token
+  [test: tests/test_limits.py::test_login_and_ack_take_no_token_and_a_new_login_keeps_the_bucket]. A Login comes
   before the identity is known. An Ack has no answer that could refuse it, and an Ack that
   is dropped keeps a message on the relay. Acks are therefore not limited: one identity
   can send them without bound, and each makes the relay look up every pair it names.
 - The handout bucket belongs to a target identity. Handing out one of its one-time prekeys
   takes one token, whoever asks. A fetch that finds no token gets the bundle without a
-  one-time prekey and no Error (section 9.3) [pending: task 8].
+  one-time prekey and no Error (section 9.3)
+  [test: tests/test_limits.py::test_fetches_past_the_handout_bucket_leave_the_stored_one_time_prekeys].
 
 Identities are free, so the frame bucket gives fairness between honest clients and bounds
 no attacker: a new identity starts with a full one. The handout bucket is keyed by the
