@@ -7,14 +7,22 @@ from hypothesis import strategies as st
 from relay_harness import build_upload
 
 from sotto.proto.sotto_pb2 import (
+    Ack,
     ClientFrame,
     FetchBundle,
     Login,
+    MessageRef,
     OneTimePrekey,
+    Send,
     SignedPrekey,
     UploadBundle,
 )
-from sotto.relay.frames import MalformedFrameError, ParsedFrame, parse_client_frame
+from sotto.relay.frames import (
+    MAX_PAYLOAD_BYTES,
+    MalformedFrameError,
+    ParsedFrame,
+    parse_client_frame,
+)
 
 UNKNOWN_FIELD = b"\x7a\x03new"
 
@@ -31,10 +39,22 @@ uploads = st.builds(
     one_time_prekeys=st.lists(st.builds(OneTimePrekey, id=ids, key=fields), max_size=3),
 )
 fetches = st.builds(FetchBundle, identity=fields)
+message_ids = st.one_of(st.binary(max_size=24), st.binary(min_size=16, max_size=16))
+sends = st.builds(
+    Send, message_id=message_ids, recipient=fields, payload=st.binary(max_size=8)
+)
+acks = st.builds(
+    Ack,
+    messages=st.lists(
+        st.builds(MessageRef, message_id=message_ids, sender=fields), max_size=3
+    ),
+)
 serialized_frames = st.one_of(
     logins.map(lambda login: ClientFrame(login=login)),
     uploads.map(lambda upload: ClientFrame(upload_bundle=upload)),
     fetches.map(lambda fetch: ClientFrame(fetch_bundle=fetch)),
+    sends.map(lambda send: ClientFrame(send=send)),
+    acks.map(lambda ack: ClientFrame(ack=ack)),
 ).map(lambda frame: frame.SerializeToString())
 damaged_frames = st.tuples(serialized_frames, st.binary(max_size=8), st.integers(0, 200)).map(
     lambda parts: parts[0][: parts[2]] + parts[1] + parts[0][parts[2] :]
@@ -64,6 +84,14 @@ def lengths_of(frame: ParsedFrame) -> list[int]:
             ]
         case FetchBundle():
             return [len(frame.identity)]
+        case Send():
+            return [len(frame.message_id), len(frame.recipient)]
+        case Ack():
+            return [
+                length
+                for message in frame.messages
+                for length in (len(message.message_id), len(message.sender))
+            ]
 
 
 def test_complete_login_is_returned_with_its_fields() -> None:
@@ -174,6 +202,32 @@ def test_upload_without_a_signed_prekey_is_malformed() -> None:
         parse_client_frame(ClientFrame(upload_bundle=upload).SerializeToString())
 
 
+@pytest.mark.parametrize("payload_length", [1, MAX_PAYLOAD_BYTES])
+def test_complete_send_is_returned_with_its_fields(payload_length: int) -> None:
+    send = Send(
+        message_id=os.urandom(16), recipient=os.urandom(32), payload=os.urandom(payload_length)
+    )
+
+    parsed = parse_client_frame(ClientFrame(send=send).SerializeToString())
+
+    assert parsed == send
+
+
+@pytest.mark.parametrize("payload_length", [0, MAX_PAYLOAD_BYTES + 1])
+def test_send_with_a_payload_out_of_bounds_is_malformed(payload_length: int) -> None:
+    send = Send(
+        message_id=os.urandom(16), recipient=os.urandom(32), payload=bytes(payload_length)
+    )
+
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(ClientFrame(send=send).SerializeToString())
+
+
+def test_ack_without_a_pair_is_malformed() -> None:
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(ClientFrame(ack=Ack()).SerializeToString())
+
+
 @pytest.mark.parametrize("length", [0, 31, 33])
 def test_fetch_with_an_identity_of_another_length_is_malformed(length: int) -> None:
     fetch = FetchBundle(identity=os.urandom(length))
@@ -231,8 +285,13 @@ def test_any_bytes_give_a_complete_frame_or_the_protocol_error(message: bytes) -
     except MalformedFrameError:
         return
 
-    expected = {Login: [32, 32, 64], FetchBundle: [32]}.get(type(frame))
+    expected = {Login: [32, 32, 64], FetchBundle: [32], Send: [16, 32]}.get(type(frame))
     if isinstance(frame, UploadBundle):
         assert frame.HasField("signed_prekey")
         expected = [32, 64, 32, 64, *[32] * len(frame.one_time_prekeys)]
+    if isinstance(frame, Send):
+        assert 1 <= len(frame.payload) <= MAX_PAYLOAD_BYTES
+    if isinstance(frame, Ack):
+        assert frame.messages
+        expected = [16, 32] * len(frame.messages)
     assert lengths_of(frame) == expected

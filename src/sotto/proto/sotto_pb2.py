@@ -24,37 +24,47 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bsotto.proto\x12\x05sotto\"\x8f\x01\n\x0b\x43lientFrame\x12\x1d\n\x05login\x18\x01 \x01(\x0b\x32\x0c.sotto.LoginH\x00\x12,\n\rupload_bundle\x18\x02 \x01(\x0b\x32\x13.sotto.UploadBundleH\x00\x12*\n\x0c\x66\x65tch_bundle\x18\x03 \x01(\x0b\x32\x12.sotto.FetchBundleH\x00\x42\x07\n\x05\x66rame\"\xc9\x01\n\x0bServerFrame\x12\x1d\n\x05hello\x18\x01 \x01(\x0b\x32\x0c.sotto.HelloH\x00\x12$\n\tlogged_in\x18\x02 \x01(\x0b\x32\x0f.sotto.LoggedInH\x00\x12,\n\rbundle_stored\x18\x03 \x01(\x0b\x32\x13.sotto.BundleStoredH\x00\x12\x1f\n\x06\x62undle\x18\x04 \x01(\x0b\x32\r.sotto.BundleH\x00\x12\x1d\n\x05\x65rror\x18\x07 \x01(\x0b\x32\x0c.sotto.ErrorH\x00\x42\x07\n\x05\x66rame\"\'\n\x05Hello\x12\x0f\n\x07version\x18\x01 \x01(\r\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"F\n\x05Login\x12\x14\n\x0cidentity_key\x18\x01 \x01(\x0c\x12\x14\n\x0c\x63lient_nonce\x18\x02 \x01(\x0c\x12\x11\n\tsignature\x18\x03 \x01(\x0c\")\n\x08LoggedIn\x12\x1d\n\x15one_time_prekey_count\x18\x01 \x01(\r\":\n\x0cSignedPrekey\x12\n\n\x02id\x18\x01 \x01(\r\x12\x0b\n\x03key\x18\x02 \x01(\x0c\x12\x11\n\tsignature\x18\x03 \x01(\x0c\"(\n\rOneTimePrekey\x12\n\n\x02id\x18\x01 \x01(\r\x12\x0b\n\x03key\x18\x02 \x01(\x0c\"\xa2\x01\n\x0cUploadBundle\x12\x17\n\x0fidentity_dh_key\x18\x01 \x01(\x0c\x12\x1d\n\x15identity_dh_signature\x18\x02 \x01(\x0c\x12*\n\rsigned_prekey\x18\x03 \x01(\x0b\x32\x13.sotto.SignedPrekey\x12.\n\x10one_time_prekeys\x18\x04 \x03(\x0b\x32\x14.sotto.OneTimePrekey\"-\n\x0c\x42undleStored\x12\x1d\n\x15one_time_prekey_count\x18\x01 \x01(\r\"\x1f\n\x0b\x46\x65tchBundle\x12\x10\n\x08identity\x18\x01 \x01(\x0c\"\xad\x01\n\x06\x42undle\x12\x10\n\x08identity\x18\x01 \x01(\x0c\x12\x17\n\x0fidentity_dh_key\x18\x02 \x01(\x0c\x12\x1d\n\x15identity_dh_signature\x18\x03 \x01(\x0c\x12*\n\rsigned_prekey\x18\x04 \x01(\x0b\x32\x13.sotto.SignedPrekey\x12-\n\x0fone_time_prekey\x18\x05 \x01(\x0b\x32\x14.sotto.OneTimePrekey\"M\n\x05\x45rror\x12\x1e\n\x04\x63ode\x18\x01 \x01(\x0e\x32\x10.sotto.ErrorCode\x12\x12\n\nmessage_id\x18\x02 \x01(\x0c\x12\x10\n\x08identity\x18\x03 \x01(\x0c*\xac\x01\n\tErrorCode\x12\x1a\n\x16\x45RROR_CODE_UNSPECIFIED\x10\x00\x12\x15\n\x11UNKNOWN_RECIPIENT\x10\x01\x12\x0e\n\nQUEUE_FULL\x10\x02\x12\x10\n\x0cSTORAGE_FULL\x10\x03\x12\x10\n\x0cRATE_LIMITED\x10\x04\x12\r\n\tNOT_FOUND\x10\x05\x12\x0e\n\nBAD_BUNDLE\x10\x06\x12\x19\n\x15IDENTITY_KEY_MISMATCH\x10\x07\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bsotto.proto\x12\x05sotto\"\xc7\x01\n\x0b\x43lientFrame\x12\x1d\n\x05login\x18\x01 \x01(\x0b\x32\x0c.sotto.LoginH\x00\x12,\n\rupload_bundle\x18\x02 \x01(\x0b\x32\x13.sotto.UploadBundleH\x00\x12*\n\x0c\x66\x65tch_bundle\x18\x03 \x01(\x0b\x32\x12.sotto.FetchBundleH\x00\x12\x1b\n\x04send\x18\x04 \x01(\x0b\x32\x0b.sotto.SendH\x00\x12\x19\n\x03\x61\x63k\x18\x05 \x01(\x0b\x32\n.sotto.AckH\x00\x42\x07\n\x05\x66rame\"\x8d\x02\n\x0bServerFrame\x12\x1d\n\x05hello\x18\x01 \x01(\x0b\x32\x0c.sotto.HelloH\x00\x12$\n\tlogged_in\x18\x02 \x01(\x0b\x32\x0f.sotto.LoggedInH\x00\x12,\n\rbundle_stored\x18\x03 \x01(\x0b\x32\x13.sotto.BundleStoredH\x00\x12\x1f\n\x06\x62undle\x18\x04 \x01(\x0b\x32\r.sotto.BundleH\x00\x12\x1f\n\x06stored\x18\x05 \x01(\x0b\x32\r.sotto.StoredH\x00\x12!\n\x07\x64\x65liver\x18\x06 \x01(\x0b\x32\x0e.sotto.DeliverH\x00\x12\x1d\n\x05\x65rror\x18\x07 \x01(\x0b\x32\x0c.sotto.ErrorH\x00\x42\x07\n\x05\x66rame\"\'\n\x05Hello\x12\x0f\n\x07version\x18\x01 \x01(\r\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"F\n\x05Login\x12\x14\n\x0cidentity_key\x18\x01 \x01(\x0c\x12\x14\n\x0c\x63lient_nonce\x18\x02 \x01(\x0c\x12\x11\n\tsignature\x18\x03 \x01(\x0c\")\n\x08LoggedIn\x12\x1d\n\x15one_time_prekey_count\x18\x01 \x01(\r\":\n\x0cSignedPrekey\x12\n\n\x02id\x18\x01 \x01(\r\x12\x0b\n\x03key\x18\x02 \x01(\x0c\x12\x11\n\tsignature\x18\x03 \x01(\x0c\"(\n\rOneTimePrekey\x12\n\n\x02id\x18\x01 \x01(\r\x12\x0b\n\x03key\x18\x02 \x01(\x0c\"\xa2\x01\n\x0cUploadBundle\x12\x17\n\x0fidentity_dh_key\x18\x01 \x01(\x0c\x12\x1d\n\x15identity_dh_signature\x18\x02 \x01(\x0c\x12*\n\rsigned_prekey\x18\x03 \x01(\x0b\x32\x13.sotto.SignedPrekey\x12.\n\x10one_time_prekeys\x18\x04 \x03(\x0b\x32\x14.sotto.OneTimePrekey\"-\n\x0c\x42undleStored\x12\x1d\n\x15one_time_prekey_count\x18\x01 \x01(\r\"\x1f\n\x0b\x46\x65tchBundle\x12\x10\n\x08identity\x18\x01 \x01(\x0c\"\xad\x01\n\x06\x42undle\x12\x10\n\x08identity\x18\x01 \x01(\x0c\x12\x17\n\x0fidentity_dh_key\x18\x02 \x01(\x0c\x12\x1d\n\x15identity_dh_signature\x18\x03 \x01(\x0c\x12*\n\rsigned_prekey\x18\x04 \x01(\x0b\x32\x13.sotto.SignedPrekey\x12-\n\x0fone_time_prekey\x18\x05 \x01(\x0b\x32\x14.sotto.OneTimePrekey\">\n\x04Send\x12\x12\n\nmessage_id\x18\x01 \x01(\x0c\x12\x11\n\trecipient\x18\x02 \x01(\x0c\x12\x0f\n\x07payload\x18\x03 \x01(\x0c\"\x1c\n\x06Stored\x12\x12\n\nmessage_id\x18\x01 \x01(\x0c\">\n\x07\x44\x65liver\x12\x12\n\nmessage_id\x18\x01 \x01(\x0c\x12\x0e\n\x06sender\x18\x02 \x01(\x0c\x12\x0f\n\x07payload\x18\x03 \x01(\x0c\"0\n\nMessageRef\x12\x12\n\nmessage_id\x18\x01 \x01(\x0c\x12\x0e\n\x06sender\x18\x02 \x01(\x0c\"*\n\x03\x41\x63k\x12#\n\x08messages\x18\x01 \x03(\x0b\x32\x11.sotto.MessageRef\"M\n\x05\x45rror\x12\x1e\n\x04\x63ode\x18\x01 \x01(\x0e\x32\x10.sotto.ErrorCode\x12\x12\n\nmessage_id\x18\x02 \x01(\x0c\x12\x10\n\x08identity\x18\x03 \x01(\x0c*\xac\x01\n\tErrorCode\x12\x1a\n\x16\x45RROR_CODE_UNSPECIFIED\x10\x00\x12\x15\n\x11UNKNOWN_RECIPIENT\x10\x01\x12\x0e\n\nQUEUE_FULL\x10\x02\x12\x10\n\x0cSTORAGE_FULL\x10\x03\x12\x10\n\x0cRATE_LIMITED\x10\x04\x12\r\n\tNOT_FOUND\x10\x05\x12\x0e\n\nBAD_BUNDLE\x10\x06\x12\x19\n\x15IDENTITY_KEY_MISMATCH\x10\x07\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'sotto_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_ERRORCODE']._serialized_start=1131
-  _globals['_ERRORCODE']._serialized_end=1303
+  _globals['_ERRORCODE']._serialized_start=1507
+  _globals['_ERRORCODE']._serialized_end=1679
   _globals['_CLIENTFRAME']._serialized_start=23
-  _globals['_CLIENTFRAME']._serialized_end=166
-  _globals['_SERVERFRAME']._serialized_start=169
-  _globals['_SERVERFRAME']._serialized_end=370
-  _globals['_HELLO']._serialized_start=372
-  _globals['_HELLO']._serialized_end=411
-  _globals['_LOGIN']._serialized_start=413
-  _globals['_LOGIN']._serialized_end=483
-  _globals['_LOGGEDIN']._serialized_start=485
-  _globals['_LOGGEDIN']._serialized_end=526
-  _globals['_SIGNEDPREKEY']._serialized_start=528
-  _globals['_SIGNEDPREKEY']._serialized_end=586
-  _globals['_ONETIMEPREKEY']._serialized_start=588
-  _globals['_ONETIMEPREKEY']._serialized_end=628
-  _globals['_UPLOADBUNDLE']._serialized_start=631
-  _globals['_UPLOADBUNDLE']._serialized_end=793
-  _globals['_BUNDLESTORED']._serialized_start=795
-  _globals['_BUNDLESTORED']._serialized_end=840
-  _globals['_FETCHBUNDLE']._serialized_start=842
-  _globals['_FETCHBUNDLE']._serialized_end=873
-  _globals['_BUNDLE']._serialized_start=876
-  _globals['_BUNDLE']._serialized_end=1049
-  _globals['_ERROR']._serialized_start=1051
-  _globals['_ERROR']._serialized_end=1128
+  _globals['_CLIENTFRAME']._serialized_end=222
+  _globals['_SERVERFRAME']._serialized_start=225
+  _globals['_SERVERFRAME']._serialized_end=494
+  _globals['_HELLO']._serialized_start=496
+  _globals['_HELLO']._serialized_end=535
+  _globals['_LOGIN']._serialized_start=537
+  _globals['_LOGIN']._serialized_end=607
+  _globals['_LOGGEDIN']._serialized_start=609
+  _globals['_LOGGEDIN']._serialized_end=650
+  _globals['_SIGNEDPREKEY']._serialized_start=652
+  _globals['_SIGNEDPREKEY']._serialized_end=710
+  _globals['_ONETIMEPREKEY']._serialized_start=712
+  _globals['_ONETIMEPREKEY']._serialized_end=752
+  _globals['_UPLOADBUNDLE']._serialized_start=755
+  _globals['_UPLOADBUNDLE']._serialized_end=917
+  _globals['_BUNDLESTORED']._serialized_start=919
+  _globals['_BUNDLESTORED']._serialized_end=964
+  _globals['_FETCHBUNDLE']._serialized_start=966
+  _globals['_FETCHBUNDLE']._serialized_end=997
+  _globals['_BUNDLE']._serialized_start=1000
+  _globals['_BUNDLE']._serialized_end=1173
+  _globals['_SEND']._serialized_start=1175
+  _globals['_SEND']._serialized_end=1237
+  _globals['_STORED']._serialized_start=1239
+  _globals['_STORED']._serialized_end=1267
+  _globals['_DELIVER']._serialized_start=1269
+  _globals['_DELIVER']._serialized_end=1331
+  _globals['_MESSAGEREF']._serialized_start=1333
+  _globals['_MESSAGEREF']._serialized_end=1381
+  _globals['_ACK']._serialized_start=1383
+  _globals['_ACK']._serialized_end=1425
+  _globals['_ERROR']._serialized_start=1427
+  _globals['_ERROR']._serialized_end=1504
 # @@protoc_insertion_point(module_scope)

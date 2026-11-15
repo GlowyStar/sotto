@@ -2,6 +2,8 @@
 
 import logging
 import os
+import sqlite3
+import time
 from collections.abc import AsyncIterator
 from contextlib import closing
 from dataclasses import replace
@@ -13,13 +15,19 @@ from websockets.asyncio.server import ServerConnection
 
 from sotto.crypto.identity import derive_identity_key
 from sotto.proto.sotto_pb2 import (
+    Ack,
     ClientFrame,
+    Deliver,
     Error,
     ErrorCode,
     FetchBundle,
+    MessageRef,
+    Send,
     ServerFrame,
+    Stored,
 )
 from sotto.relay import storage as storage_module
+from sotto.relay.frames import MAX_PAYLOAD_BYTES
 from sotto.relay.server import Relay
 from sotto.relay.settings import Settings
 from sotto.relay.storage import Storage
@@ -27,7 +35,7 @@ from sotto.relay.storage import Storage
 # Sent by the WebSocket library when the handler of a connection raises.
 INTERNAL_ERROR = 1011
 PAGE_BYTES = 4096
-# The empty tables take 4 pages and an upload of 100 one-time prekeys takes 3 or 4.
+# The empty schema takes 8 pages and an upload of 100 one-time prekeys takes 3 or 4.
 FEW_PAGES = 12
 NOT_FOUND = ErrorCode.NOT_FOUND
 
@@ -36,10 +44,31 @@ def files_of(settings: Settings) -> list[str]:
     return sorted(path.name for path in settings.database.parent.iterdir())
 
 
+def messages_in(settings: Settings) -> list[tuple[bytes, bytes, bytes, bytes, int]]:
+    """Reads the queued messages from the file, beside the connection of a running relay."""
+    with closing(sqlite3.connect(settings.database)) as database:
+        rows = database.execute(
+            "SELECT sender, recipient, message_id, payload, stored_at FROM messages"
+        ).fetchall()
+    return rows
+
+
+def ack_of(deliver: Deliver) -> ClientFrame:
+    pair = MessageRef(message_id=deliver.message_id, sender=deliver.sender)
+    return ClientFrame(ack=Ack(messages=[pair]))
+
+
 async def log_in(open_client: OpenClient, url: str, seed: bytes) -> RawClient:
     client = await open_client(url)
     answer = await client.log_in(seed)
     assert answer.WhichOneof("frame") == "logged_in"
+    return client
+
+
+async def register(open_client: OpenClient, url: str, seed: bytes) -> RawClient:
+    client = await log_in(open_client, url, seed)
+    answer = await client.ask(build_upload(seed))
+    assert answer.WhichOneof("frame") == "bundle_stored"
     return client
 
 
@@ -232,3 +261,174 @@ async def test_bundle_is_sent_after_the_commit_that_deleted_its_one_time_prekey(
     await relay.serve_logged_in(cast(ServerConnection, Connection()), os.urandom(32))
 
     assert states_at_each_send == [("logged_in", False, 2), ("bundle", False, 1)]
+
+
+async def test_message_is_one_row_until_its_recipient_acks_it(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    sender_seed, recipient_seed = os.urandom(32), os.urandom(32)
+    sender_key, recipient_key = (
+        derive_identity_key(sender_seed),
+        derive_identity_key(recipient_seed),
+    )
+    send = Send(message_id=os.urandom(16), recipient=recipient_key, payload=os.urandom(100))
+    lookup = FetchBundle(identity=recipient_key)
+
+    async with running_relay(settings) as url:
+        recipient = await register(open_client, url, recipient_seed)
+        someone = await log_in(open_client, url, os.urandom(32))
+        sender = await log_in(open_client, url, sender_seed)
+        earliest = int(time.time())
+        await sender.ask(send)
+        await sender.ask(send)
+        latest = int(time.time())
+        rows_after_the_repeat = messages_in(settings)
+        deliver = (await recipient.receive()).deliver
+        await someone.send(ack_of(deliver))
+        await someone.ask(lookup)
+        rows_after_an_ack_of_someone_else = messages_in(settings)
+        await recipient.send(ack_of(deliver))
+        await recipient.ask(lookup)
+        rows_after_the_ack = messages_in(settings)
+
+    [(*row, stored_at)] = rows_after_the_repeat
+    assert row == [sender_key, recipient_key, send.message_id, send.payload]
+    assert earliest <= stored_at <= latest
+    assert rows_after_an_ack_of_someone_else == rows_after_the_repeat
+    assert rows_after_the_ack == []
+
+
+async def test_stored_is_sent_after_the_commit_of_the_message(
+    settings: Settings, storage: Storage
+) -> None:
+    seed = os.urandom(32)
+    recipient = derive_identity_key(seed)
+    storage.store_bundle(recipient, build_upload(seed), cap=100)
+    send = Send(message_id=os.urandom(16), recipient=recipient, payload=os.urandom(100))
+    relay = Relay(settings, storage)
+    states_at_each_send = []
+
+    class Connection:
+        """What `serve_logged_in` uses of a connection that sends one Send."""
+
+        logger = logging.getLogger("websockets.server")
+
+        async def send(self, message: bytes) -> None:
+            frame = ServerFrame.FromString(message).WhichOneof("frame")
+            rows = storage.connection.execute("SELECT count(*) FROM messages").fetchone()[0]
+            states_at_each_send.append((frame, storage.connection.in_transaction, rows))
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield ClientFrame(send=send).SerializeToString()
+
+    await relay.serve_logged_in(cast(ServerConnection, Connection()), os.urandom(32))
+
+    assert states_at_each_send == [("logged_in", False, 0), ("stored", False, 1)]
+
+
+async def test_relay_restarted_on_the_same_file_delivers_the_queued_message(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    sender_seed, recipient_seed = os.urandom(32), os.urandom(32)
+    recipient_key = derive_identity_key(recipient_seed)
+    send = Send(message_id=os.urandom(16), recipient=recipient_key, payload=os.urandom(100))
+
+    async with running_relay(settings) as url:
+        await (await register(open_client, url, recipient_seed)).websocket.close()
+        sender = await log_in(open_client, url, sender_seed)
+        answer = await sender.ask(send)
+
+    async with running_relay(settings) as url:
+        recipient = await log_in(open_client, url, recipient_seed)
+        delivery = await recipient.receive()
+
+    assert answer == ServerFrame(stored=Stored(message_id=send.message_id))
+    assert delivery.deliver == Deliver(
+        message_id=send.message_id,
+        sender=derive_identity_key(sender_seed),
+        payload=send.payload,
+    )
+
+
+async def test_send_into_a_full_database_answers_storage_full_and_stores_nothing(
+    settings: Settings, open_client: OpenClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    recipient_seed = os.urandom(32)
+    recipient_key = derive_identity_key(recipient_seed)
+    # The payload alone needs 16 pages.
+    too_large = Send(
+        message_id=os.urandom(16), recipient=recipient_key, payload=bytes(MAX_PAYLOAD_BYTES)
+    )
+    small = Send(message_id=os.urandom(16), recipient=recipient_key, payload=os.urandom(100))
+
+    async with running_relay(replace(settings, max_pages=FEW_PAGES)) as url:
+        await register(open_client, url, recipient_seed)
+        sender = await log_in(open_client, url, os.urandom(32))
+        refused = await sender.ask(too_large)
+        rows_after_the_refusal = messages_in(settings)
+        accepted = await sender.ask(small)
+
+    assert refused == ServerFrame(
+        error=Error(code=ErrorCode.STORAGE_FULL, message_id=too_large.message_id)
+    )
+    assert rows_after_the_refusal == []
+    assert accepted == ServerFrame(stored=Stored(message_id=small.message_id))
+    assert caplog.messages.count("the database is full") == 1
+
+
+async def test_failed_send_closes_with_1011_and_the_relay_serves_on(
+    settings: Settings,
+    open_client: OpenClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recipient_seed = os.urandom(32)
+    recipient_key = derive_identity_key(recipient_seed)
+    send = Send(message_id=os.urandom(16), recipient=recipient_key, payload=os.urandom(100))
+    monkeypatch.setattr(
+        storage_module, "STORE_MESSAGE", "INSERT INTO no_such_table VALUES (?, ?, ?, ?, ?)"
+    )
+
+    async with running_relay(settings) as url:
+        await register(open_client, url, recipient_seed)
+        sender = await log_in(open_client, url, os.urandom(32))
+        await sender.send(ClientFrame(send=send))
+        closing_of_the_sender = await sender.frames_until_close()
+        rows_after_the_failure = messages_in(settings)
+        monkeypatch.undo()
+        sender_again = await log_in(open_client, url, os.urandom(32))
+        retry = await sender_again.ask(send)
+
+    failures = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert closing_of_the_sender == ([], INTERNAL_ERROR)
+    assert [failure.getMessage() for failure in failures] == ["connection handler failed"]
+    assert rows_after_the_failure == []
+    assert retry == ServerFrame(stored=Stored(message_id=send.message_id))
+
+
+async def test_failed_delivery_closes_with_1011_and_the_message_stays_queued(
+    settings: Settings,
+    open_client: OpenClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sender_seed, recipient_seed = os.urandom(32), os.urandom(32)
+    recipient_key = derive_identity_key(recipient_seed)
+    send = Send(message_id=os.urandom(16), recipient=recipient_key, payload=os.urandom(100))
+    no_table = "SELECT * FROM no_such_table WHERE ? AND ?"
+
+    async with running_relay(settings) as url:
+        await (await register(open_client, url, recipient_seed)).websocket.close()
+        sender = await log_in(open_client, url, sender_seed)
+        await sender.ask(send)
+        monkeypatch.setattr(storage_module, "READ_NEXT_MESSAGE", no_table)
+        recipient = await log_in(open_client, url, recipient_seed)
+        closing_of_the_recipient = await recipient.frames_until_close()
+        monkeypatch.undo()
+        recipient_again = await log_in(open_client, url, recipient_seed)
+        delivery = await recipient_again.receive()
+
+    failures = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert closing_of_the_recipient == ([], INTERNAL_ERROR)
+    assert [failure.getMessage() for failure in failures] == ["connection handler failed"]
+    assert delivery.deliver.message_id == send.message_id
