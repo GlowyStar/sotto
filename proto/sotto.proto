@@ -9,6 +9,8 @@ package sotto;
 message ClientFrame {
   oneof frame {
     Login login = 1;
+    UploadBundle upload_bundle = 2;
+    FetchBundle fetch_bundle = 3;
   }
 }
 
@@ -17,6 +19,8 @@ message ServerFrame {
   oneof frame {
     Hello hello = 1;
     LoggedIn logged_in = 2;
+    BundleStored bundle_stored = 3;
+    Bundle bundle = 4;
     Error error = 7;
   }
 }
@@ -34,6 +38,40 @@ message Login {
 
 message LoggedIn {
   uint32 one_time_prekey_count = 1;
+}
+
+message SignedPrekey {
+  uint32 id = 1;
+  bytes key = 2;
+  bytes signature = 3;
+}
+
+message OneTimePrekey {
+  uint32 id = 1;
+  bytes key = 2;
+}
+
+message UploadBundle {
+  bytes identity_dh_key = 1;
+  bytes identity_dh_signature = 2;
+  SignedPrekey signed_prekey = 3;
+  repeated OneTimePrekey one_time_prekeys = 4;
+}
+
+message BundleStored {
+  uint32 one_time_prekey_count = 1;
+}
+
+message FetchBundle {
+  bytes identity = 1;
+}
+
+message Bundle {
+  bytes identity = 1;
+  bytes identity_dh_key = 2;
+  bytes identity_dh_signature = 3;
+  SignedPrekey signed_prekey = 4;
+  OneTimePrekey one_time_prekey = 5;
 }
 
 enum ErrorCode {

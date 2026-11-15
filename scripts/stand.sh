@@ -5,6 +5,7 @@ project="${1:?usage: scripts/stand.sh <compose project name>}"
 cd "$(dirname "$0")/.."
 
 export RELAY_PORT="${RELAY_PORT:-8765}"
+export RELAY_URL="ws://127.0.0.1:${RELAY_PORT}"
 compose=(docker compose -p "$project")
 
 finish() {
@@ -16,7 +17,12 @@ finish() {
 trap finish EXIT
 
 "${compose[@]}" up --build -d --wait --wait-timeout 60
-RELAY_URL="ws://127.0.0.1:${RELAY_PORT}" uv run pytest -m stand
+uv run pytest -m stand
+
+# What the tests above stored outlives the relay process because the database is on a volume.
+"${compose[@]}" restart relay
+"${compose[@]}" up -d --wait --wait-timeout 60
+uv run pytest -m stand_after_restart
 
 uid="$("${compose[@]}" exec -T relay id -u)"
 [ "${uid:-0}" != 0 ] || { echo "the relay runs as root" >&2; exit 1; }

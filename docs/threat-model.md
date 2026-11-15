@@ -64,7 +64,7 @@ Someone on the path between a client and the relay.
   the recipients of its messages and a false Stored included. Of the content it reads
   only ciphertext, and it cannot replace the victim's X25519 identity key or signed prekey
   with keys of its own, because those need a signature of the identity
-  [pending: task 5]. That the ciphertext stays closed rests on the key agreement and the
+  [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]. That the ciphertext stays closed rests on the key agreement and the
   ratchet (protocol, sections 16 to 18) [pending: task 10] [pending: task 11].
 
 ### An abuser with free identities
@@ -81,7 +81,8 @@ identities as it wants, and each of them logs in like any other.
 - One identity cannot act for another through the relay of this repository: an Ack deletes
   only messages queued for the acking identity [pending: task 6], the sender of a message
   is the identity of the connection and not a field of the frame [pending: task 6], and an
-  upload changes only the bundle of the identity that is logged in [pending: task 5].
+  upload changes only the bundle of the identity that is logged in
+  [test: tests/test_bundles.py::test_upload_changes_only_the_bundle_of_its_own_identity].
 
 ## What the relay learns
 
@@ -115,7 +116,8 @@ The relay does not learn the content of a message: it holds no key that opens a 
 
 What the relay of this repository writes down, run unchanged:
 
-- The database holds the bundle of every registered identity [pending: task 5] and every
+- The database holds the bundle of every registered identity
+  [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_serves_the_bundle] and every
   queued message with its sender, recipient, message id, payload and time of storing
   [pending: task 6].
 - A message leaves the database when its recipient acks it or when it expires. "Deleted

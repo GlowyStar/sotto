@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 5 to 8 or 10 to 14, of the task of the project plan that brings it.
+  gives the number, 6 to 8 or 10 to 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -265,7 +265,8 @@ applies steps 3 and 4 of section 3.3 to the identity key of a Login and refuses 
 when either fails (section 8.3). It applies no such check to the recipient of a Send or to
 the identity of a FetchBundle: a key that those steps exclude cannot log in, so it is
 never registered and the frame gets the answer for an identity that is not registered
-[pending: task 5] [pending: task 6].
+[test: tests/test_bundles.py::test_fetch_for_an_identity_that_is_not_registered_answers_not_found]
+[pending: task 6].
 
 ## 4. Signed strings
 
@@ -417,9 +418,11 @@ A signature over an X25519 identity key has no expiry, so the key it covers does
 change for the life of the identity.
 
 - The relay keeps the X25519 identity key of the first accepted upload of an identity and
-  refuses every later upload that carries another one with IDENTITY_KEY_MISMATCH. It
-  compares the 32 bytes of the key, not the signature (section 4.1, rule 5), and keeps the
-  signature of the first upload [pending: task 5].
+  refuses every later upload that carries another one with IDENTITY_KEY_MISMATCH
+  [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing].
+  It compares the 32 bytes of the key, not the signature (section 4.1, rule 5), and keeps
+  the signature of the first upload
+  [test: tests/test_storage.py::test_same_key_under_another_signature_is_stored_and_keeps_the_first_signature].
 - A client pins the X25519 identity key of a contact in the transaction that stores its
   first session with that contact: the key of a bundle that passed the checks of
   section 5.4, when the client made the session (section 16.6), or the key of the initial
@@ -469,8 +472,9 @@ request on any path but `/ws` gets the plain answer of that path
 
 `/healthz` says that the process accepts connections and asks for no credentials
 [test: tests/test_routing.py::test_healthz_answers_200]. Its body is a fixed text that
-does not depend on the request, on a client or on the database [pending: task 5]. The
-WebSocket port serves no metrics [pending: task 8].
+does not depend on the request, on a client or on the database
+[test: tests/test_routing.py::test_healthz_body_is_the_same_for_every_request_and_after_an_upload].
+The WebSocket port serves no metrics [pending: task 8].
 
 ### 6.2 Binary frames only
 
@@ -722,8 +726,9 @@ Rules of state for the relay:
   connection [test: tests/test_login.py::test_frames_sent_with_the_login_are_handled_after_it].
   A Deliver is not an answer and can arrive between any two other frames that follow the
   LoggedIn [pending: task 6].
-- Every UploadBundle and FetchBundle gets exactly one answer [pending: task 5], and so
-  does every Send [pending: task 6].
+- Every UploadBundle and FetchBundle gets exactly one answer
+  [test: tests/test_bundles.py::test_every_upload_and_fetch_gets_one_answer_in_the_order_of_the_requests],
+  and so does every Send [pending: task 6].
 
 Rules of state for a client [pending: task 14]:
 
@@ -780,7 +785,8 @@ Rules of state for a client [pending: task 14]:
 - Sent by the relay once, when it accepted the Login
   [test: tests/test_login.py::test_login_is_accepted]
   [test: tests/test_login.py::test_second_login_on_a_connection_closes_with_1008]. The count
-  is that of section 9.4 [pending: task 5].
+  is that of section 9.4
+  [test: tests/test_bundles.py::test_counts_of_logged_in_and_bundle_stored_follow_the_stored_one_time_prekeys].
 - No answer.
 - Violations, seen by the client: a second LoggedIn, or one that arrives before the client
   sent its Login, is a malformed frame (section 7.4).
@@ -803,9 +809,12 @@ Rules of state for a client [pending: task 14]:
   (section 9.1).
 - Valid answers: BundleStored; or Error with RATE_LIMITED, BAD_BUNDLE,
   IDENTITY_KEY_MISMATCH or STORAGE_FULL, with no key field set (section 7.16).
-- Violations [pending: task 5]: a malformed UploadBundle closes with 1008, a wrong length
-  of a key or a signature included; an UploadBundle before login closes with 1008.
-  Section 9.1 has the full rules.
+- Violations: a malformed UploadBundle closes with 1008, a wrong length of a key or a
+  signature included
+  [test: tests/test_bundles.py::test_malformed_upload_closes_with_1008_and_stores_nothing];
+  an UploadBundle before login closes with 1008
+  [test: tests/test_login.py::test_frame_before_login_closes_with_1008]. Section 9.1 has the
+  full rules.
 
 ### 7.9 BundleStored
 
@@ -813,7 +822,8 @@ Rules of state for a client [pending: task 14]:
 |-------------------------|-----|--------|--------------------------------------------------------------|
 | `one_time_prekey_count` | 1   | uint32 | The number of one-time prekeys the relay holds for the identity after the upload |
 
-- Sent by the relay as the answer to an accepted UploadBundle [pending: task 5].
+- Sent by the relay as the answer to an accepted UploadBundle
+  [test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte].
 - No answer.
 - Violations, seen by the client: none of a field. A BundleStored that answers no
   UploadBundle of the connection is ignored (section 7.4).
@@ -827,8 +837,10 @@ Rules of state for a client [pending: task 14]:
 - Sent by a logged-in client.
 - Valid answers: Bundle; or Error with RATE_LIMITED or NOT_FOUND, with `identity` set to
   the `identity` of the request (section 7.16).
-- Violations [pending: task 5]: a malformed FetchBundle closes with 1008; a FetchBundle
-  before login closes with 1008. Section 9.2 has the full rules.
+- Violations: a malformed FetchBundle closes with 1008
+  [test: tests/test_bundles.py::test_malformed_fetch_closes_with_1008]; a FetchBundle before login
+  closes with 1008 [test: tests/test_login.py::test_frame_before_login_closes_with_1008].
+  Section 9.2 has the full rules.
 
 ### 7.11 Bundle
 
@@ -841,7 +853,7 @@ Rules of state for a client [pending: task 14]:
 | `one_time_prekey`         | 5   | OneTimePrekey | present or absent; `key` 32 when present       |
 
 - Sent by the relay as the answer to a FetchBundle for a registered identity
-  [pending: task 5].
+  [test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte].
 - No answer. The client runs the checks of section 5.4.
 - Violations, seen by the client: a wrong length or an absent `signed_prekey` is a
   malformed frame.
@@ -913,10 +925,12 @@ so that every stored payload fits into a Deliver.
 | `identity`   | 3   | bytes     | 32 when the refused frame is a FetchBundle, its `identity`; otherwise empty |
 
 - Sent by the relay as the answer to a Send, an UploadBundle or a FetchBundle that it
-  refuses. The connection stays open [pending: task 5].
+  refuses. The connection stays open
+  [test: tests/test_bundles.py::test_refused_frames_get_an_error_with_their_key_and_the_connection_goes_on].
 - The key fields tell the client which frame was refused: `message_id` set means a Send,
   `identity` set means a FetchBundle, neither set means an UploadBundle
-  [pending: task 5] [pending: task 6]. Answers arrive in the order of their requests
+  [test: tests/test_bundles.py::test_refused_frames_get_an_error_with_their_key_and_the_connection_goes_on]
+  [pending: task 6]. Answers arrive in the order of their requests
   (section 7.4), which tells two requests with one key apart.
 - No answer.
 - Violations, seen by the client: a `message_id` that is neither empty nor 16 bytes, an
@@ -1023,7 +1037,8 @@ an identity that has a live connection, the relay closes the older connection wi
 code 4001 and serves the newer one
 [test: tests/test_login.py::test_every_login_of_an_identity_replaces_the_one_before]. From
 that login on, the relay handles no further frame of the older connection
-[test: tests/test_connection.py::test_frame_of_a_replaced_connection_is_not_handled] and sends
+[test: tests/test_connection.py::test_frame_of_a_replaced_connection_is_not_handled]
+[test: tests/test_connection.py::test_upload_of_a_replaced_connection_stores_nothing] and sends
 it nothing but the close
 [test: tests/test_login.py::test_every_login_of_an_identity_replaces_the_one_before].
 
@@ -1060,7 +1075,7 @@ first login plus a bundle upload.
 ### 9.1 Upload
 
 The relay handles a well-formed UploadBundle of a logged-in connection in this order
-[pending: task 5]:
+[test: tests/test_bundles.py::test_upload_checks_stop_at_the_first_that_fails]:
 
 1. It takes a token from the frame bucket of the identity (section 12.2). Without a token
    the answer is Error RATE_LIMITED [pending: task 8].
@@ -1079,8 +1094,11 @@ The relay handles a well-formed UploadBundle of a logged-in connection in this o
    3. The signed prekey of the frame, with its id and its signature, replaces the stored
       one.
    4. The one-time prekeys are taken in the order of the frame. One whose id is already
-      stored for the identity is skipped. One is stored while the identity has fewer than
-      ONE_TIME_PREKEY_CAP stored. The rest are dropped.
+      stored for the identity is skipped
+      [test: tests/test_bundles.py::test_later_upload_replaces_the_signed_prekey_and_keeps_the_first_identity_dh_key].
+      One is stored while the identity has fewer than ONE_TIME_PREKEY_CAP stored. The rest
+      are dropped
+      [test: tests/test_bundles.py::test_one_time_prekeys_are_stored_in_the_order_of_the_frame_up_to_the_cap].
    5. When the transaction fails because the database is at its page ceiling
       (section 12), it is rolled back, the answer is Error STORAGE_FULL and nothing of the
       frame is stored.
@@ -1095,7 +1113,8 @@ the room it has from the counts of LoggedIn and BundleStored and from ONE_TIME_P
 
 The relay keeps no record of the one-time prekeys it handed out. One that is uploaded
 again after it was handed out is stored again and handed out a second time
-[pending: task 5]. A client therefore MUST NOT upload a one-time prekey a second time,
+[test: tests/test_bundles.py::test_one_time_prekey_uploaded_again_after_its_handout_is_handed_out_again].
+A client therefore MUST NOT upload a one-time prekey a second time,
 unless the relay refused the frame that carried it with an Error: after an UploadBundle
 that got no answer, the client counts the one-time prekeys of that frame as uploaded
 [pending: task 13]. The other fields of an UploadBundle are safe to repeat.
@@ -1103,7 +1122,8 @@ that got no answer, the client counts the one-time prekeys of that frame as uplo
 ### 9.2 Fetch
 
 The relay handles a well-formed FetchBundle of a logged-in connection in this order
-[pending: task 5]:
+[test: tests/test_bundles.py::test_fetch_for_an_identity_that_is_not_registered_answers_not_found]
+[test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte]:
 
 1. It takes a token from the frame bucket of the requesting identity. Without a token the
    answer is Error RATE_LIMITED [pending: task 8].
@@ -1115,33 +1135,43 @@ The relay handles a well-formed FetchBundle of a logged-in connection in this or
 
 Any logged-in identity can fetch the bundle of any registered identity, its own included.
 The relay returns the stored bytes of every key and signature unchanged
-[pending: task 5].
+[test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte].
 
 ### 9.3 The handout of a one-time prekey
 
 A fetched bundle carries at most one one-time prekey, and a one-time prekey is handed out
-at most once [pending: task 5].
+at most once
+[test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
 
 1. When the handout bucket of the target identity (section 12.2) has no token, the bundle
    goes out without a one-time prekey and the stored ones stay untouched
    [pending: task 8].
 2. Otherwise the relay takes the one-time prekey of the target that was stored first and
-   deletes it in the same transaction that reads it. The bundle is sent after the commit
-   [pending: task 5].
+   deletes it in the same transaction that reads it
+   [test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
+   The bundle is sent after the commit
+   [test: tests/test_storage.py::test_bundle_is_sent_after_the_commit_that_deleted_its_one_time_prekey].
+   When the deletion cannot be written because the database or the disk is full
+   (section 12.3), it is rolled back, the bundle goes out without a one-time prekey and the
+   stored ones stay untouched
+   [test: tests/test_storage.py::test_fetch_whose_handout_cannot_be_written_gets_the_bundle_without_one].
 3. When step 2 handed out a key, one token is taken from the handout bucket of the target.
    When the target has no one-time prekey stored, the bundle goes out without one and no
    token is taken [pending: task 8].
 
 A fetch never fails for lack of a one-time prekey: a registered identity always gets a
-Bundle [pending: task 5]. A bundle without a one-time prekey still starts a session
+Bundle [test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
+A bundle without a one-time prekey still starts a session
 (section 16.6) [pending: task 10].
 
 ### 9.4 The count of one-time prekeys
 
 LoggedIn and BundleStored carry the number of one-time prekeys that the relay holds for
-the identity at that moment [pending: task 5]. A client uses it to decide when to upload
-more (section 21.3) [pending: task 14]. The relay sends no other notice when the number
-falls [pending: task 5].
+the identity at that moment
+[test: tests/test_bundles.py::test_counts_of_logged_in_and_bundle_stored_follow_the_stored_one_time_prekeys].
+A client uses it to decide when to upload more (section 21.3) [pending: task 14]. The relay
+sends no other notice when the number falls
+[test: tests/test_bundles.py::test_owner_gets_no_notice_when_a_one_time_prekey_is_handed_out].
 
 ## 10. Messages
 
@@ -1304,14 +1334,19 @@ section 7.1.
 | IDENTITY_KEY_MISMATCH | 7   | UploadBundle                     | The relay holds another X25519 identity key for the identity       | Stop     |
 
 - A refused frame stored nothing and deleted nothing at the relay
-  [pending: task 5] [pending: task 6].
+  [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]
+  [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on]
+  [pending: task 6].
 - Stop applies to the refused frame only: the connection and the other frames go on.
 - BAD_BUNDLE and IDENTITY_KEY_MISMATCH are also results of the client's own checks of a
   fetched bundle (sections 5.4 and 11.4).
 - A code that a client does not know is handled as Stop for the refused frame.
 
 The relay sends each code under the stated condition and no other
-[pending: task 5] [pending: task 6] [pending: task 8].
+[test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]
+[test: tests/test_bundles.py::test_fetch_for_an_identity_that_is_not_registered_answers_not_found]
+[test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on]
+[pending: task 6] [pending: task 8].
 
 ### 11.3 Close codes
 
@@ -1439,7 +1474,11 @@ protected").
   not. A Send that would go over either gets QUEUE_FULL (section 10.2).
 - ONE_TIME_PREKEY_CAP bounds what an upload stores (section 9.1).
 - MAX_PAGES bounds the database file. A write that needs a page above it fails, the relay
-  answers STORAGE_FULL and stays up [pending: task 5].
+  answers STORAGE_FULL and stays up
+  [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on].
+  The ceiling does not bound the write-ahead log (section 13.2). A write that fails
+  because the disk is full is the same failure to the relay and gets the same answer; no
+  test covers a full disk.
 
 ## 13. Erasure on the relay
 
@@ -1471,7 +1510,9 @@ How the relay gets there [pending: task 7]:
 - A sweep runs every SWEEP_INTERVAL_SECONDS while the relay runs. Between the deletion
   and the next sweep the bytes can be read from the log file.
 - On an orderly shutdown the relay closes the database, which runs a last checkpoint and
-  removes the log file [pending: task 5].
+  removes the log file
+  [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_serves_the_bundle]
+  [test: tests/test_process.py::test_relay_logs_json_lines_and_exits_0_on_sigterm].
 - A relay that is killed runs no sweep. What was deleted after its last sweep stays in the
   log file until the relay runs again and sweeps.
 

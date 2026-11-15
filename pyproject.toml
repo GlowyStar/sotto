@@ -58,4 +58,5 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers"
 markers = [
     "stand: also runs against the Compose stand when RELAY_URL is set",
+    "stand_after_restart: runs only against the Compose stand, after its restart",
 ]

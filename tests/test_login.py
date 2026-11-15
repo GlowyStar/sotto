@@ -3,11 +3,11 @@ import os
 from collections.abc import Awaitable, Callable
 
 import pytest
-from relay_harness import PATIENCE_SECONDS, OpenClient, RawClient
+from relay_harness import PATIENCE_SECONDS, OpenClient, RawClient, build_upload
 from websockets.exceptions import ConnectionClosed
 
 from sotto.crypto.identity import sign_login
-from sotto.proto.sotto_pb2 import Login
+from sotto.proto.sotto_pb2 import ClientFrame, FetchBundle, Login
 from sotto.relay.frames import MAX_FRAME_BYTES
 from sotto.relay.server import CloseCode
 
@@ -15,8 +15,6 @@ pytestmark = pytest.mark.stand
 
 # Field 15 is in no message of docs/protocol.md, section 7.1.
 UNKNOWN_FIELD = b"\x7a\x03new"
-# The UploadBundle member of the ClientFrame of section 7.1, which the schema file lacks.
-FRAME_OF_A_LATER_SCHEMA = b"\x12\x00"
 # Sent by the WebSocket library itself (RFC 6455, section 8.1).
 INVALID_TEXT = 1007
 
@@ -294,12 +292,21 @@ async def test_malformed_frame_closes_with_1008(
     assert await client.frames_until_close() == ([], CloseCode.PROTOCOL_VIOLATION)
 
 
+def complete_upload() -> ClientFrame:
+    return ClientFrame(upload_bundle=build_upload(os.urandom(32), [1]))
+
+
+def complete_fetch() -> ClientFrame:
+    return ClientFrame(fetch_bundle=FetchBundle(identity=os.urandom(32)))
+
+
+@pytest.mark.parametrize("make_frame", [complete_upload, complete_fetch])
 async def test_frame_before_login_closes_with_1008(
-    relay_url: str, open_client: OpenClient
+    relay_url: str, open_client: OpenClient, make_frame: Callable[[], ClientFrame]
 ) -> None:
     client = await open_client(relay_url)
 
-    await client.send(FRAME_OF_A_LATER_SCHEMA)
+    await client.send(make_frame())
 
     assert await client.frames_until_close() == ([], CloseCode.PROTOCOL_VIOLATION)
 
