@@ -16,6 +16,8 @@ def test_defaults_are_loopback_and_the_values_of_the_protocol() -> None:
         login_deadline_seconds=10,
         one_time_prekey_cap=100,
         max_pages=262144,
+        message_ttl_seconds=2592000,
+        sweep_interval_seconds=60,
     )
 
 
@@ -29,6 +31,8 @@ def test_every_setting_comes_from_the_environment() -> None:
             "RELAY_LOGIN_DEADLINE_SECONDS": "3",
             "RELAY_ONE_TIME_PREKEY_CAP": "7",
             "RELAY_MAX_PAGES": "64",
+            "RELAY_MESSAGE_TTL_SECONDS": "600",
+            "RELAY_SWEEP_INTERVAL_SECONDS": "5",
         }
     )
 
@@ -40,6 +44,8 @@ def test_every_setting_comes_from_the_environment() -> None:
         login_deadline_seconds=3,
         one_time_prekey_cap=7,
         max_pages=64,
+        message_ttl_seconds=600,
+        sweep_interval_seconds=5,
     )
 
 
@@ -82,7 +88,15 @@ def test_relay_without_a_database_path_is_rejected(environ: dict[str, str]) -> N
         Settings.from_env(environ)
 
 
-@pytest.mark.parametrize("name", ["RELAY_ONE_TIME_PREKEY_CAP", "RELAY_MAX_PAGES"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "RELAY_ONE_TIME_PREKEY_CAP",
+        "RELAY_MAX_PAGES",
+        "RELAY_MESSAGE_TTL_SECONDS",
+        "RELAY_SWEEP_INTERVAL_SECONDS",
+    ],
+)
 @pytest.mark.parametrize("value", ["", "0", "-1", "2.5", "ten"])
 def test_limit_that_is_no_whole_number_above_0_is_rejected(name: str, value: str) -> None:
     with pytest.raises(ValueError, match=name):

@@ -3,7 +3,7 @@
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -84,6 +84,10 @@ READ_NEXT_MESSAGE = """
     WHERE recipient = ? AND position > ? ORDER BY position LIMIT 1
 """
 DELETE_MESSAGE = "DELETE FROM messages WHERE recipient = ? AND sender = ? AND message_id = ?"
+DELETE_EXPIRED_MESSAGES = "DELETE FROM messages WHERE stored_at <= ?"
+# Copies the write-ahead log into the database file and truncates the log to zero length,
+# which removes the old pages of deleted rows (docs/protocol.md, section 13.2).
+CHECKPOINT = "PRAGMA wal_checkpoint(TRUNCATE)"
 
 
 class StorageFullError(Exception):
@@ -97,7 +101,10 @@ class UnknownRecipientError(Exception):
 class Storage:
     """The one connection of the process to the database file, which is the whole state."""
 
-    def __init__(self, path: Path, *, max_pages: int) -> None:
+    def __init__(
+        self, path: Path, *, max_pages: int, clock: Callable[[], float] = time.time
+    ) -> None:
+        self.clock = clock
         self.connection = sqlite3.connect(path, autocommit=True)
         # The journal mode cannot change inside a transaction, so the pragmas run first.
         journal_mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
@@ -192,7 +199,7 @@ class Storage:
             if self.connection.execute(IS_REGISTERED, (send.recipient,)).fetchone() is None:
                 raise UnknownRecipientError("the recipient is not registered")
 
-            row = (sender, send.recipient, send.message_id, send.payload, int(time.time()))
+            row = (sender, send.recipient, send.message_id, send.payload, int(self.clock()))
             self.connection.execute(STORE_MESSAGE, row)
 
     def next_message(self, recipient: bytes, *, after: int) -> tuple[int, Deliver] | None:
@@ -216,6 +223,20 @@ class Storage:
         rows = [(recipient, message.sender, message.message_id) for message in messages]
         with self._write():
             self.connection.executemany(DELETE_MESSAGE, rows)
+
+    def sweep(self, *, ttl_seconds: int) -> int:
+        """Deletes the messages stored `ttl_seconds` or more ago, then truncates the log.
+
+        Returns the count of the deleted messages (docs/protocol.md, sections 10.7 and 13.2).
+        """
+        with self._write():
+            expired = self.connection.execute(
+                DELETE_EXPIRED_MESSAGES, (int(self.clock()) - ttl_seconds,)
+            )
+        is_busy, _, _ = self.connection.execute(CHECKPOINT).fetchone()
+        if is_busy:
+            logger.warning("the checkpoint of the sweep did not finish")
+        return expired.rowcount
 
     def _read_bundle(self, identity: bytes) -> Bundle | None:
         row = self.connection.execute(READ_IDENTITY, (identity,)).fetchone()

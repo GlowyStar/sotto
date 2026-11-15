@@ -125,10 +125,13 @@ What the relay of this repository writes down, run unchanged:
   [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_serves_the_bundle] and every
   queued message with its sender, recipient, message id, payload and time of storing
   [test: tests/test_storage.py::test_message_is_one_row_until_its_recipient_acks_it].
-- A message leaves the database when its recipient acks it or when it expires. "Deleted
-  after the ack" means: after the next sweep its payload and its message id are in none of
-  the files of the database, the write-ahead log included (protocol, section 13)
-  [pending: task 7].
+- A message leaves the database when its recipient acks it or when it expires,
+  MESSAGE_TTL_SECONDS after it was stored, 30 days by default (protocol, section 10.7)
+  [test: tests/test_storage.py::test_expired_message_is_deleted_by_the_sweep_and_never_delivered]. "Deleted after the ack" means: after the next sweep, every
+  SWEEP_INTERVAL_SECONDS, 60 seconds by default, its payload and its message id are in
+  none of the files of the database, the write-ahead log included (protocol, section 13)
+  [test: tests/test_storage.py::test_acked_message_is_in_no_file_of_the_database_after_the_sweep]
+  [test: tests/test_storage.py::test_expired_message_is_in_no_file_of_the_database_after_the_sweep].
 - The log is JSON lines on standard output
   [test: tests/test_process.py::test_relay_logs_json_lines_and_exits_0_on_sigterm]. No log
   line holds a nonce, a signature, a key, a full user id or the network address of a
