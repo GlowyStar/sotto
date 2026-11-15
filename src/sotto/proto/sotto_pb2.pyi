@@ -187,3 +187,35 @@ class Error(_message.Message):
     message_id: bytes
     identity: bytes
     def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message_id: _Optional[bytes] = ..., identity: _Optional[bytes] = ...) -> None: ...
+
+class PeerMessage(_message.Message):
+    __slots__ = ("version", "initial_header", "header", "ciphertext")
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    INITIAL_HEADER_FIELD_NUMBER: _ClassVar[int]
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
+    version: int
+    initial_header: InitialHeader
+    header: bytes
+    ciphertext: bytes
+    def __init__(self, version: _Optional[int] = ..., initial_header: _Optional[_Union[InitialHeader, _Mapping]] = ..., header: _Optional[bytes] = ..., ciphertext: _Optional[bytes] = ...) -> None: ...
+
+class InitialHeader(_message.Message):
+    __slots__ = ("identity_dh_key", "identity_dh_signature", "ephemeral_key", "signed_prekey_id", "one_time_prekey_id")
+    IDENTITY_DH_KEY_FIELD_NUMBER: _ClassVar[int]
+    IDENTITY_DH_SIGNATURE_FIELD_NUMBER: _ClassVar[int]
+    EPHEMERAL_KEY_FIELD_NUMBER: _ClassVar[int]
+    SIGNED_PREKEY_ID_FIELD_NUMBER: _ClassVar[int]
+    ONE_TIME_PREKEY_ID_FIELD_NUMBER: _ClassVar[int]
+    identity_dh_key: bytes
+    identity_dh_signature: bytes
+    ephemeral_key: bytes
+    signed_prekey_id: int
+    one_time_prekey_id: int
+    def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ...) -> None: ...
+
+class Content(_message.Message):
+    __slots__ = ("text",)
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    text: str
+    def __init__(self, text: _Optional[str] = ...) -> None: ...

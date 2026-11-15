@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 8 or 12 to 14, of the task of the project plan that brings it.
+  gives the number, 8, 13 or 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -353,7 +353,8 @@ Total length: 84 bytes.
   identity is made. The X25519 identity key of an identity never changes (section 5.3).
 - Verified by: the relay on every UploadBundle (section 9.1); a client on every Bundle it
   fetched (section 5.4) and on the X25519 identity key that the first messages of a
-  session carry (section 16.8) [pending: task 12].
+  session carry (section 16.8)
+  [test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing].
 
 ### 4.4 The signed prekey string
 
@@ -414,7 +415,8 @@ start a session with it while it is offline.
   start or a session without a one-time prekey, not a session with someone else
   (section 16.9)
   [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
-  [pending: task 12].
+  [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+  [test: tests/client/test_session.py::test_unknown_signed_prekey_id_is_refused].
 
 ### 5.3 The X25519 identity key is written once
 
@@ -431,10 +433,12 @@ change for the life of the identity.
   first session with that contact: the key of a bundle that passed the checks of
   section 5.4, when the client made the session (section 16.6), or the key of the initial
   header, when it accepted the first initial message of the contact (section 16.8)
-  [pending: task 12]. It refuses every later bundle of that contact that carries another
+  [test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]
+  [test: tests/client/test_session.py::test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey]. It refuses every later bundle of that contact that carries another
   key
   [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
-  and every later initial header that does (section 16.8) [pending: task 12].
+  and every later initial header that does (section 16.8)
+  [test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing].
 
 ### 5.4 The client's checks
 
@@ -452,7 +456,8 @@ The lengths of the fields were checked before, when the frame was parsed (sectio
 
 - When all four pass and the client has no pin for the contact, it pins `identity_dh_key`
   in the transaction that stores the session made from the bundle (section 16.6, step 8)
-  [pending: task 12]. A key agreement that fails after the checks pins nothing.
+  [test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]. A key agreement that fails after the checks pins nothing
+  [test: tests/client/test_session.py::test_key_agreement_that_fails_after_the_checks_stores_no_session_and_no_pin].
 - A bundle that fails a check is not used: the client computes no Diffie-Hellman value
   with any of its keys and pins nothing.
 - The prekey ids and the one-time prekey have no check of their own (section 5.2).
@@ -1252,7 +1257,8 @@ ended (section 11.1).
 - When the relay does not hold the message, because the recipient acked it or it expired,
   the relay cannot know the repeat. It stores the message again and delivers it again
   [test: tests/test_messages.py::test_send_repeated_after_the_ack_is_a_new_message]. The recipient's client discards the second copy by the pair (sender,
-  message id) and acks it (section 20.2) [pending: task 12].
+  message id) and acks it (section 20.2)
+  [test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks].
 
 This is the case of a Send repeated after a lost Stored.
 
@@ -1292,7 +1298,8 @@ way when the recipient of the first message acked it (threat model, "Not protect
 
 Delivery is at least once. A client receives a message more than once after a lost Ack, a
 replaced connection or a repeated Send, and discards the copies by the pair (sender,
-message id) (section 20.2) [pending: task 12].
+message id) (section 20.2)
+[test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks].
 
 ### 10.5 Ack
 
@@ -1440,7 +1447,11 @@ A check that ends in one of these names hands back nothing else: the decoder ret
 bytes
 [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
 A client that gets one of the first three reports it and uses neither the id nor the
-bundle [pending: task 12]. Section 24.2 names the local results of the end-to-end protocol.
+bundle
+[test: tests/client/test_session.py::test_invalid_id_adds_no_contact]
+[test: tests/client/test_session.py::test_bundle_of_another_identity_is_refused_before_any_diffie_hellman]
+[test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]
+[pending: task 14]. Section 24.2 names the local results of the end-to-end protocol.
 
 ## 12. Limits
 
@@ -1596,7 +1607,8 @@ of Hello, the first frame of every connection.
 The end-to-end protocol version is 1. It appears in one place on the wire, inside the
 payload: the `version` field of the peer envelope (section 19.2). It is also the first
 byte of the session associated data, which is not sent and which every message of a
-session authenticates (section 16.5) [pending: task 12]. The relay does not read it and
+session authenticates (section 16.5)
+[test: tests/client/test_session.py::test_two_clients_exchange_texts_in_both_directions]. The relay does not read it and
 has no rule about it (section 7.12).
 
 - In every version of the end-to-end protocol the payload is a `PeerMessage` whose field 1
@@ -1604,7 +1616,8 @@ has no rule about it (section 7.12).
 - A client reads `version` before it applies any other rule to the envelope. A client that
   reads a `version` other than 1, 0 included, decrypts nothing and changes nothing in its
   store: it reports that the contact uses a version it does not implement and acks the
-  message (section 19.4) [pending: task 12].
+  message (section 19.4)
+  [test: tests/client/test_session.py::test_other_version_is_acked_and_changes_nothing].
 - A change that a client of version 1 would refuse or misread is a new version: another
   layout of the header, of the associated data or of the padding, another cipher or key
   derivation. A new member of the `Content` oneof is not: a client of version 1 reports
@@ -1861,7 +1874,8 @@ Terms of part 2:
 
 - A contact: an identity whose user id the user gave to the client. The client holds the
   32 bytes that the id decodes to (section 3.3). The id of the client's own identity is
-  never a contact: a client refuses to add it [pending: task 12].
+  never a contact: a client refuses to add it
+  [test: tests/client/test_session.py::test_own_id_is_never_a_contact].
 - The initiator, A in layouts: the client that starts a session from a fetched bundle.
 - The responder, B in layouts: the client whose bundle was fetched.
 - A session: what two clients share after a key agreement. At each client it is the
@@ -2014,7 +2028,9 @@ One Bundle starts at most one session.
    initial header (section 16.7) and, when the contact has no pinned X25519 identity
    key, `identity_dh_key` of the Bundle as its pin
    [test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte]
-   [pending: task 12].
+   [test: tests/client/test_session.py::test_first_messages_to_an_offline_peer_decrypt_in_order_and_the_reply_ends_the_header]
+   [test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]
+   [test: tests/client/test_session.py::test_key_agreement_that_fails_after_the_checks_stores_no_session_and_no_pin].
 
 A key agreement that ends in a failure stores nothing, a pin included, and the client
 reports the result (section 20.3). A session without a one-time prekey is a session like
@@ -2023,7 +2039,8 @@ any other for every later step; the threat model states what its first messages 
 ### 16.7 The initial header
 
 The initial header is what the responder needs to run the same key agreement. It is the
-`InitialHeader` message of section 19.3, with these values [pending: task 12]:
+`InitialHeader` message of section 19.3, with these values
+[test: tests/client/test_session.py::test_first_messages_to_an_offline_peer_decrypt_in_order_and_the_reply_ends_the_header]:
 
 | Field                   | Length | Value                                                           |
 |-------------------------|--------|-----------------------------------------------------------------|
@@ -2038,7 +2055,9 @@ the sender of a payload is the `sender` of its Deliver (section 7.14): the relay
 repository takes it from the connection that sent the message. There is no second copy
 that a client could forget to compare.
 
-When the initiator sends it, and when it stops [pending: task 12]:
+When the initiator sends it, and when it stops
+[test: tests/client/test_session.py::test_first_messages_to_an_offline_peer_decrypt_in_order_and_the_reply_ends_the_header]
+[test: tests/client/test_session.py::test_outbox_bytes_sent_again_after_a_crash_give_one_text]:
 
 - A session that a client made as initiator holds its initial header from the moment the
   session is stored.
@@ -2055,7 +2074,13 @@ When the initiator sends it, and when it stops [pending: task 12]:
 
 A client that received a Deliver from a contact with a payload that carries an initial
 header runs these steps in this order and stops at the first that fails
-[pending: task 12]. Steps 1 and 2 run for every such message. Steps 3 to 9 run only when
+[test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing]
+[test: tests/client/test_session.py::test_unknown_signed_prekey_id_is_refused]
+[test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session]
+[test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+[test: tests/client/test_session.py::test_key_agreement_that_fails_after_the_checks_stores_no_session_and_no_pin]
+[test: tests/client/test_session.py::test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey]
+[test: tests/client/test_session.py::test_replayed_initial_message_gives_no_second_text]. Steps 1 and 2 run for every such message. Steps 3 to 9 run only when
 the client holds no record for the pair of the `sender` and the `ephemeral_key`
 (section 20.4); with a record, section 20.2 says what follows.
 
@@ -2116,7 +2141,11 @@ message that decrypts to another plaintext
 [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
 [test: tests/crypto/test_x3dh.py::test_one_time_prekey_id_taken_out_or_put_in_gives_another_secret]
 [test: tests/crypto/test_x3dh.py::test_other_ephemeral_key_bytes_give_the_same_secret_under_other_associated_data]
-[pending: task 12]:
+[test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+[test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session]
+[test: tests/client/test_session.py::test_unknown_signed_prekey_id_is_refused]
+[test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing]
+[pending: task 13]:
 
 | Change                                                              | What follows                                                                                   |
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
@@ -2133,7 +2162,7 @@ message that decrypts to another plaintext
 
 A message that matches a record belongs to a session that the responder made before
 (section 20.4). Other rules hold for what the relay changes in the envelope of such a
-message [pending: task 12] [pending: task 13]:
+message [test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header] [pending: task 13]:
 
 - Steps 1 and 2 of section 16.8 read `identity_dh_key` and its signature, and the
   record is found by `ephemeral_key`. The two prekey ids are not read: a change to them
@@ -2237,7 +2266,8 @@ root key. The responder cannot encrypt in this state. It never has to: the state
 only after it decrypted the first message of the initiator, and that decryption takes a DH
 ratchet step, which gives the responder a ratchet key pair of its own and a sending chain
 (section 17.7, step 5). A stored session of a responder holds neither SK nor the private
-key of the signed prekey [pending: task 12].
+key of the signed prekey
+[test: tests/client/test_session.py::test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey].
 
 ### 17.4 The two key derivations
 
@@ -2471,7 +2501,7 @@ Total length: 217 bytes
   `message_id` of the Deliver and the `header` field exactly as it received them. It
   never builds the header again from numbers
   [test: tests/crypto/test_ratchet.py::test_random_conversations_keep_the_invariants]
-  [pending: task 12].
+  [test: tests/client/test_session.py::test_two_clients_exchange_texts_in_both_directions].
 - The three parts have fixed lengths, so the 217 bytes split in one way only and no
   length is written in front of a part.
 - The message id is the key by which a receiver discards copies (section 20.4). In the
@@ -2511,7 +2541,7 @@ The payload of a Send and of a Deliver (sections 7.12 and 7.14) is one serialize
 proto3 syntax, in the schema file of the relay protocol, `proto/sotto.proto`, package
 `sotto`: one file holds every message of this protocol, and the macOS client takes one
 file. They enter the file with the pull request that implements the session
-[pending: task 12].
+[test: tests/test_docs.py::test_schema_file_is_a_part_of_the_listing_in_the_spec].
 
 ```proto
 // The payload of a Send and of a Deliver: one PeerMessage.
@@ -2577,7 +2607,10 @@ Section 16.7 gives the value of each field.
 ### 19.4 Parsing and malformed envelopes
 
 A client has one parse step that turns the `payload` of a Deliver into an envelope or
-into a result, in this order [pending: task 12]:
+into a result, in this order
+[test: tests/client/test_envelope.py::test_payload_that_is_no_peer_message_is_bad_envelope]
+[test: tests/client/test_envelope.py::test_other_version_is_read_before_any_other_rule]
+[test: tests/client/test_envelope.py::test_field_that_breaks_its_length_is_bad_envelope]:
 
 1. A payload that does not parse as a `PeerMessage` gets the result BAD_ENVELOPE.
 2. `version` is read before any other rule is applied. When it is not 1, 0 included, the
@@ -2607,7 +2640,9 @@ every message that decrypts to version 1 (section 16.5).
 | `text` | 1   | string | UTF-8, 0 to MAX_TEXT_BYTES bytes when sent (section 19.7)     |
 
 After a message decrypted and its padding was removed (section 19.6), the client parses
-the bytes as a `Content` [pending: task 12]:
+the bytes as a `Content`
+[test: tests/client/test_envelope.py::test_content_that_does_not_parse_or_is_not_utf8_is_bad_content]
+[test: tests/client/test_envelope.py::test_content_without_a_known_member_is_unknown_content]:
 
 - Bytes that do not parse, a `text` that is not UTF-8 included, give the result
   BAD_CONTENT.
@@ -2619,12 +2654,16 @@ the bytes as a `Content` [pending: task 12]:
 
 A message with the result BAD_CONTENT or UNKNOWN_CONTENT is a real message of the peer:
 it decrypted. The client keeps the new ratchet state and the seen id and acks the
-message, and it has no text to show (section 20.3).
+message, and it has no text to show (section 20.3)
+[test: tests/client/test_session.py::test_message_without_a_text_saves_its_state_and_seen_id_and_logs_nothing].
 
 ### 19.6 Padding
 
 The plaintext that is sealed is the serialized `Content`, then one byte `80`, then bytes
-`00` up to the next multiple of PADDING_BLOCK, 256 bytes [pending: task 12]:
+`00` up to the next multiple of PADDING_BLOCK, 256 bytes
+[test: tests/client/test_envelope.py::test_padding_adds_the_mark_and_zero_bytes_up_to_the_next_block]
+[test: tests/client/test_envelope.py::test_receiver_takes_the_content_in_front_of_the_mark_behind_any_zero_bytes]
+[test: tests/client/test_envelope.py::test_plaintext_without_padding_is_bad_padding]:
 
 ```
 P = Content || 80 || 00 ... 00
@@ -2649,7 +2688,9 @@ of 256 bytes.
 MAX_TEXT_BYTES is 65019: a text of more bytes in UTF-8 is not sent, and the client
 refuses it with the result TEXT_TOO_LONG. The client checks the length before any other
 step of L1 (section 20.2): a text that is refused fetches no bundle and starts no key
-agreement [pending: task 12].
+agreement
+[test: tests/client/test_session.py::test_text_too_long_is_refused_before_any_bundle_or_key_agreement]
+[test: tests/client/test_envelope.py::test_largest_text_fills_254_blocks_and_one_byte_more_is_refused].
 
 The number follows from the payload limit of section 7.12, 65472 bytes, for the longest
 envelope:
@@ -2668,7 +2709,9 @@ envelope:
 One more block of 256 bytes makes 65505 and does not fit. The limit is one number for
 every message, with or without an initial header, so that a text that was accepted for
 sending fits whatever the state of the session. A receiver applies no limit of its own to
-a text: the largest frame bounds it [pending: task 12].
+a text: the largest frame bounds it
+[test: tests/client/test_session.py::test_largest_text_fits_a_payload_with_an_initial_header]
+[test: tests/client/test_session.py::test_receiver_applies_no_limit_to_a_text].
 
 ## 20. Session rules
 
@@ -2703,7 +2746,16 @@ Three states of an identity at a client:
 The events I1 to I10 are the kinds of a Deliver, by its `sender`. They are tried in this
 order, and a Deliver is the first kind whose condition holds. L1 to L3 are local events.
 Every cell names an action of section 20.3; "none" means that the event cannot occur in
-that state. The client does what the table says [pending: task 12] [pending: task 13].
+that state. The client does what the table says
+[test: tests/client/test_session.py::test_stranger_is_acked_before_a_byte_is_parsed]
+[test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks]
+[test: tests/client/test_session.py::test_other_version_is_acked_and_changes_nothing]
+[test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing]
+[test: tests/client/test_session.py::test_replayed_initial_message_gives_no_second_text]
+[test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header]
+[test: tests/client/test_session.py::test_message_without_initial_header_from_a_contact_without_session_is_no_session]
+[test: tests/client/test_session.py::test_arbitrary_payload_ends_in_a_named_result_and_an_unchanged_store]
+[pending: task 13].
 
 | Event                                                                                              | N        | C0                                             | C1                                             |
 |----------------------------------------------------------------------------------------------------|----------|------------------------------------------------|------------------------------------------------|
@@ -2721,7 +2773,10 @@ that state. The client does what the table says [pending: task 12] [pending: tas
 | L2. The user resets the session with the identity                                                  | REFUSE   | START                                          | START                                          |
 | L3. Skipped keys were removed that no message used: by the cap or the purge of section 17.8, or with a session that left the list | none | none                              | GAP                                            |
 
-How the conditions are decided [pending: task 12] [pending: task 13]:
+How the conditions are decided
+[test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header]
+[test: tests/client/test_session.py::test_two_clients_exchange_texts_in_both_directions]
+[pending: task 13]:
 
 - I4 to I8: a record is found by the `sender` and the bytes of `ephemeral_key`
   (section 20.4).
@@ -2747,7 +2802,12 @@ How the conditions are decided [pending: task 12] [pending: task 13]:
 | REFUSE     | Does nothing and reports NOT_A_CONTACT. A client sends to a contact only                                               | Nothing                                                                | No Deliver to ack     |
 | GAP        | Tells the user how many messages of the contact are missing: the number of skipped keys that were removed without use  | Nothing more                                                           | No Deliver to ack     |
 
-Rules that hold for every row [pending: task 12] [pending: task 13]:
+Rules that hold for every row
+[test: tests/client/test_session.py::test_arbitrary_payload_ends_in_a_named_result_and_an_unchanged_store]
+[test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+[test: tests/client/test_session.py::test_message_without_a_text_saves_its_state_and_seen_id_and_logs_nothing]
+[test: tests/client/test_session.py::test_replayed_initial_message_gives_no_second_text]
+[pending: task 13]:
 
 - Every Deliver is acked, whatever its action. A message that could not be read is gone
   for good: the relay deletes it on the Ack, and this protocol has no frame that asks a
@@ -2771,7 +2831,10 @@ Rules that hold for every row [pending: task 12] [pending: task 13]:
 
 ### 20.4 Seen ids and records
 
-Seen ids [pending: task 12]:
+Seen ids
+[test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks]
+[test: tests/client/test_session.py::test_stranger_is_acked_before_a_byte_is_parsed]
+[test: tests/client/test_session.py::test_replayed_initial_message_gives_no_second_text]:
 
 - ACCEPT and ACCEPT-NEW save the pair (sender, message id) of the message. No other
   action saves one. The id of a message that did not decrypt is not authentic
@@ -2782,7 +2845,7 @@ Seen ids [pending: task 12]:
   DECRYPT_FAILED.
 - A seen id is kept for SEEN_ID_SECONDS, 3196800 seconds: MESSAGE_TTL_SECONDS and one
   week, 37 days. The client deletes it at the first login after that time, and until it
-  is deleted it counts as seen.
+  is deleted it counts as seen [pending: task 13].
 - A copy that arrives after the deletion is no duplicate for the table. The ratchet
   refuses it, because its message key is used: the copy is shown as a message that could
   not be read and is never read a second time.
@@ -2931,7 +2994,8 @@ The grace period [pending: task 13]:
   of initial messages it accepted since then that named a one-time prekey.
 - The private key of a one-time prekey is deleted when the initial message that names
   it is accepted (section 16.8, step 9), and not when a message that names it fails
-  [pending: task 12].
+  [test: tests/client/test_session.py::test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey]
+  [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey].
 - A client holds at most ONE_TIME_PREKEY_HELD_MAX, 1000, private keys of one-time
   prekeys. Before it makes a batch that would go over, it deletes the ones with the
   lowest ids until the batch fits [pending: task 13]. The count is the word of the
@@ -2971,11 +3035,12 @@ The grace period [pending: task 13]:
 
 ### 22.1 What it holds
 
-A client keeps, for one identity [pending: task 12]:
+A client keeps, for one identity
+[test: tests/client/test_client_store.py::test_store_holds_what_section_22_1_lists]:
 
 - the seed of the identity and the private key of its X25519 identity key;
 - the private keys of its signed prekeys and of its one-time prekeys with their ids, the
-  two counters of section 21.1 and the times that section 21.2 needs;
+  two counters of section 21.1 and the times that section 21.2 needs [pending: task 13];
 - its contacts with their pinned X25519 identity keys;
 - the sessions of every contact, in their order (sections 17.2 and 20.1);
 - the seen ids and the records of accepted initial messages (section 20.4);
@@ -2987,7 +3052,10 @@ No frame and no payload carries the seed or a private key [pending: task 14].
 
 ### 22.2 The two ordering rules
 
-On receive [pending: task 12] [pending: task 14]:
+On receive
+[test: tests/client/test_session.py::test_crash_between_decryption_and_commit_changes_nothing_and_the_message_decrypts_again]
+[test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks]
+[pending: task 14]:
 
 - The client sends the Ack for a message that it accepted only after one transaction
   committed everything the message changes: the new ratchet state of its session, the
@@ -2999,7 +3067,9 @@ On receive [pending: task 12] [pending: task 14]:
 - The Ack for a Deliver that is dropped or that failed (section 20.3) waits for nothing:
   the client saved nothing.
 
-On send [pending: task 12] [pending: task 14]:
+On send
+[test: tests/client/test_session.py::test_outbox_bytes_sent_again_after_a_crash_give_one_text]
+[pending: task 14]:
 
 - One transaction commits the new ratchet state, with the sending chain moved on, and
   the outbox row with the message id and the bytes of the payload. Only after the commit
@@ -3024,7 +3094,10 @@ scope, as it is for the relay (section 13.3).
 
 The rules above hold for every client. How a client keeps its store is its own matter;
 the macOS client is free to keep keys in the keychain. The client of this repository does
-this [pending: task 12]:
+this
+[test: tests/client/test_client_store.py::test_directory_gets_mode_0700_and_the_file_0600]
+[test: tests/client/test_client_store.py::test_start_is_refused_when_a_mode_gives_a_right_to_the_group_or_others]
+[test: tests/client/test_client_store.py::test_store_uses_the_rollback_journal_with_secure_delete]:
 
 - The store is one SQLite file per identity in a data directory. The directory has mode
   0700 and the file mode 0600, and both are set before the first byte is written.
@@ -3032,7 +3105,7 @@ this [pending: task 12]:
   group or to others, that is, when its mode has one of the bits 077.
 - The database uses the rollback journal and not a write-ahead log, with `secure_delete`
   on and one connection: no second file keeps older ratchet states.
-- The seed is never taken from a command line argument and never printed.
+- The seed is never taken from a command line argument and never printed [pending: task 14].
 
 Nothing in the store is encrypted. Whoever can read the file holds the identity and
 everything else in section 22.1; the threat model says what follows from that.
@@ -3142,7 +3215,10 @@ This is the wait of the action Back off of section 11.1 [pending: task 14].
   [test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts].
   No vector of section 24.3 covers the other
   two, because the padded plaintext is an input of a ratchet vector: the tests of the
-  session hold the padding and the largest text [pending: task 12].
+  session hold the padding and the largest text
+  [test: tests/client/test_envelope.py::test_padding_adds_the_mark_and_zero_bytes_up_to_the_next_block]
+  [test: tests/client/test_envelope.py::test_largest_text_fills_254_blocks_and_one_byte_more_is_refused]
+  [test: tests/client/test_session.py::test_largest_text_fits_a_payload_with_an_initial_header].
 - The other values are the defaults of a client. SEEN_ID_SECONDS and
   SIGNED_PREKEY_GRACE_SECONDS are built on the default of MESSAGE_TTL_SECONDS
   (section 12.1).
