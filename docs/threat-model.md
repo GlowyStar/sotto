@@ -68,7 +68,8 @@ Someone on the path between a client and the relay.
   That the ciphertext stays closed rests on the key agreement and the ratchet (protocol,
   sections 16 to 18)
   [test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data]
-  [pending: task 11].
+  [test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte]
+  [test: tests/crypto/test_ratchet.py::test_random_conversations_keep_the_invariants].
 
 ### An abuser with free identities
 
@@ -318,9 +319,11 @@ its id.
   protocol: a contact is an id, and "The id and its channel" says what that rests on.
 - Two things that a peer can make a client keep are bounded: 3 sessions (protocol,
   section 20.1) [pending: task 13], and 2000 skipped message keys in each (protocol,
-  section 17.8) [pending: task 11]. What it can make a client compute for one message is
-  bounded as well: a header that asks for more than 1000 skipped keys is refused before
-  a key is derived [pending: task 11].
+  section 17.8)
+  [test: tests/crypto/test_ratchet.py::test_the_cap_removes_the_oldest_entry_and_counts_it].
+  What it can make a client compute for one message is bounded as well: a header that
+  asks for more than 1000 skipped keys is refused before a key is derived
+  [test: tests/crypto/test_ratchet.py::test_too_many_skipped_keys_are_refused_before_any_key_is_derived].
 - The rest grows with what a contact sends and has no cap: the message log, a seen id
   for every accepted message for 37 days, and a record for every accepted initial
   message, kept while its session or the private key of its signed prekey exists
@@ -399,7 +402,8 @@ What forward secrecy covers:
 - The key of a message is deleted when the message is encrypted or decrypted, and a
   chain key cannot be turned back into the one before it (protocol, sections 17.4 to
   17.7). A copy of the state of a session that is taken after a message does not open
-  that message as it was recorded on the wire [pending: task 11].
+  that message as it was recorded on the wire
+  [test: tests/crypto/test_ratchet.py::test_copy_after_a_message_opens_none_of_the_messages_before].
 - After the commit that follows a message, the chain key that was replaced is in none of
   the files of the store [pending: task 13].
 
@@ -432,7 +436,8 @@ What post-compromise security covers:
 - A copy of the state of a session loses its use when the session moves on without it.
   Once the owner of the state has taken a DH ratchet step that the copy did not see, the
   copy opens no message that the owner sends after that step and none that the peer
-  sends in answer [pending: task 11].
+  sends in answer
+  [test: tests/crypto/test_ratchet.py::test_copy_stops_opening_after_a_dh_ratchet_step_it_did_not_see].
 
 What it does not cover:
 
