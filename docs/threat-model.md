@@ -1,12 +1,12 @@
-# sotto threat model: the relay half
+# sotto threat model
 
 ## Scope and status
 
-This document says whom the relay protocol of [protocol.md](protocol.md) defends against
-and where it does not defend. It is the relay half: the relay itself, the network between
-a client and the relay, and abuse of the relay by its own users. The client half (the
-device, the client store, the end-to-end protocol) comes with part 2 of the specification
-[pending: task 9].
+This document says whom the protocol of [protocol.md](protocol.md) defends against and
+where it does not defend. It has two halves. The relay half is about the relay protocol:
+the relay itself, the network between a client and the relay, and abuse of the relay by
+its own users. The client half, from "The client half" on, is about the end-to-end
+protocol: a peer, the device with its store, and what the keys of a session cover.
 
 - No security audit. Nobody has reviewed this design or its code for security.
 - The relay is content-blind and nothing more: it is blind to the content of a message
@@ -14,9 +14,9 @@ device, the client store, the end-to-end protocol) comes with part 2 of the spec
   that word.
 - A guarantee in this document cites the test that holds it, in the syntax of section 2.6
   of the protocol. A guarantee whose citation names a task is held by no test in this
-  repository, and the code behind it can be missing as well. What the lists admit (what
-  the relay learns, what it can do, what is not protected) is no guarantee and needs no
-  citation.
+  repository, and the code behind it can be missing as well. What this document admits
+  (what the relay learns, what it can do, what is not protected, what a peer or a thief
+  can do) is no guarantee and needs no citation.
 - "The relay" in the lists below is whoever controls the relay. The rules of the protocol
   describe the relay of this repository, run unchanged; they bind that code and not the
   person who runs it.
@@ -51,7 +51,8 @@ Someone on the path between a client and the relay.
   a full session of the victim's identity:
   - it receives the victim's queue and can ack it away, so that the victim never sees
     those messages;
-  - it can send payloads in the victim's name, which no recipient can decrypt;
+  - it can send payloads in the victim's name. No recipient can decrypt one; a recipient
+    that has the victim as a contact is shown a message that could not be read;
   - it can upload one-time prekeys of its own for the victim, which are not signed, and
     so break the start of new sessions with the victim;
   - it can put back a signed prekey that the victim replaced, because the old signature
@@ -63,8 +64,8 @@ Someone on the path between a client and the relay.
   the recipients of its messages and a false Stored included. Of the content it reads
   only ciphertext, and it cannot replace the victim's X25519 identity key or signed prekey
   with keys of its own, because those need a signature of the identity
-  [pending: task 5]. That the ciphertext stays closed rests on the end-to-end protocol of
-  part 2 [pending: task 9].
+  [pending: task 5]. That the ciphertext stays closed rests on the key agreement and the
+  ratchet (protocol, sections 16 to 18) [pending: task 10] [pending: task 11].
 
 ### An abuser with free identities
 
@@ -104,11 +105,13 @@ Whoever controls the relay learns all of this, with or without the rules of the 
 - Whether a given id is registered.
 - The parts of a payload that are not encrypted. The payload is opaque to the relay
   protocol, and the relay of this repository does not parse it [pending: task 6], but its
-  bytes pass through. Part 2 specifies the envelope; the message header is not encrypted,
-  so ratchet public keys and message counters are readable [pending: task 9].
+  bytes pass through. The envelope leaves readable: which messages are the first of a
+  session, the ratchet public key and the two message counters of every message, and the
+  length of a text in steps of 256 bytes. "What the relay sees of the end-to-end layer"
+  has the full list.
 
-The relay does not learn the content of a message: it holds no key that opens a payload.
-That rests on the end-to-end protocol of part 2 [pending: task 9].
+The relay does not learn the content of a message: it holds no key that opens a payload
+(protocol, sections 16 to 18) [pending: task 14].
 
 What the relay of this repository writes down, run unchanged:
 
@@ -138,15 +141,41 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   that expired, with its sender, recipient and time, for as long as it likes.
 - Refuse service to anyone, to everyone or to chosen pairs, and give a false reason:
   claim that a registered id is not registered, or that a queue is full.
-- Deliver a payload of its own under any sender. The recipient's client cannot decrypt
-  it [pending: task 9].
-- Hand out a bundle with a signed prekey that the identity replaced long ago: the old
-  signature still verifies.
+- Deliver a payload of its own under any sender, or change a real message: its sender,
+  its message id, its header, its nonce or its sealed bytes, or the X25519 identity key
+  or the ephemeral key of its initial header. The recipient's client does not decrypt
+  the result (protocol, section 20.3) [pending: task 13]. From a sender that is not a
+  contact it is dropped unseen. From a contact it is shown as a message that could not
+  be read: the relay can put such a notice under the name of any contact, as often as it
+  likes.
+- Change the rest of an envelope: how its fields are encoded, a prekey id of an initial
+  header whose session exists, the signature bytes of an initial header, and whether a
+  message carries the initial header of its session. The client then reads the plaintext
+  that the sender sealed or nothing. No change gives another plaintext, another sender
+  or another message id (protocol, sections 16.9 and 18.2) [pending: task 13].
+- Make a real message unreadable for good: by changing it, or by the order in which it
+  delivers. A message fails when it arrives after its skipped key was purged, when it
+  arrives while more than 1000 earlier messages of its chain are missing, and, for an
+  initial message whose session the recipient does not hold, when it arrives after the
+  grace period of its signed prekey (protocol, sections 17.7, 17.8 and 21.2). Every
+  Deliver is acked, and no frame asks a peer to send a message again.
+- Hand out a bundle with a signed prekey that the identity replaced long ago, or refuse
+  to store the next one: the old signature still verifies. A session made with that key
+  starts during its grace period, 37 days from the moment the identity made the next
+  key, and not after (protocol, section 21.2) [pending: task 13].
+- Keep a client from logging in. The client then makes no new signed prekey (protocol,
+  section 21.2). Its newest one stays in use for as long, which stretches the time in
+  which the first messages of sessions without a one-time prekey can be opened with
+  keys taken from that client.
 - Change what is not signed in a bundle: the prekey ids and the one-time prekey. It can
   hand out one one-time prekey to several clients or hand out a key of its own. The result
-  is a session that does not start [pending: task 9].
+  is a session that does not start; of two sessions made with one key, the first that
+  reaches the responder starts and the other does not. When the relay takes the one-time
+  prekey away, the result is a session without one (protocol, section 16.9)
+  [pending: task 10] [pending: task 12].
 - Report a wrong count of stored one-time prekeys, so that a client uploads none when it
-  has to, or more than it has to.
+  has to, or more than it has to. Whatever the count says, a client holds at most 1000
+  private keys of one-time prekeys (protocol, section 21.3) [pending: task 13].
 - Keep a target without one-time prekeys: withhold them, or let fetches spend the handout
   bucket of the target, so that every bundle of the target goes out without one.
 - Keep the Login of a connection and show it to anyone. The signature proves that the
@@ -162,8 +191,10 @@ What it cannot do:
   not sign
   [test: tests/crypto/test_identity.py::test_changed_signed_field_fails_the_bundle_check]
   [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error],
-  or accept another X25519 identity key for a contact whose key the client pinned
-  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
+  or accept another X25519 identity key for a contact whose key the client pinned, in a
+  bundle
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
+  or in an initial header (protocol, section 16.8) [pending: task 12].
 - Turn a login into a prekey statement or the reverse: the three signed strings have
   distinct prefixes
   [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
@@ -173,7 +204,17 @@ What it cannot do:
   connection [pending: task 4]. Relays that clients dial under one host, on different
   ports, share a server name and are not told apart (protocol, section 8.2).
 - Read the content of a message, or make a message of its own that the recipient's client
-  accepts [pending: task 9].
+  accepts (protocol, sections 16 to 18) [pending: task 13].
+- Make a message decrypt at another identity than the one its sender meant, by handing
+  out the X25519 keys of one identity under the signature of another: the associated
+  data of every message names the Ed25519 keys of both sides (protocol, section 16.5)
+  [pending: task 10] [pending: task 13].
+- Make a client read a message twice, or start a second session from an initial message
+  that it replays, as it was sent or with other bytes in its ephemeral key that give
+  the same secret (protocol, sections 16.5 and 20.4) [pending: task 13].
+- Make a client start a key agreement or delete a one-time prekey by delivering messages
+  that fail: a failure starts nothing and deletes nothing (protocol, section 20.3)
+  [pending: task 13].
 
 ## Not protected
 
@@ -214,7 +255,7 @@ What it cannot do:
   token as it returns. Every other client gets a bundle without a one-time prekey. The
   bucket keeps the stored keys from being taken in one burst [pending: task 8]; it does
   not keep them available. What the first messages of a session lose without a one-time
-  prekey is stated in the client half [pending: task 9].
+  prekey is stated under "One-time prekeys are not authenticated".
 - Connections and Acks. There is no limit per address: anyone can open connections and
   hold them. A logged-in identity can send Acks without limit, and each makes the relay
   look up every pair it names (protocol, section 12.2).
@@ -229,5 +270,297 @@ What it cannot do:
   process [pending: task 6]. It can be lost with the power when the host does not honour
   fsync.
 - The clock. The relay's clock decides when a message expires.
-- The device. A client whose private key or store is taken is the subject of the client
-  half [pending: task 9].
+- Prekey ids. A client numbers its signed prekeys and its one-time prekeys from 1 upward
+  (protocol, section 21.1), and the relay hands out the one-time prekey that was stored
+  first. Whoever fetches the bundle of an identity learns from the id of the signed
+  prekey about how many weeks the identity has been in use, and from the one-time prekey
+  ids of two fetches about how many were handed out in between, that is, how many
+  sessions others started with that identity.
+- Lengths. The padding hides the length of a text inside a step of 256 bytes and no
+  further: the relay sees how many steps a message has.
+- Notices of failure. Whoever controls the relay can make a client show that a message of
+  a contact could not be read, with or without a real message behind it ("What the relay
+  can do").
+- The device. A client whose keys or store are taken is the subject of "A thief of the
+  device or of the data directory".
+
+## The client half
+
+The rest of this document is about the end-to-end protocol (protocol, sections 16 to 25)
+and about the device that runs a client. The attackers of the relay half remain. Two join
+them: the peer, and whoever gets the device or a copy of its data directory.
+
+## A peer
+
+The peer is the identity at the other end of a session: a contact that the user added by
+its id.
+
+- Nothing protects a message from the peer who received it. The peer holds the
+  plaintext. It can keep it, copy it and show it to anyone, and no rule of the protocol
+  makes its client delete anything.
+- A peer cannot be told from the person the user has in mind by anything in the
+  protocol: a contact is an id, and "The id and its channel" says what that rests on.
+- Two things that a peer can make a client keep are bounded: 3 sessions (protocol,
+  section 20.1) [pending: task 13], and 2000 skipped message keys in each (protocol,
+  section 17.8) [pending: task 11]. What it can make a client compute for one message is
+  bounded as well: a header that asks for more than 1000 skipped keys is refused before
+  a key is derived [pending: task 11].
+- The rest grows with what a contact sends and has no cap: the message log, a seen id
+  for every accepted message for 37 days, and a record for every accepted initial
+  message, kept while its session or the private key of its signed prekey exists
+  (protocol, section 20.4). A contact needs no one-time prekey of the client for an
+  initial message. The rate at which the relay takes messages is the only brake, and
+  the user's remedy is to remove the contact.
+- A text is whatever the peer chose to send, control characters included. The
+  command-line client escapes them before it prints [pending: task 14].
+- A peer that stops answering, loses its store or goes back to an older copy of it
+  leaves messages that fail and sessions that only a reset repairs (protocol,
+  section 20.6). The user sees the failures; the protocol does not say why they happen.
+- An identity that is not a contact is no peer. Its messages are dropped before a byte of
+  them is parsed, shown nowhere and acked (protocol, section 20.3) [pending: task 12].
+  Whoever knows an id can still fill the queue of that id at the relay ("Not
+  protected").
+
+## A thief of the device or of the data directory
+
+Someone who takes the device, reads its disk, or gets a copy of the data directory of a
+client: from a backup, a synchronised folder, another account with the rights to read it,
+or a program that runs as the user.
+
+- Nothing is encrypted at rest. The data directory holds the seed of the identity, every
+  private key, the state of every session and the text of every message that was sent
+  and received (protocol, section 22.1). Whoever can read it has all of that.
+- The file modes are the whole protection: the directory is 0700, the file 0600, and the
+  client of this repository refuses to start on wider modes [pending: task 12]. That
+  stops another account of the same machine. It does not stop the administrator of the
+  machine, a program that runs as the user, a backup, or anyone with the disk.
+- A copy of the data directory clones the identity. Whoever holds the copy is the user
+  for the relay and for every contact: it logs in, receives the queue and can ack it
+  away, reads the message log, decrypts what arrives on the copied sessions, sends on
+  them, and starts new sessions with any contact in the user's name.
+- A clone shows itself only by chance. The relay keeps one connection per identity, so
+  a copy and the original that are connected at the same time close each other with
+  code 4001 (protocol, section 8.5). That is the only direct sign, and it also shows
+  when the user starts the client twice. A copy that connects only while the original
+  is offline gives none: the user sees at most messages that could not be read or a
+  notice of missing messages later, and the protocol does not say why.
+- A copy also lets its holder speak to the user as any contact, when it controls the
+  relay or a link without TLS. The private key of one signed prekey is enough to make
+  an initial message that the user's client accepts under the id of a contact: the
+  signature over that contact's X25519 identity key is public in its bundle, and the
+  other values of the key agreement are the forger's own. A copied session is enough to
+  make messages inside that session. This lasts for a signed prekey until the user's
+  client deletes its private key (protocol, section 21.2), and for a session until it
+  has healed as "Forward secrecy and post-compromise security" says.
+- The clone cannot be locked out. "Compromise of the identity" says why.
+- Keys cannot be zeroized in the memory of a Python process. The command-line client is
+  written in Python, where a byte string cannot be overwritten, values are copied
+  freely and memory is freed without being cleared. A key that the protocol calls
+  deleted can remain in the memory of the process, in swap and in a core dump until the
+  memory is used again. "Deleted" in the protocol is a statement about the files of the
+  store (protocol, section 22.3), not about memory.
+- Below the files nothing is promised. The store deletes with `secure_delete` and keeps
+  no write-ahead log, so a deleted key is in none of its files after the commit
+  [pending: task 13]. The blocks of a removed journal file, a snapshot of the filesystem
+  and a backup can still hold it.
+- A data directory that is put back from an older copy is an older state of every
+  session. The client then sends under chain keys it used before, and the peer refuses
+  those messages; what it receives can fail as well. The random nonce of every message
+  (protocol, section 18.1) is the one hedge against a message key that is used twice.
+  The protocol has no way to move or to back up an identity.
+- The clock of the device decides when a signed prekey is replaced and when private
+  keys, records and seen ids are deleted (protocol, section 21). A clock that is set
+  back keeps keys longer than the protocol means; one that is set forward deletes them
+  early, and messages on the way fail.
+
+## Forward secrecy and post-compromise security
+
+Both are properties of the keys of a session. They say what a thief of the session state
+cannot open; they say nothing about what the client keeps in readable form.
+
+What forward secrecy covers:
+
+- The key of a message is deleted when the message is encrypted or decrypted, and a
+  chain key cannot be turned back into the one before it (protocol, sections 17.4 to
+  17.7). A copy of the state of a session that is taken after a message does not open
+  that message as it was recorded on the wire [pending: task 11].
+- After the commit that follows a message, the chain key that was replaced is in none of
+  the files of the store [pending: task 13].
+
+What it does not cover, because it stays on disk:
+
+- The message log. The text of every message that was sent or received stays in the data
+  directory in readable form. Forward secrecy protects recorded traffic, not the
+  client's own copy.
+- Skipped message keys. The key of a message that has not arrived is kept until the
+  message arrives or the key is purged, after 5 DH ratchet steps or when the session
+  holds 2000 of them (protocol, section 17.8). A thief of the state opens those
+  messages if it also recorded them.
+- The first messages of a session, on the side of the responder. They can be opened from
+  the recorded traffic with the private keys of the responder's X25519 identity key and
+  signed prekey and, when one was used, of the one-time prekey. The one-time prekey
+  private key is deleted when the first of those messages is accepted. The private key
+  of a signed prekey is deleted 37 days after the client made the next one, which it
+  does after a login once the key is 7 days old: with the defaults about 44 days after
+  the key was made, and not earlier (protocol, section 21.2) [pending: task 13]. The
+  client counts on its own clock and waits for no answer to an upload. It deletes when
+  it starts or logs in and makes the next key only after a login: a client that does
+  not run, that stays on one connection or that the relay keeps from logging in can
+  keep the key longer. The messages in question are those the initiator sent before it
+  received the first answer.
+- Memory and what lies below the files ("A thief of the device or of the data
+  directory").
+
+What post-compromise security covers:
+
+- A copy of the state of a session loses its use when the session moves on without it.
+  Once the owner of the state has taken a DH ratchet step that the copy did not see, the
+  copy opens no message that the owner sends after that step and none that the peer
+  sends in answer [pending: task 11].
+
+What it does not cover:
+
+- The messages that the peer sends under the ratchet key that set off the owner's step.
+  The copy holds the root key and the owner's older ratchet private key and reads the
+  peer's key in the header, so it derives that whole receiving chain. It opens the
+  messages of that chain, those sent after the step included, and can make messages on
+  it. That ends when the peer has received a message of the owner under the owner's new
+  key: from then on the peer sends under a new key of its own.
+- A thief who has the identity keys. A copy of the data directory holds them next to the
+  sessions, and with them the thief starts new sessions and answers initial messages in
+  the user's name. No ratchet step heals that.
+- A thief who uses the copy. With the state of a session it can send in the session
+  before the owner does and take the session over.
+- A session in which only one side sends. A DH ratchet step needs a message from the
+  peer with a new ratchet key.
+- The skipped message keys that the copy holds.
+
+## Compromise of the identity
+
+The identity is one Ed25519 seed and the private key of its X25519 identity key. Its
+compromise is total and permanent.
+
+- Total. Whoever holds the two keys is the user for the relay and for every contact. It
+  logs in and receives everything that is sent to the user from then on. It publishes
+  signed prekeys of its own, so that every new session with the user is a session with
+  it. It starts sessions with any contact as the user. The seed alone is enough to log
+  in and to sign any key.
+- Permanent. The user id is the key (protocol, section 3.2). The protocol has no way to
+  replace the key of an id, to revoke it or to tell a contact that it is lost, and the
+  relay keeps an identity without an expiry. The X25519 identity key cannot be replaced
+  either (protocol, section 5.3).
+- The one remedy lies outside the protocol: a new identity, whose id has to reach every
+  contact again over an authentic channel, and contacts who remove the old id by hand.
+  Until a contact has done that, the holder of the old keys is the user for that
+  contact.
+- The messages of before the compromise are covered by what "Forward secrecy and
+  post-compromise security" says, and by nothing more.
+
+## The id and its channel
+
+Every check of the protocol starts from the user id: the bundle of a contact has to
+carry the key that its id encodes, and an initial message is accepted only from the key
+of a contact (protocol, sections 5.4 and 16.8). The id is the whole public key, so two
+users who hold each other's ids hold each other's keys.
+
+- The id has to reach the peer over an authentic channel: one on which the two users
+  know whom they hear and on which nobody can change what is said. The protocol does
+  not provide that channel and cannot check it.
+- Whoever replaces an id on its way gives the user its own id in place of the peer's.
+  The user then has a valid session with the wrong identity. Done to both sides, this
+  puts the attacker between them: it reads every message and passes it on in a session
+  of its own.
+- Nothing later repairs a substituted id. There is no safety number and no other
+  comparison of keys after the fact, and no session, pin or warning shows the
+  substitution: the client holds exactly the key it was given.
+- The pinned X25519 identity key protects against a later bundle that carries another
+  X25519 key under the same id
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
+  It says nothing about the id itself.
+
+## What the relay sees of the end-to-end layer
+
+The relay protocol carries the envelope of a message as bytes that the relay of this
+repository does not parse [pending: task 6]. Whoever controls the relay can parse them.
+Everything in the envelope but the sealed text is readable (protocol, sections 17.5 and
+19):
+
+- Which messages are session-initial. A message with an initial header is one of the
+  first of a session. The relay sees who started a session with whom, when, and when
+  the initiator received the first answer, because the header stops then.
+- The initial header: the X25519 identity key of the sender with its signature, the
+  ephemeral key, and the ids of the prekeys that were used, which also tell whether the
+  session has a one-time prekey.
+- The ratchet public key in the header of every message. It changes when the direction
+  of a conversation turns, so it shows the turns even to someone who sees one direction
+  only.
+- The two counters in the header of every message: the number of the message on its
+  chain and the length of the chain before. They show how many messages each side sent
+  and which of them did not arrive.
+- The nonce of every message.
+- The length of a text, as a bucket: the plaintext is padded to a multiple of 256 bytes
+  before it is sealed (protocol, section 19.6), so the relay learns the number of
+  256-byte blocks and nothing finer [pending: task 12]. A message with an initial header
+  is longer by that header.
+
+The header is not encrypted, and hiding it is not part of this protocol (protocol,
+section 26). What the relay does not see is the sealed text: it holds no key of a session
+(protocol, sections 16 to 18) [pending: task 14].
+
+## One-time prekeys are not authenticated
+
+A one-time prekey carries no signature, and neither does a prekey id (protocol,
+section 5.2).
+
+- This gives the relay a denial of service. It can replace a one-time prekey with a key
+  of its own, hand one out twice, or change an id. Each of these ends in a session that
+  does not start: the first messages fail at the responder. Of two sessions made with
+  one key, the first that reaches the responder starts and the other does not. None lets
+  the relay read a message, because the secret of a session also rests on the signed
+  keys (protocol, section 16.9) [pending: task 10] [pending: task 12]. A session that
+  does not start can also be without the protection of its one-time prekey: the relay
+  holds the private key of a key of its own, and a real key keeps its private key in the
+  responder's store for as long as no initial message that names it is accepted
+  (protocol, section 21.3). What the initiator sends on such a session is covered like
+  the first messages of a session without a one-time prekey, below.
+- The relay can also hand out a bundle without a one-time prekey, and so can anyone who
+  empties the handout bucket of an identity ("Not protected"). A client cannot tell why
+  a bundle has none. It starts the session all the same: a client that refused would be
+  cut off from that contact by anyone with free identities.
+- What a session without a one-time prekey loses:
+  - Forward secrecy for its first messages lasts only as long as the signed prekey. The
+    messages that the initiator sent before the first answer can be opened from recorded
+    traffic by whoever later takes the responder's private keys, until the responder
+    deletes the private key of that signed prekey. With the defaults that is about 44
+    days after it made the key and not earlier: 7 days until it makes the next key and
+    37 after. The responder counts on its own clock and waits for no answer of the
+    relay, but it makes the next key only after a login and deletes only when it starts
+    or logs in: a client that does not run, that stays on one connection or that the
+    relay keeps from logging in can keep the key longer (protocol, section 21.2). With a
+    one-time prekey that time ends when the responder accepts the first message.
+  - Nothing in the key agreement is fresh on the side of the responder, so the same
+    initial message could be accepted again. The responder's record of accepted initial
+    messages refuses the replay while the session or the private key of the signed
+    prekey exists, and without that key no key agreement runs (protocol, section 20.4)
+    [pending: task 13].
+
+## No post-quantum protection
+
+The key agreement and the ratchet rest on X25519 alone (protocol, section 25.4). Whoever
+records the traffic of a relay and later has a quantum computer that breaks X25519 can
+open the recorded messages. The Signal applications run a post-quantum key agreement,
+PQXDH, and a post-quantum ratchet beside the Double Ratchet; this protocol has neither,
+and reserves nothing for them but its version numbers.
+
+## No claim of deniability
+
+This project claims no deniability.
+
+- One fact is stated: no signature covers the content of a message (protocol,
+  section 25.5). A message is authenticated by keys that both sides of a session hold.
+- That is no promise that a user can deny a conversation. The relay sees who sends to
+  whom. A login signature shows that the holder of an identity key was connected at a
+  time the relay can narrow down, and the signatures of a bundle show that the identity
+  published its keys ("What the relay can do").
+- A peer can show what it received. Whether that convinces anyone is outside this
+  document.

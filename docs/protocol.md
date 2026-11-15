@@ -1,16 +1,19 @@
-# sotto protocol, part 1
+# sotto protocol
 
-Identity, the prekey bundle and the relay protocol.
+Part 1, sections 1 to 15: identity, the prekey bundle and the relay protocol. Part 2,
+sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 27 close
+both parts, and Appendix A follows section 27.
 
 ## 1. Status and scope
 
 ### 1.1 What this document is
 
 sotto is an end-to-end encrypted one-to-one messenger. Clients exchange ciphertext through
-a relay that holds no key that opens a message [pending: task 9]. This document is the
-contract between the implementations: the relay and the command-line client of this
-repository, and a macOS client in a repository of its own. It is written at the level of
-bytes. Where an implementation and this text disagree, the implementation is wrong.
+a relay that holds no key that opens a message (sections 16 to 18) [pending: task 14].
+This document is the contract between the implementations: the relay and the command-line
+client of this repository, and a macOS client in a repository of its own. It is written at
+the level of bytes. Where an implementation and this text disagree, the implementation is
+wrong.
 
 Part 1 specifies:
 
@@ -20,6 +23,10 @@ Part 1 specifies:
 - the protocol between a client and the relay: transport, frames, login, bundles,
   messages, errors, limits and erasure (sections 6 to 13);
 - versioning and the format of the shared test vectors (sections 14 and 15).
+
+Part 2 specifies what two clients do with each other through the relay: the key agreement,
+the ratchet, the encryption of a message and the rules around them. Section 1.4 lists its
+sections.
 
 ### 1.2 Status
 
@@ -36,28 +43,28 @@ Part 1 specifies:
 | Version                     | Value | Covers                                                    |
 |-----------------------------|-------|-----------------------------------------------------------|
 | Relay protocol version      | 1     | Sections 6 to 13 and the login string of section 4.2      |
-| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, and part 2 |
+| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, and sections 16 to 25 |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
 what a client does with a relay protocol version it does not know.
 
 ### 1.4 Specified in part 2
 
-The items of this list are specified in part 2 [pending: task 9]. Part 1 states about them
-only what the relay protocol depends on, each time with a citation.
+Part 1 states about the items of this table only what the relay protocol depends on, and
+names the section of part 2 each time.
 
-- Key agreement between two identities from a prekey bundle, including the handling of an
-  all-zero Diffie-Hellman output.
-- The Double Ratchet: key derivation, the message header, skipped message keys.
-- Message encryption: the cipher, the nonce, the associated data and the wire layout.
-- The peer envelope and the plaintext format with its padding, that is, the content of the
-  `payload` field of sections 7.12 and 7.14.
-- Session rules: several sessions per peer, duplicates, messages from an id that is not a
-  contact, decryption failures.
-- The prekey lifecycle: rotation of the signed prekey, allocation of prekey ids, refill of
-  one-time prekeys.
-- The client store and the client transport: the reconnect and back-off schedules and the
-  refusal of an unencrypted connection to a host that is not the loopback.
+| Item                                                                                                  | Section |
+|-------------------------------------------------------------------------------------------------------|---------|
+| Key agreement between two identities from a prekey bundle, including the handling of an all-zero Diffie-Hellman output | 16 |
+| The Double Ratchet: key derivation, the message header, skipped message keys                          | 17      |
+| Message encryption: the cipher, the nonce, the associated data and the wire layout                    | 18      |
+| The peer envelope and the plaintext with its padding, that is, the content of the `payload` field of sections 7.12 and 7.14 | 19 |
+| Session rules: several sessions per peer, duplicates, messages from an id that is not a contact, decryption failures | 20 |
+| The prekey lifecycle: rotation of the signed prekey, allocation of prekey ids, refill of one-time prekeys | 21  |
+| The client store: what it holds and the order of its writes                                           | 22      |
+| The client transport: the reconnect and Back off schedules and the refusal of an unencrypted connection to a host that is not a loopback host | 23 |
+| The constants and local results of part 2, and what its test vectors record                           | 24      |
+| Every deviation from the specifications this protocol follows, and what it lacks                      | 25      |
 
 ## 2. Conventions
 
@@ -73,10 +80,13 @@ from 0.
 
 ### 2.2 Integers
 
-- `u8` and `u32` are unsigned integers of 1 and 4 bytes.
+- `u8`, `u32` and `u64` are unsigned integers of 1, 4 and 8 bytes.
 - In a byte layout an integer wider than one byte is big-endian, most significant byte
   first. Part 1 has one integer in a byte layout, the 1-byte name length of section 4.2.
-- In a frame an integer is a protobuf `uint32`, and protobuf decides its encoding.
+  Part 2 has three: the version byte of section 16.5 and the two counters of the message
+  header (section 17.5).
+- In a frame and in the peer envelope of section 19 an integer is a protobuf `uint32`,
+  and protobuf decides its encoding.
 - The bytes of an Ed25519 key are read as RFC 8032 defines them. Section 3.3 states the
   one place where this document reads them as a little-endian integer.
 
@@ -138,12 +148,11 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 4]` says that what the statement rests on is not in this revision and
-  gives the number, 3 to 14, of the task of the project plan that brings it. For a
-  guarantee of part 1 that is a test, and the pull request of the task replaces the
-  citation with the first form. For a statement that part 2 specifies it is task 9, which
-  writes part 2 and brings no test: its pull request replaces the citation with the number
-  of the section that states the rule and with the citation of the test, or of the task,
-  behind that rule.
+  gives the number, 4 to 8 or 10 to 14, of the task of the project plan that brings it.
+  The pull request of that task replaces the citation with the first form. No citation
+  names task 9: that task is part 2 of this text and brings no test. A statement of
+  part 1 that rests on a rule of part 2 names the section of that rule and carries the
+  citation of the test, or of the task, behind it.
 
 The two forms are checked by machine, here and in the other documents of `docs/` and in
 the README. A citation of the first form has to name a test function that exists
@@ -343,7 +352,7 @@ Total length: 84 bytes.
   identity is made. The X25519 identity key of an identity never changes (section 5.3).
 - Verified by: the relay on every UploadBundle (section 9.1); a client on every Bundle it
   fetched (section 5.4) and on the X25519 identity key that the first messages of a
-  session carry [pending: task 9].
+  session carry (section 16.8) [pending: task 12].
 
 ### 4.4 The signed prekey string
 
@@ -375,8 +384,8 @@ The id of a signed prekey is not part of the string (section 5.2).
 | OPK   | X25519 public key  | 32     | Handed out once, then deleted (section 9.3).   |
 
 An X25519 public key is the 32-byte string of RFC 7748 section 5. The rules for using
-these keys, for rotating the signed prekey and for choosing prekey ids are in part 2
-[pending: task 9].
+these keys are in section 16 [pending: task 10]; those for rotating the signed prekey and
+for choosing prekey ids are in section 21 [pending: task 13].
 
 ### 5.2 The fields of a bundle
 
@@ -399,7 +408,8 @@ start a session with it while it is offline.
   bundle carries at most one (section 7.11).
 - The two prekey ids and the one-time prekey are not signed. The relay, or whoever sits
   between a client and the relay, can change them. The result is a session that does not
-  start, not a session with someone else [pending: task 9].
+  start or a session without a one-time prekey, not a session with someone else
+  (section 16.9) [pending: task 10] [pending: task 12].
 
 ### 5.3 The X25519 identity key is written once
 
@@ -410,10 +420,14 @@ change for the life of the identity.
   refuses every later upload that carries another one with IDENTITY_KEY_MISMATCH. It
   compares the 32 bytes of the key, not the signature (section 4.1, rule 5), and keeps the
   signature of the first upload [pending: task 5].
-- A client pins the X25519 identity key of a contact the first time a bundle of that
-  contact passes the checks of section 5.4 [pending: task 12] and refuses every later
-  bundle of that contact that carries another one
-  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
+- A client pins the X25519 identity key of a contact in the transaction that stores its
+  first session with that contact: the key of a bundle that passed the checks of
+  section 5.4, when the client made the session (section 16.6), or the key of the initial
+  header, when it accepted the first initial message of the contact (section 16.8)
+  [pending: task 12]. It refuses every later bundle of that contact that carries another
+  key
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
+  and every later initial header that does (section 16.8) [pending: task 12].
 
 ### 5.4 The client's checks
 
@@ -429,7 +443,9 @@ The lengths of the fields were checked before, when the frame was parsed (sectio
 | 3   | If the client has a pinned X25519 identity key for the contact: `identity_dh_key` equals it   | IDENTITY_KEY_MISMATCH |
 | 4   | `signed_prekey.signature` verifies under `identity` over the string of section 4.4, built from `identity` and `signed_prekey.key` | BAD_BUNDLE |
 
-- When all four pass and the client has no pin for the contact, it pins `identity_dh_key`.
+- When all four pass and the client has no pin for the contact, it pins `identity_dh_key`
+  in the transaction that stores the session made from the bundle (section 16.6, step 8)
+  [pending: task 12]. A key agreement that fails after the checks pins nothing.
 - A bundle that fails a check is not used: the client computes no Diffie-Hellman value
   with any of its keys and pins nothing.
 - The prekey ids and the one-time prekey have no check of their own (section 5.2).
@@ -488,7 +504,7 @@ The relay process speaks WebSocket without TLS
 [test: tests/test_routing.py::test_websocket_opens_on_ws]. In a deployment a reverse proxy
 in front of it ends TLS and forwards the path `/ws`. The protocol makes no use of the TLS
 session: the login is not bound to it (section 8.7). What a client refuses to dial without
-TLS is specified in part 2 [pending: task 9].
+TLS is specified in section 23.1 [pending: task 14].
 
 ## 7. Frames
 
@@ -498,7 +514,8 @@ The frames are protobuf messages, proto3 syntax. The schema lives in `proto/sott
 which is normative for the names, numbers and types of the fields; this section lists its
 content for the relay protocol and adds the rules that a schema cannot express. A message
 enters the file with the pull request that implements its handler, the login frames first
-[pending: task 4].
+[pending: task 4]. The messages of the end-to-end protocol are in the same file and are
+listed in section 19.1.
 
 ```proto
 syntax = "proto3";
@@ -1081,14 +1098,14 @@ at most once [pending: task 5].
 
 A fetch never fails for lack of a one-time prekey: a registered identity always gets a
 Bundle [pending: task 5]. A bundle without a one-time prekey still starts a session
-[pending: task 9].
+(section 16.6) [pending: task 10].
 
 ### 9.4 The count of one-time prekeys
 
 LoggedIn and BundleStored carry the number of one-time prekeys that the relay holds for
 the identity at that moment [pending: task 5]. A client uses it to decide when to upload
-more [pending: task 9]. The relay sends no other notice when the number falls
-[pending: task 5].
+more (section 21.3) [pending: task 14]. The relay sends no other notice when the number
+falls [pending: task 5].
 
 ## 10. Messages
 
@@ -1147,7 +1164,7 @@ ended (section 11.1).
 - When the relay does not hold the message, because the recipient acked it or it expired,
   the relay cannot know the repeat. It stores the message again and delivers it again
   [pending: task 6]. The recipient's client discards the second copy by the pair (sender,
-  message id) and acks it [pending: task 9].
+  message id) and acks it (section 20.2) [pending: task 12].
 
 This is the case of a Send repeated after a lost Stored.
 
@@ -1178,7 +1195,7 @@ way when the recipient of the first message acked it (threat model, "Not protect
 
 Delivery is at least once. A client receives a message more than once after a lost Ack, a
 replaced connection or a repeated Send, and discards the copies by the pair (sender,
-message id) [pending: task 9].
+message id) (section 20.2) [pending: task 12].
 
 ### 10.5 Ack
 
@@ -1197,7 +1214,7 @@ An Ack names messages by the pair (sender, message id), as the Deliver carried t
   [pending: task 6].
 
 A client acks a message only after it saved everything it needs from it; the exact rule is
-in part 2 [pending: task 9]. An Ack tells the relay to delete the only other copy.
+in section 22.2 [pending: task 14]. An Ack tells the relay to delete the only other copy.
 
 ### 10.6 Lost frames
 
@@ -1224,15 +1241,16 @@ Three actions are named in the tables below.
 
 - Retry: the connection is gone. The client opens a new connection, logs in and repeats
   every Send that has no Stored and no Error whose action is Stop. It waits before each
-  attempt and lengthens the wait while attempts fail; the schedule is specified in part 2
-  [pending: task 9].
+  attempt and lengthens the wait while attempts fail; the schedule is specified in
+  section 23.4 [pending: task 14].
 - Stop: the client does not reconnect and does not repeat the frame by itself. It reports
   the condition, and the next step is taken by a person.
 - Back off: the connection stays open. The client waits before it sends the refused frame
   again, unchanged. The wait is FRAME_REFILL_SECONDS or longer and grows while the same
-  frame keeps being refused; the schedule is specified in part 2 [pending: task 9]. A
-  frame that waits in Back off when the connection ends is sent again after the next
-  login.
+  frame keeps being refused; the schedule is specified in section 23.5
+  [pending: task 14]. A frame that waits in Back off when the connection ends is sent
+  again after the next login. An UploadBundle is the exception: section 21.4 says what
+  the next login uploads.
 
 ### 11.2 Error codes
 
@@ -1303,8 +1321,7 @@ A check that ends in one of these names hands back nothing else: the decoder ret
 bytes
 [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
 A client that gets one of the first three reports it and uses neither the id nor the
-bundle [pending: task 12]. Part 2 adds the local results of the end-to-end protocol
-[pending: task 9].
+bundle [pending: task 12]. Section 24.2 names the local results of the end-to-end protocol.
 
 ## 12. Limits
 
@@ -1329,8 +1346,8 @@ The values are the defaults of the relay's settings. The relay reads each from t
 environment variable of the same name with the prefix `RELAY_`, and a test compares this
 table with the settings, constant by constant [pending: task 8].
 
-No frame carries a limit, so a client uses the defaults of the three it needs:
-MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP and FRAME_REFILL_SECONDS.
+No frame carries a limit, so a client uses the defaults of the four it needs:
+MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECONDS.
 
 - MAX_FRAME_BYTES is a constant of relay protocol version 1. A relay that serves clients
   MUST NOT run with another value: with a larger one it stores a message that no client
@@ -1338,6 +1355,13 @@ MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP and FRAME_REFILL_SECONDS.
 - A relay with another ONE_TIME_PREKEY_CAP or FRAME_REFILL_SECONDS still works with a
   client that assumes the defaults (sections 9.1 and 11.1). These and the other settings
   of the table are the operator's to change.
+- A client builds two times of its own on MESSAGE_TTL_SECONDS: how long it keeps a seen id
+  and how long it keeps the private key of a signed prekey that it replaced
+  (sections 20.4 and 21.2). A relay with a shorter value works with a client that assumes
+  the default. With a longer value, a message that waited longer than the default and one
+  week can name a signed prekey that the client has deleted, or be a copy of a message
+  whose seen id is gone. Such a message fails and is never read a second time
+  (sections 16.8 and 20.4).
 
 ### 12.2 Token buckets
 
@@ -1435,12 +1459,22 @@ of Hello, the first frame of every connection.
 
 ### 14.2 The end-to-end protocol version
 
-The end-to-end protocol version is 1. It appears inside the payload, in the peer envelope
-that part 2 specifies [pending: task 9]. The relay does not read it and has no rule about
-it (section 7.12).
+The end-to-end protocol version is 1. It appears in one place on the wire, inside the
+payload: the `version` field of the peer envelope (section 19.2). It is also the first
+byte of the session associated data, which is not sent and which every message of a
+session authenticates (section 16.5) [pending: task 12]. The relay does not read it and
+has no rule about it (section 7.12).
 
-- What a client does with an envelope that names a version it does not implement is a rule
-  of part 2 [pending: task 9].
+- In every version of the end-to-end protocol the payload is a `PeerMessage` whose field 1
+  is `version`.
+- A client reads `version` before it applies any other rule to the envelope. A client that
+  reads a `version` other than 1, 0 included, decrypts nothing and changes nothing in its
+  store: it reports that the contact uses a version it does not implement and acks the
+  message (section 19.4) [pending: task 12].
+- A change that a client of version 1 would refuse or misread is a new version: another
+  layout of the header, of the associated data or of the padding, another cipher or key
+  derivation. A new member of the `Content` oneof is not: a client of version 1 reports
+  such a message as UNKNOWN_CONTENT (section 19.5).
 - A bundle has no version field. The keys and signatures of a bundle are those of version
   1; a version that adds a key adds a field and a signed string for it.
 
@@ -1462,6 +1496,7 @@ vector and gets the stated results agrees with the others on every byte the vect
 The first file is `vectors/identity.json`; section 15.5 names its operations and the keys
 of their objects
 [test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
+Section 24.3 says what the vectors of the key agreement and of the ratchet record.
 
 ### 15.2 The schema of a vector file
 
@@ -1481,7 +1516,7 @@ Each vector is a JSON object.
 | `inputs`        | object | always                   | Everything the operation consumes                              |
 | `intermediates` | object | always, MAY be empty     | Every value the operation computes on the way to its result    |
 | `outputs`       | object | positive case only       | The expected result, MAY be empty for a check that passes      |
-| `error`         | string | negative case only       | The expected failure: one name of section 11                   |
+| `error`         | string | negative case only       | The expected failure: one name of section 11 or of section 24.2 |
 
 Rules:
 
@@ -1493,7 +1528,7 @@ Rules:
 - `intermediates` holds each value an implementation needs to find where it went wrong,
   the signed strings of section 4 among them.
 - `error` is an Error code of section 11.2, the name of a close code of section 11.3 or a
-  local result of section 11.4, spelled as there.
+  local result of section 11.4 or of section 24.2, spelled as there.
 - A reader refuses a file whose `schema` it does not know, and reports a vector whose
   `operation` it does not implement instead of skipping it.
 
@@ -1552,7 +1587,1415 @@ prekey ids are numbers, and every other value is a hex string.
   accept under such a key for every string; these vectors are refused before any signature
   is verified.
 
-## 16. Not part of this protocol
+## 16. Key agreement
+
+### 16.1 What it is
+
+Two identities agree on a secret with X3DH Revision 1 and two deviations from it:
+signatures are Ed25519 instead of XEdDSA, and an identity has an X25519 identity key of its
+own, which its Ed25519 identity key signs (section 5.1). Section 25.1 lists every
+difference from that text with its reason.
+
+A key agreement gives both sides a 32-byte secret SK (section 16.4) and the session
+associated data of 161 bytes (section 16.5). The relay takes part only by handing out the
+bundle (section 9.2) and by passing on the messages that carry the initial header.
+
+Terms of part 2:
+
+- A contact: an identity whose user id the user gave to the client. The client holds the
+  32 bytes that the id decodes to (section 3.3). The id of the client's own identity is
+  never a contact: a client refuses to add it [pending: task 12].
+- The initiator, A in layouts: the client that starts a session from a fetched bundle.
+- The responder, B in layouts: the client whose bundle was fetched.
+- A session: what two clients share after a key agreement. At each client it is the
+  ratchet state of section 17.2, the session associated data and, at the initiator, the
+  initial header (section 16.7).
+- An initial message: a message whose envelope carries an initial header (section 19.3).
+- The peer: the identity at the other end of a session.
+
+### 16.2 The keys
+
+| Key              | Kind                                   | Made                                   | Role                                                                 |
+|------------------|----------------------------------------|----------------------------------------|----------------------------------------------------------------------|
+| IKsig_A, IKsig_B | Ed25519 identity key (section 3.1)     | Once, with the identity                | Signs IKdh and SPK (sections 4.3 and 4.4). Stands in the session associated data. Enters no Diffie-Hellman computation. |
+| IKdh_A, IKdh_B   | X25519 identity key                    | Once, with the identity                | DH1 (IKdh_A) and DH2 (IKdh_B). Stands in the session associated data. |
+| SPK_B            | Signed prekey, X25519, with a u32 id   | By B, replaced by section 21.2         | DH1 and DH3. Its key pair is the first ratchet key pair of B (section 17.3). |
+| OPK_B            | One-time prekey, X25519, with a u32 id, not signed | By B, in batches (section 21.3) | DH4, in one key agreement.                                        |
+| EK_A             | Ephemeral key, X25519                  | By A, for one key agreement            | DH2, DH3 and DH4. Stands in the session associated data as the bytes that were sent (section 16.5). |
+
+- An X25519 private key is 32 random bytes. It is the scalar input of the X25519 function
+  of RFC 7748 section 5, which clamps it. The public key is the output of that function
+  for the private key and the base point 9: 32 bytes.
+- Both libraries use these raw forms: `X25519PrivateKey.from_private_bytes`,
+  `private_bytes_raw` and `public_key().public_bytes_raw()` in the Python package
+  cryptography; `Curve25519.KeyAgreement.PrivateKey(rawRepresentation:)`,
+  `rawRepresentation` and `publicKey.rawRepresentation` in CryptoKit. A test vector
+  carries a private key as these 32 bytes [pending: task 10].
+- A public key is stored, compared and put into a byte layout as the 32 bytes that were
+  generated or received. No implementation decodes a public key and encodes it again
+  [pending: task 10] [pending: task 11].
+- An identity makes the key pair of IKdh together with its Ed25519 key pair and signs the
+  string of section 4.3 for it. Any signature that verifies serves: the initial header and
+  the bundle of one identity can carry different signature bytes (section 4.1, rule 5).
+
+### 16.3 The Diffie-Hellman function
+
+DH(k, P) is the X25519 function of RFC 7748 section 5 for the private key k and the public
+key P. Its output is 32 bytes. The calls are `X25519PrivateKey.exchange` in the Python
+package cryptography and `sharedSecretFromKeyAgreement(with:)` in CryptoKit, whose result
+is read as its raw bytes.
+
+An output of 32 zero bytes is refused: the operation that computed it ends with the result
+ZERO_DH and uses the output for nothing [pending: task 10].
+
+- This is a rule of this text because the two libraries differ. The Python package
+  cryptography raises an error for such an output. CryptoKit returns it, by a comment in
+  the source of swift-crypto; nothing in this repository runs CryptoKit.
+- Every implementation does both, whatever its library: it turns an error of the library
+  on this call into ZERO_DH, and it compares the 32 bytes of an output with zero itself,
+  by the OR of all bytes and not by a branch per byte.
+- The rule holds for every Diffie-Hellman computation of this protocol: the four of the
+  key agreement and those of the ratchet (section 17).
+- The output is all zero exactly when P is a point of small order. An honest key never is.
+
+### 16.4 The key derivation
+
+SK is one call of HKDF (RFC 5869) [pending: task 10]:
+
+| Parameter          | Value                                                                    |
+|--------------------|--------------------------------------------------------------------------|
+| Hash               | SHA-256 (RFC 6234)                                                       |
+| Salt               | 32 bytes `00`, passed to the library as an explicit value                |
+| Input key material | With a one-time prekey: F \|\| DH1 \|\| DH2 \|\| DH3 \|\| DH4, 160 bytes. Without: F \|\| DH1 \|\| DH2 \|\| DH3, 128 bytes. F is 32 bytes `ff`. |
+| Info               | ASCII `sotto/1 x3dh`, 12 bytes, hex `736f74746f2f312078336468`           |
+| Output length      | 32 bytes                                                                 |
+| Split              | None: the 32 bytes are SK                                                |
+
+The calls are `HKDF(algorithm=hashes.SHA256(), length=32, salt=bytes(32), info=...)` with
+`derive` in the Python package cryptography and
+`HKDF<SHA256>.deriveKey(inputKeyMaterial:salt:info:outputByteCount:)` in CryptoKit. An HKDF
+object of the Python package serves one call.
+
+### 16.5 The session associated data
+
+Both sides build the same 161 bytes, the keys of the initiator first [pending: task 10]:
+
+| Offset | Length | Field   | Value                                                  |
+|--------|--------|---------|--------------------------------------------------------|
+| 0      | 1      | version | `01`, the end-to-end protocol version as a u8          |
+| 1      | 32     | IKsig_A | The identity key of the initiator                      |
+| 33     | 32     | IKdh_A  | The X25519 identity key of the initiator               |
+| 65     | 32     | IKsig_B | The identity key of the responder                      |
+| 97     | 32     | IKdh_B  | The X25519 identity key of the responder               |
+| 129    | 32     | EK_A    | The ephemeral key of the initiator: the bytes of `ephemeral_key` as the initiator sent them and as the responder received them |
+
+Total length: 161 bytes.
+
+The session associated data is the first part of the associated data of every message of
+the session (section 18.2). The Diffie-Hellman values prove possession of the X25519 keys
+only, while a user checks the Ed25519 key, the user id. A signature over an X25519 key
+proves nothing about who holds its private key: anyone can sign the X25519 keys of someone
+else. With both Ed25519 keys in the associated data, a message decrypts only when both
+sides mean the same two identities. This is the case of an unknown key share: C publishes
+the X25519 keys of B under its own signature, A starts a session with C, and the message
+that reaches B does not decrypt there, because A put IKsig_C where B puts IKsig_B
+[pending: task 10] [pending: task 13].
+
+The ephemeral key stands in the associated data as bytes, because the Diffie-Hellman
+values do not fix its bytes. The X25519 function gives one output for more than one
+32-byte string: it ignores the most significant bit of the last byte (RFC 7748
+section 5), and for a clamped private key a point and its sum with a point of small
+order, which is another public key, give one output. Other bytes of either kind in
+`ephemeral_key` therefore give the responder the same SK. They give another session
+associated data, so no message decrypts under it [pending: task 10] [pending: task 13].
+The record of an accepted initial message is found by these bytes and rests on that
+(section 20.4).
+
+### 16.6 The initiator
+
+The initiator runs these steps in this order, for a contact and with a Bundle that it
+fetched for this key agreement [pending: task 10]. One Bundle starts at most one session.
+
+1. It runs the four checks of section 5.4 on the Bundle and stops at the first that
+   fails. No later step runs for a bundle that failed a check.
+2. It makes EK_A, a new X25519 key pair from 32 random bytes.
+3. It computes, with the function of section 16.3:
+
+   ```
+   DH1 = DH(private key of IKdh_A, SPK_B)
+   DH2 = DH(private key of EK_A,   IKdh_B)
+   DH3 = DH(private key of EK_A,   SPK_B)
+   DH4 = DH(private key of EK_A,   OPK_B)    only with a one-time prekey
+   ```
+
+   IKdh_B, SPK_B and OPK_B are `identity_dh_key`, `signed_prekey.key` and
+   `one_time_prekey.key` of the Bundle. When the Bundle carries no one-time prekey, DH4
+   is left out: it is not computed, and nothing stands in its place in step 5.
+4. When one of the outputs is 32 zero bytes, the key agreement ends with ZERO_DH
+   (section 16.3).
+5. It derives SK (section 16.4).
+6. It builds the session associated data (section 16.5) from its own two identity keys,
+   from `identity` and `identity_dh_key` of the Bundle and from the public key of EK_A.
+7. It deletes the private key of EK_A, the outputs DH1 to DH4 and the input of the key
+   derivation.
+8. It initialises the ratchet as initiator with SK, SPK_B and 32 random bytes
+   (section 17.3) and deletes SK. In one transaction it stores the session with its
+   initial header (section 16.7) and, when the contact has no pinned X25519 identity
+   key, `identity_dh_key` of the Bundle as its pin.
+
+A key agreement that ends in a failure stores nothing, a pin included, and the client
+reports the result (section 20.3). A session without a one-time prekey is a session like
+any other for every later step; the threat model states what its first messages lose.
+
+### 16.7 The initial header
+
+The initial header is what the responder needs to run the same key agreement. It is the
+`InitialHeader` message of section 19.3, with these values [pending: task 12]:
+
+| Field                   | Length | Value                                                           |
+|-------------------------|--------|-----------------------------------------------------------------|
+| `identity_dh_key`       | 32     | IKdh_A                                                          |
+| `identity_dh_signature` | 64     | A signature of A over the string of section 4.3 for IKdh_A      |
+| `ephemeral_key`         | 32     | The public key of EK_A                                          |
+| `signed_prekey_id`      | u32    | The `signed_prekey.id` of the Bundle                            |
+| `one_time_prekey_id`    | u32    | The `one_time_prekey.id` of the Bundle. Present exactly when DH4 was computed |
+
+IKsig_A is not a field. An initial header travels in a payload, and the identity key of
+the sender of a payload is the `sender` of its Deliver (section 7.14): the relay of this
+repository takes it from the connection that sent the message. There is no second copy
+that a client could forget to compare.
+
+When the initiator sends it, and when it stops [pending: task 12]:
+
+- A session that a client made as initiator holds its initial header from the moment the
+  session is stored.
+- While a session holds an initial header, every message that the client encrypts on the
+  session carries it, with the same value in every field each time.
+- The session drops its initial header in the transaction that saves the first message
+  decrypted on this session (section 22.2). No message encrypted on the session after
+  that transaction carries one.
+- A message that was encrypted before keeps its bytes when it is sent again
+  (section 22.2), the initial header included.
+- A session that a client made as responder never holds an initial header.
+
+### 16.8 The responder
+
+A client that received a Deliver from a contact with a payload that carries an initial
+header runs these steps in this order and stops at the first that fails
+[pending: task 12]. Steps 1 and 2 run for every such message. Steps 3 to 9 run only when
+the client holds no record for the pair of the `sender` and the `ephemeral_key`
+(section 20.4); with a record, section 20.2 says what follows.
+
+1. IKsig_A is the `sender` of the Deliver. The client builds the string of section 4.3
+   from IKsig_A and `identity_dh_key` and verifies `identity_dh_signature` over it under
+   IKsig_A. When it does not verify, the result is BAD_INITIAL_HEADER. Until this step
+   passed, the client computes no Diffie-Hellman value with any key of the message.
+2. When the client holds a pinned X25519 identity key for the contact (section 5.3),
+   `identity_dh_key` has to equal it. Otherwise the result is IDENTITY_KEY_MISMATCH.
+3. Among the signed prekeys it holds, the newest and those in their grace period
+   (section 21.2), it finds the one whose id is `signed_prekey_id`. With none, the result
+   is UNKNOWN_SIGNED_PREKEY. A signed prekey whose grace period is over counts as not
+   held, whether or not its private key is deleted yet. The key is found by the id of
+   the message, never by taking the newest.
+4. When `one_time_prekey_id` is present, it finds the one-time prekey with that id among
+   those whose private key it holds. With none, the result is UNKNOWN_ONE_TIME_PREKEY.
+5. It computes, with the function of section 16.3:
+
+   ```
+   DH1 = DH(private key of SPK_B,  IKdh_A)
+   DH2 = DH(private key of IKdh_B, EK_A)
+   DH3 = DH(private key of SPK_B,  EK_A)
+   DH4 = DH(private key of OPK_B,  EK_A)     only with `one_time_prekey_id`
+   ```
+
+   IKdh_A and EK_A are `identity_dh_key` and `ephemeral_key` of the initial header. When
+   one of the outputs is 32 zero bytes, the result is ZERO_DH.
+6. It derives SK (section 16.4), with the outputs in the same order as the initiator.
+7. It builds the session associated data (section 16.5): IKsig_A of step 1 and IKdh_A of
+   the initial header first, then its own identity key and X25519 identity key, then
+   `ephemeral_key` as the bytes it received.
+8. It initialises a ratchet as responder with SK and the key pair of the signed prekey of
+   step 3 (section 17.3) and decrypts the message with it (section 17.7). When the
+   message does not decrypt, the result is DECRYPT_FAILED: everything computed in steps 5
+   to 8 is discarded, nothing is stored, and the one-time prekey of step 4 keeps its
+   private key.
+9. When the message decrypts, the client saves in the one transaction of section 22.2:
+   the session; the record of the pair (IKsig_A, EK_A) with `signed_prekey_id`
+   (section 20.4); the deletion of the private key of the one-time prekey of step 4; and,
+   when the contact has no pinned X25519 identity key, `identity_dh_key` as its pin.
+
+The message that the responder decrypts in step 8 is the first message of the initiator
+that reaches it. It need not be number 0: every message of the initiator carries the
+initial header until the initiator has decrypted a message of the responder. Any number
+up to MAX_SKIP is decrypted in step 8, and the keys before it are skipped (section 17.7).
+
+### 16.9 What is not authenticated
+
+The prekey ids and the one-time prekey of a bundle are not signed (section 5.2). Of the
+fields of an initial header, `identity_dh_key` is covered by its signature and
+`ephemeral_key` by the session associated data of a message that decrypts
+(section 16.5); nothing covers the two prekey ids. Whoever controls the relay can change
+all of them. The table is about a Bundle and about the initial header of a message that
+matches no record (section 20.4). Each change ends in one of three ways: the session
+starts as it does without the change, the session does not start, or the session starts
+without a one-time prekey. None ends in a session with someone else, and none in a
+message that decrypts to another plaintext [pending: task 10] [pending: task 12]:
+
+| Change                                                              | What follows                                                                                   |
+|---------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| The one-time prekey of a Bundle is replaced by another key          | A computes a DH4 that B cannot compute. B derives another SK: DECRYPT_FAILED. Other bytes that give the same Diffie-Hellman output (section 16.5) change nothing: the session starts |
+| The one-time prekey id of a Bundle or of an initial header is changed | B holds no key with the id: UNKNOWN_ONE_TIME_PREKEY. Or it holds another key: DECRYPT_FAILED  |
+| The one-time prekey is taken out of a Bundle                        | The session starts without a one-time prekey (section 16.6)                                    |
+| One one-time prekey is handed to two initiators                     | The first initial message that B accepts starts its session and deletes the private key. The messages of the other initiator: UNKNOWN_ONE_TIME_PREKEY |
+| The signed prekey id of a Bundle or of an initial header is changed | B holds no key with the id: UNKNOWN_SIGNED_PREKEY. Or it holds another key: DECRYPT_FAILED      |
+| A Bundle carries a signed prekey that B replaced                    | During the grace period of that key (section 21.2) the session starts. After it: UNKNOWN_SIGNED_PREKEY |
+| `one_time_prekey_id` is taken out of an initial header or put in    | B derives another SK, or finds no key: DECRYPT_FAILED or UNKNOWN_ONE_TIME_PREKEY                |
+| `ephemeral_key` of an initial header is changed                     | B derives another SK, or the same SK under another session associated data (section 16.5): DECRYPT_FAILED. A key of small order: ZERO_DH |
+| `identity_dh_key` of an initial header is changed                   | The signature does not verify, or the key is not the pinned one: BAD_INITIAL_HEADER or IDENTITY_KEY_MISMATCH |
+| `identity_dh_signature` of an initial header is replaced            | By another signature of A over the same string: no effect (section 4.1, rule 5). By any other bytes: BAD_INITIAL_HEADER |
+
+A message that matches a record belongs to a session that the responder made before
+(section 20.4). Other rules hold for what the relay changes in the envelope of such a
+message [pending: task 12] [pending: task 13]:
+
+- Steps 1 and 2 of section 16.8 read `identity_dh_key` and its signature, and the
+  record is found by `ephemeral_key`. The two prekey ids are not read: a change to them
+  has no effect.
+- A changed `ephemeral_key` does not match the record of its session, and the message
+  fails: in steps 3 to 8 of section 16.8, at the latest in step 8 under another session
+  associated data, or on the session of another record that the changed bytes match.
+- A message whose initial header was taken off decrypts when the responder holds its
+  session (section 20.2, I9). A later message of a session, in front of which the
+  initial header of that session was put, decrypts as well (I4).
+- How the fields of an envelope are encoded has no effect (section 19.4).
+
+No change of this section gives a plaintext that the sender did not seal, another sender
+or another message id: those are fixed by the associated data (section 18.2).
+
+A session that does not start exists at the initiator only. Its messages fail at the
+responder, each shown as a message that could not be read (section 20.3), until one of the
+two users resets the session.
+
+### 16.10 What each side deletes
+
+| Value                            | Initiator                                              | Responder                                                   |
+|----------------------------------|--------------------------------------------------------|-------------------------------------------------------------|
+| Private key of EK_A              | Step 7, before the session is stored                   | Never holds it                                              |
+| DH1 to DH4, the input of the KDF | Step 7                                                 | After step 6                                                |
+| SK                               | Step 8: it lives on only as the input of the first root key derivation | Step 8: it is the first root key and is replaced by the first DH ratchet step, inside the same decryption |
+| Private key of OPK_B             | Never holds it                                         | Step 9, in the transaction that accepts the initial message. Not deleted when a step fails |
+| Private key of SPK_B             | Never holds it                                         | At the end of its grace period (section 21.2)                |
+| The initial header               | With the first message decrypted on the session (section 16.7) | Not stored: the record of section 20.4 keeps IKsig_A and EK_A |
+
+A deletion from memory is as good as the platform allows; the threat model says what
+Python does not allow. A deletion from the client store follows section 22.3.
+
+## 17. The Double Ratchet
+
+### 17.1 What it is
+
+The messages of a session are encrypted with the Double Ratchet of sections 2 and 3 of
+Revision 4 of that specification: the algorithm without header encryption and without the
+post-quantum parts. Section 25.2 lists every difference from that text with its reason.
+
+An implementation is a state machine without input or output of its own: it takes the
+state, the bytes of a message and every random value as arguments and returns the new
+state [pending: task 11]. The same code can so be driven by a test, by a vector and by the
+client.
+
+### 17.2 The state
+
+| Variable  | Type                        | Length  | Meaning                                                                 |
+|-----------|-----------------------------|---------|-------------------------------------------------------------------------|
+| DHs       | X25519 key pair             | 32 + 32 | The client's own ratchet key pair: private key and public key           |
+| DHr       | X25519 public key, or empty | 32      | The ratchet public key of the peer, the bytes as they were received     |
+| RK        | bytes                       | 32      | The root key                                                            |
+| CKs       | bytes, or empty             | 32      | The sending chain key                                                   |
+| CKr       | bytes, or empty             | 32      | The receiving chain key                                                 |
+| Ns        | u32                         |         | The number of the next message of the sending chain                     |
+| Nr        | u32                         |         | The number of the next message expected on the receiving chain          |
+| PN        | u32                         |         | The number of messages sent on the sending chain before the current one |
+| DHSTEPS   | u64                         |         | The number of DH ratchet steps this state has taken (section 17.7, step 5) |
+| MKSKIPPED | list of entries, in the order in which they were added | 0 to 2000 entries | The skipped message keys (section 17.8). An entry is a ratchet public key (32), a message number (u32), a message key (32) and a step (u64) |
+
+- "Empty" is a value of its own, not 32 zero bytes.
+- The state is no byte layout of this protocol. Its integers are numbers in memory with
+  the stated range and have no byte order; how a client writes the state into its store
+  is its own matter. Two of them reach the wire, PN and Ns, as big-endian fields of the
+  header (section 17.5).
+- Besides the ratchet state a session holds the session associated data (section 16.5)
+  and, at the initiator, the initial header (section 16.7).
+
+### 17.3 Initialisation
+
+The initiator, from SK and SPK_B of the key agreement and from 32 random bytes
+(section 16.6, step 8) [pending: task 11]:
+
+```
+DHs       = a new X25519 key pair from the 32 random bytes
+DHr       = SPK_B, the 32 bytes of the Bundle
+RK, CKs   = KDF_RK(SK, DH(private key of DHs, DHr))
+CKr       = empty
+Ns, Nr, PN, DHSTEPS = 0
+MKSKIPPED = no entry
+```
+
+The responder, from SK and the key pair of SPK_B (section 16.8, step 8)
+[pending: task 11]:
+
+```
+DHs       = the key pair of SPK_B
+DHr       = empty
+RK        = SK
+CKs, CKr  = empty
+Ns, Nr, PN, DHSTEPS = 0
+MKSKIPPED = no entry
+```
+
+The signed prekey pair of the responder is its first ratchet key pair, and SK is its first
+root key. The responder cannot encrypt in this state. It never has to: the state is stored
+only after it decrypted the first message of the initiator, and that decryption takes a DH
+ratchet step, which gives the responder a ratchet key pair of its own and a sending chain
+(section 17.7, step 5). A stored session of a responder holds neither SK nor the private
+key of the signed prekey [pending: task 12].
+
+### 17.4 The two key derivations
+
+KDF_RK(rk, dh) is one call of HKDF (RFC 5869). It returns a root key and a chain key
+[pending: task 11]:
+
+| Parameter          | Value                                                                    |
+|--------------------|--------------------------------------------------------------------------|
+| Hash               | SHA-256                                                                  |
+| Salt               | rk, the 32 bytes of the root key                                         |
+| Input key material | dh, the 32 bytes of one Diffie-Hellman output (section 16.3)             |
+| Info               | ASCII `sotto/1 ratchet`, 15 bytes, hex `736f74746f2f312072617463686574`  |
+| Output length      | 64 bytes                                                                 |
+| Split              | Bytes 0 to 31 are the new root key. Bytes 32 to 63 are the chain key     |
+
+KDF_CK(ck) is two calls of HMAC (RFC 2104) with SHA-256 under the same key. It returns a
+message key and the next chain key [pending: task 11]:
+
+| Output         | Key              | Data             | Length                                  |
+|----------------|------------------|------------------|-----------------------------------------|
+| Message key    | ck, 32 bytes     | The one byte `01` | 32 bytes, the whole HMAC value         |
+| Next chain key | ck, 32 bytes     | The one byte `02` | 32 bytes, the whole HMAC value         |
+
+KDF_CK has no salt, no info and no split. The calls are the `hmac` module of the Python
+standard library and `HMAC<SHA256>` in CryptoKit.
+
+This protocol calls HKDF in two places, sections 16.4 and 17.4, and their info strings
+differ: `sotto/1 x3dh` and `sotto/1 ratchet` [pending: task 11].
+
+### 17.5 The message header
+
+The header of a message is 40 bytes [pending: task 11]:
+
+| Offset | Length | Field | Value                                                                  |
+|--------|--------|-------|------------------------------------------------------------------------|
+| 0      | 32     | DH    | The ratchet public key of the sender, the public key of its DHs        |
+| 32     | 4      | PN    | u32, big-endian: the PN of the sender                                  |
+| 36     | 4      | N     | u32, big-endian: the number of this message on its sending chain       |
+
+Total length: 40 bytes.
+
+The header is fixed bytes and not a protobuf message, because it is part of the associated
+data and protobuf serialization is not canonical. A receiver authenticates and compares the
+40 bytes exactly as it received them (section 18.2). In the steps below `H.DH`, `H.PN` and
+`H.N` are the fields of a received header H.
+
+### 17.6 Encryption
+
+Inputs: the state; the padded plaintext P (section 19.6); A, the 177 bytes of the session
+associated data followed by the message id (section 18.2); a nonce of 12 random bytes. The
+steps, in this order [pending: task 11]:
+
+1. When CKs is empty, the result is NO_SENDING_CHAIN; no stored session is in that state
+   (section 17.3). When Ns is 2^32 - 1, the result is CHAIN_EXHAUSTED (section 17.9).
+2. mk is the message key of KDF_CK(CKs), and CKs becomes its next chain key.
+3. H is the public key of DHs, then PN, then Ns, in the layout of section 17.5.
+4. Ns becomes Ns + 1.
+5. W is P sealed under mk with the nonce and the associated data A || H (section 18).
+6. mk is deleted.
+
+The result is H, W and the new state. The client commits the new state together with the
+message before any byte leaves (section 22.2).
+
+### 17.7 Decryption
+
+Inputs: the state; H, the 40 bytes of the `header` field as received; W, the bytes of the
+`ciphertext` field as received; A, the 177 bytes of the session associated data followed
+by the `message_id` of the Deliver; 32 random bytes, which become the private key of
+sub-step 4 of step 5 when the decryption takes a DH ratchet step and are not used
+otherwise. Every step works on a copy of the state. The steps, in this order
+[pending: task 11]:
+
+1. When `H.N` is 2^32 - 1, the result is CHAIN_EXHAUSTED (section 17.9).
+2. When MKSKIPPED has an entry for the pair (`H.DH`, `H.N`): mk is its message key, the
+   entry is removed, and the steps go on at step 8.
+3. When `H.DH` equals DHr, 32 bytes compared with 32 bytes, the message belongs to the
+   current receiving chain:
+   - when CKr is empty, the result is DECRYPT_FAILED;
+   - when `H.N` is less than Nr, the result is DECRYPT_FAILED: the key of that number
+     was used or purged;
+   - when `H.N` is more than Nr + MAX_SKIP, the result is TOO_MANY_SKIPPED;
+   - otherwise the steps go on at step 6.
+4. Otherwise `H.DH` is a new ratchet key of the peer; an empty DHr equals no key. Before
+   any key is derived:
+   - when `H.PN` is more than Nr + MAX_SKIP, the result is TOO_MANY_SKIPPED;
+   - when `H.N` is more than MAX_SKIP, the result is TOO_MANY_SKIPPED.
+5. The DH ratchet step:
+   1. When CKr is not empty: while Nr is less than `H.PN`, one key is skipped
+      (section 17.8).
+   2. PN becomes Ns. Ns and Nr become 0. DHr becomes `H.DH`.
+   3. RK and CKr become the root key and the chain key of
+      KDF_RK(RK, DH(private key of DHs, DHr)).
+   4. DHs becomes a new X25519 key pair from the 32 random bytes of the inputs. The
+      private key it replaces leaves the state of the session. In the first DH ratchet
+      step of a responder that key is the private key of a signed prekey
+      (section 17.3): the client keeps it in its store until section 21.2 deletes it.
+      Every other replaced private key is deleted.
+   5. RK and CKs become the root key and the chain key of
+      KDF_RK(RK, DH(private key of DHs, DHr)).
+   6. DHSTEPS becomes DHSTEPS + 1, and the entries that are too old are purged
+      (section 17.8).
+
+   A Diffie-Hellman output of 32 zero bytes in sub-step 3 or 5 gives the result
+   ZERO_DH.
+6. While Nr is less than `H.N`, one key is skipped (section 17.8).
+7. mk is the message key of KDF_CK(CKr), CKr becomes its next chain key, and Nr becomes
+   Nr + 1.
+8. W is opened under mk with the associated data A || H (section 18). When it does not
+   verify, the result is DECRYPT_FAILED.
+9. mk is deleted. The copy is the new state. The result is the plaintext P and the number
+   of entries that the cap and the purge of section 17.8 removed from MKSKIPPED in steps
+   5 and 6. An entry that is replaced by a new one (section 17.8) is not counted.
+
+Every result but that of step 9 discards the copy: the state is byte for byte what it was
+before, and so are the skipped keys [pending: task 11]. A forged header can therefore not
+move a chain, replace a ratchet key or remove a stored key. The client keeps the new state
+only by the transaction of section 22.2.
+
+Steps 3 and 4 make every check of a count before step 5, 6 or 7 derives a key: a header
+that asks for more than MAX_SKIP keys costs the receiver no key derivation
+[pending: task 11].
+
+### 17.8 Skipped message keys
+
+A message can arrive after a later message of its chain. The key of every message that was
+passed over is kept until the message arrives or the key is purged.
+
+To skip one key of the receiving chain:
+
+```
+mk'  = the message key of KDF_CK(CKr)
+add the entry (DHr, Nr, mk', DHSTEPS) at the end of MKSKIPPED
+CKr  = the next chain key of KDF_CK(CKr)
+Nr   = Nr + 1
+```
+
+An entry that MKSKIPPED already has for the same ratchet public key and the same number
+is removed before the new one is added [pending: task 11].
+
+The rules [pending: task 11]:
+
+- MAX_SKIP is 1000. One decryption skips at most 1000 keys of the chain that ends and at
+  most 1000 keys of the chain of its message (section 17.7, steps 3 and 4).
+- SKIPPED_KEYS_CAP is 2000. A state holds at most 2000 entries. When an entry is added to
+  a list of 2000, the entry that was added first is removed.
+- SKIPPED_KEY_STEPS is 5. Step 5 of a decryption removes, after it raised DHSTEPS, every
+  entry whose step plus 5 is DHSTEPS or less. The keys of a receiving chain are so kept
+  while that chain and the four that follow it are the current one, and are purged with
+  the fifth DH ratchet step after the chain began.
+- An entry is removed when a message uses its key (section 17.7, step 2).
+- Every entry that the cap or the purge removes stands for a message that the peer sent
+  and that did not arrive in time. A decryption returns their number, and the client
+  reports it (section 20.3).
+- When more than MAX_SKIP messages of one chain in a row never arrive, every later
+  message of that sender fails in this session with TOO_MANY_SKIPPED: on the same chain
+  the number only grows, and the first header of a later chain carries the gap in its
+  PN. The other direction keeps working. Only a reset repairs the session
+  (section 20.6).
+
+All of this happens on the copy of the state: a message that does not decrypt adds no
+entry and removes none.
+
+### 17.9 The end of a chain
+
+A chain holds the message numbers 0 to 2^32 - 2. The number 2^32 - 1 is never sent, so
+that Ns, Nr and PN, which count the messages of a chain, fit a u32 [pending: task 11].
+
+- A client whose Ns is 2^32 - 1 cannot encrypt on that sending chain: the result is
+  CHAIN_EXHAUSTED. The next DH ratchet step, taken when a message of the peer with a new
+  ratchet key decrypts, begins a new sending chain. Until then the user can reset the
+  session (section 20.2).
+- A received header with N = 2^32 - 1 gets the result CHAIN_EXHAUSTED before any key is
+  derived.
+
+## 18. Message encryption
+
+### 18.1 The cipher
+
+A message is sealed with ChaCha20-Poly1305, the AEAD of RFC 8439 section 2.8
+[pending: task 11]:
+
+| Input           | Value                                                                        |
+|-----------------|------------------------------------------------------------------------------|
+| Key             | The message key mk of the ratchet, 32 bytes. One key seals one message       |
+| Nonce           | 12 random bytes, made for this encryption and sent with the message          |
+| Associated data | The 217 bytes of section 18.2                                                |
+| Plaintext       | The padded plaintext P of section 19.6, L bytes                              |
+| Output          | L bytes of ciphertext and a tag of 16 bytes                                  |
+
+The calls are `ChaCha20Poly1305(mk).encrypt(nonce, P, associated_data)` in the Python
+package cryptography, which returns the ciphertext followed by the tag, and
+`ChaChaPoly.seal(_:using:nonce:authenticating:)` in CryptoKit.
+
+The nonce is random although a message key seals one message. A key that is used a second
+time, for example after a state was restored from a copy, would with a fixed nonce give
+away the XOR of two plaintexts. A test vector takes the nonce as an input (section 15.2).
+
+### 18.2 The associated data
+
+| Offset | Length | Field                       | Value                                                    |
+|--------|--------|-----------------------------|----------------------------------------------------------|
+| 0      | 161    | Session associated data     | Section 16.5                                             |
+| 161    | 16     | Message id                  | The `message_id` of the Send and of the Deliver          |
+| 177    | 40     | Header                      | Section 17.5: the bytes of the `header` field            |
+
+Total length: 217 bytes [pending: task 11].
+
+- The sender takes the message id that it puts into the Send. The receiver takes the
+  `message_id` of the Deliver and the `header` field exactly as it received them. It
+  never builds the header again from numbers [pending: task 11] [pending: task 12].
+- The three parts have fixed lengths, so the 217 bytes split in one way only and no
+  length is written in front of a part.
+- The message id is the key by which a receiver discards copies (section 20.4). In the
+  associated data it is authentic: a message whose id was changed on the way does not
+  decrypt [pending: task 13].
+- The caller of the ratchet passes the first 177 bytes with every call, and the ratchet
+  adds the header [pending: task 11].
+
+### 18.3 The wire layout
+
+The `ciphertext` field of the envelope (section 19.2) holds, for a padded plaintext of L
+bytes [pending: task 11]:
+
+| Offset | Length | Field      | Value                                              |
+|--------|--------|------------|----------------------------------------------------|
+| 0      | 12     | Nonce      | The nonce of section 18.1                          |
+| 12     | L      | Ciphertext | The output of the cipher                           |
+| 12 + L | 16     | Tag        | The tag of the cipher                              |
+
+Total length: L + 28 bytes.
+
+This is the `combined` form of a CryptoKit `ChaChaPoly.SealedBox`. In the Python package
+cryptography it is the nonce followed by what `encrypt` returns. To open, a receiver takes
+the first 12 bytes as the nonce and passes the rest to the library with the associated
+data of section 18.2.
+
+## 19. The peer envelope and the plaintext
+
+### 19.1 The schema
+
+The payload of a Send and of a Deliver (sections 7.12 and 7.14) is one serialized
+`PeerMessage`. The plaintext of a message is a `Content`. Both are protobuf messages,
+proto3 syntax, in the schema file of the relay protocol, `proto/sotto.proto`, package
+`sotto`: one file holds every message of this protocol, and the macOS client takes one
+file. They enter the file with the pull request that implements the session
+[pending: task 12].
+
+```proto
+// The payload of a Send and of a Deliver: one PeerMessage.
+message PeerMessage {
+  uint32 version = 1;
+  InitialHeader initial_header = 2;
+  bytes header = 3;
+  bytes ciphertext = 4;
+}
+
+message InitialHeader {
+  bytes identity_dh_key = 1;
+  bytes identity_dh_signature = 2;
+  bytes ephemeral_key = 3;
+  uint32 signed_prekey_id = 4;
+  optional uint32 one_time_prekey_id = 5;
+}
+
+// The plaintext of a message before padding.
+message Content {
+  oneof body {
+    string text = 1;
+  }
+}
+```
+
+The field numbers are frozen by the rule of section 7.2 and were chosen by its rules:
+every message counts from 1 without a gap and every tag is one byte. In addition:
+
+- `version` is field 1 of `PeerMessage` in every version of the end-to-end protocol, so
+  that a client of any version can read it (section 19.4).
+- The first two fields of `InitialHeader` have the names, numbers and types of the first
+  two fields of `UploadBundle`.
+- `one_time_prekey_id` is the one field of this protocol with the proto3 label
+  `optional`: 0 is a valid prekey id, so the field needs a presence of its own.
+- `Content` is a oneof with one member. A kind of message that is added later is a new
+  member of the oneof with the next number, and travels as a message of the ratchet like
+  a text.
+
+The relay parses none of this (section 7.12).
+
+### 19.2 PeerMessage
+
+| Field            | No. | Type          | Length or value                                                  |
+|------------------|-----|---------------|------------------------------------------------------------------|
+| `version`        | 1   | uint32        | 1, the end-to-end protocol version (section 14.2)                |
+| `initial_header` | 2   | InitialHeader | Present while the session of the sender holds one (section 16.7) |
+| `header`         | 3   | bytes         | 40, the message header of section 17.5                           |
+| `ciphertext`     | 4   | bytes         | L + 28, the layout of section 18.3; L is a multiple of 256 and at least 256 |
+
+### 19.3 InitialHeader
+
+| Field                   | No. | Type            | Length or value                                         |
+|-------------------------|-----|-----------------|---------------------------------------------------------|
+| `identity_dh_key`       | 1   | bytes           | 32                                                      |
+| `identity_dh_signature` | 2   | bytes           | 64, over the string of section 4.3                      |
+| `ephemeral_key`         | 3   | bytes           | 32                                                      |
+| `signed_prekey_id`      | 4   | uint32          | 0 to 2^32 - 1                                           |
+| `one_time_prekey_id`    | 5   | optional uint32 | Present or absent; 0 to 2^32 - 1 when present           |
+
+Section 16.7 gives the value of each field.
+
+### 19.4 Parsing and malformed envelopes
+
+A client has one parse step that turns the `payload` of a Deliver into an envelope or
+into a result, in this order [pending: task 12]:
+
+1. A payload that does not parse as a `PeerMessage` gets the result BAD_ENVELOPE.
+2. `version` is read before any other rule is applied. When it is not 1, 0 included, the
+   result is UNSUPPORTED_VERSION, whatever the other fields hold.
+3. With `version` 1, the result is BAD_ENVELOPE when one of these holds:
+   - `header` is not 40 bytes;
+   - `ciphertext` is shorter than 284 bytes, or its length less 28 is not a multiple of
+     256;
+   - `initial_header` is present and its `identity_dh_key` is not 32 bytes, its
+     `identity_dh_signature` is not 64 bytes or its `ephemeral_key` is not 32 bytes.
+
+A field that the schema of the client does not have is ignored. As in section 7.3, a
+payload that parses is not valid by that alone, and nothing depends on how the peer
+serialized the message: the client reads `header` and `ciphertext` as the bytes of their
+fields, and no serialized message is signed, hashed or compared.
+
+A client that reads a `version` it does not implement decrypts nothing and changes
+nothing: it reports that the contact uses a version of the end-to-end protocol that this
+client does not implement, and acks the message (section 20.2). The `version` field is
+not authenticated at this point; the first byte of the session associated data binds
+every message that decrypts to version 1 (section 16.5).
+
+### 19.5 Content
+
+| Field  | No. | Type   | Length or value                                               |
+|--------|-----|--------|---------------------------------------------------------------|
+| `text` | 1   | string | UTF-8, 0 to MAX_TEXT_BYTES bytes when sent (section 19.7)     |
+
+After a message decrypted and its padding was removed (section 19.6), the client parses
+the bytes as a `Content` [pending: task 12]:
+
+- Bytes that do not parse, a `text` that is not UTF-8 included, give the result
+  BAD_CONTENT.
+- A `Content` in which no member that the client knows is set gives the result
+  UNKNOWN_CONTENT. A client of version 1 knows one member, `text`.
+- The text is whatever the peer chose to send. The command-line client of this
+  repository prints it with the C0, C1 and bidirectional control characters escaped
+  [pending: task 14].
+
+A message with the result BAD_CONTENT or UNKNOWN_CONTENT is a real message of the peer:
+it decrypted. The client keeps the new ratchet state and the seen id and acks the
+message, and it has no text to show (section 20.3).
+
+### 19.6 Padding
+
+The plaintext that is sealed is the serialized `Content`, then one byte `80`, then bytes
+`00` up to the next multiple of PADDING_BLOCK, 256 bytes [pending: task 12]:
+
+```
+P = Content || 80 || 00 ... 00
+```
+
+- For a `Content` of C bytes, P has 256 * (floor(C / 256) + 1) bytes. At least the byte
+  `80` is always added: a `Content` of 255 bytes gives 256 bytes, one of 256 bytes gives
+  512.
+- A sender adds no more padding than that.
+- To remove the padding, a receiver finds the last byte of P that is not `00`. It has to
+  be `80`, and the `Content` is the bytes in front of it. A receiver accepts any number
+  of `00` bytes behind the `80`.
+- When P has no byte other than `00`, or its last byte other than `00` is not `80`, the
+  plaintext has no padding. The result is BAD_PADDING, and the message is handled like
+  one with BAD_CONTENT (section 19.5).
+
+The padding is inside the sealed bytes. The relay sees the length of a message in steps
+of 256 bytes.
+
+### 19.7 The largest text
+
+MAX_TEXT_BYTES is 65019: a text of more bytes in UTF-8 is not sent, and the client
+refuses it with the result TEXT_TOO_LONG. The client checks the length before any other
+step of L1 (section 20.2): a text that is refused fetches no bundle and starts no key
+agreement [pending: task 12].
+
+The number follows from the payload limit of section 7.12, 65472 bytes, for the longest
+envelope:
+
+| Part                                                                       | Bytes  |
+|----------------------------------------------------------------------------|--------|
+| `Content`: tag 1, length 3, text 65019                                     | 65023  |
+| P: the `Content` and one byte `80`, 254 blocks of 256                      | 65024  |
+| `ciphertext`: P, nonce 12, tag 16                                          | 65052  |
+| `ciphertext` as a field: tag 1, length 3                                   | 65056  |
+| `header` as a field: tag 1, length 1, 40                                   | 42     |
+| `version` as a field: tag 1, value 1                                       | 2      |
+| `initial_header` as a field: tag 1, length 2, and at most 146 (keys 34 and 34, signature 66, two ids of at most 6 each) | 149 |
+| The payload                                                                | 65249  |
+
+One more block of 256 bytes makes 65505 and does not fit. The limit is one number for
+every message, with or without an initial header, so that a text that was accepted for
+sending fits whatever the state of the session. A receiver applies no limit of its own to
+a text: the largest frame bounds it [pending: task 12].
+
+## 20. Session rules
+
+### 20.1 What a client keeps
+
+For every contact:
+
+- its identity key and, once the client has seen it, its pinned X25519 identity key
+  (section 5.3);
+- a list of at most MAX_SESSIONS, 3, sessions, in an order. The first session of the list
+  is the sending session: the client encrypts on it and on no other.
+
+A session enters the list at its head, whether the client made it as initiator or as
+responder. A session on which a message decrypts moves to the head. When the list has more
+than 3 sessions, the last one is deleted: the oldest, that is, the session whose last move
+to the head lies furthest back [pending: task 13].
+
+For all contacts together:
+
+- the seen ids: the pairs (sender, message id) of the messages it accepted
+  (section 20.4);
+- the records of the initial messages it accepted (section 20.4).
+
+### 20.2 The table
+
+Three states of an identity at a client:
+
+- N: the identity is not a contact.
+- C0: the identity is a contact without a session.
+- C1: the identity is a contact with 1 to 3 sessions.
+
+The events I1 to I10 are the kinds of a Deliver, by its `sender`. They are tried in this
+order, and a Deliver is the first kind whose condition holds. L1 to L3 are local events.
+Every cell names an action of section 20.3; "none" means that the event cannot occur in
+that state. The client does what the table says [pending: task 12] [pending: task 13].
+
+| Event                                                                                              | N        | C0                                             | C1                                             |
+|----------------------------------------------------------------------------------------------------|----------|------------------------------------------------|------------------------------------------------|
+| I1. The pair of its `sender` and `message_id` is a seen id                                         | STRANGER | DUPLICATE                                      | DUPLICATE                                      |
+| I2. Its payload is no envelope of version 1 (section 19.4)                                         | STRANGER | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      |
+| I3. It carries an initial header that fails step 1 or 2 of section 16.8                            | STRANGER | FAIL: BAD_INITIAL_HEADER or IDENTITY_KEY_MISMATCH | FAIL: BAD_INITIAL_HEADER or IDENTITY_KEY_MISMATCH |
+| I4. It carries an initial header with a record whose session is in the list, and that session decrypts it | STRANGER | none                                    | ACCEPT                                         |
+| I5. It carries an initial header with a record whose session is in the list, and that session does not decrypt it | STRANGER | none                            | FAIL: DECRYPT_FAILED                           |
+| I6. It carries an initial header with a record whose session is gone                               | STRANGER | FAIL: REPLAYED_INITIAL                         | FAIL: REPLAYED_INITIAL                         |
+| I7. It carries an initial header without a record, and steps 3 to 8 of section 16.8 pass           | STRANGER | ACCEPT-NEW                                     | ACCEPT-NEW                                     |
+| I8. It carries an initial header without a record, and one of steps 3 to 8 of section 16.8 fails   | STRANGER | FAIL: the result of that step                  | FAIL: the result of that step                  |
+| I9. It carries no initial header, and a session of the list decrypts it                            | STRANGER | none                                           | ACCEPT                                         |
+| I10. It carries no initial header, and no session of the list decrypts it                          | STRANGER | FAIL: NO_SESSION                               | FAIL: DECRYPT_FAILED                           |
+| L1. The user sends a text to the identity                                                          | REFUSE   | START, then SEND                               | SEND                                           |
+| L2. The user resets the session with the identity                                                  | REFUSE   | START                                          | START                                          |
+| L3. Skipped keys were removed that no message used: by the cap or the purge of section 17.8, or with a session that left the list | none | none                              | GAP                                            |
+
+How the conditions are decided [pending: task 12] [pending: task 13]:
+
+- I4 to I8: a record is found by the `sender` and the bytes of `ephemeral_key`
+  (section 20.4).
+- I4 and I5: the message is decrypted on the session of the record and on no other
+  (section 17.7).
+- I9 and I10: the sessions of the list are tried in the order of the list, each by a
+  decryption of section 17.7 on a copy of its state. The first session that decrypts
+  takes the message.
+- At this level every result of a decryption that is no plaintext counts as
+  DECRYPT_FAILED, whatever the ratchet returned for a single session.
+
+### 20.3 The actions
+
+| Action     | What the client does                                                                                                   | What it saves                                                          | Ack                   |
+|------------|------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------|-----------------------|
+| STRANGER   | Drops the Deliver. It parses no byte of the payload, touches no key and shows nothing. The result is NOT_A_CONTACT     | Nothing                                                                | Yes                   |
+| DUPLICATE  | Drops the Deliver before it parses the payload and shows nothing. The result is DUPLICATE                              | Nothing                                                                | Yes                   |
+| FAIL       | Shows the user that a message of this contact could not be read, with the result that the table names. It fetches no bundle, makes no session and sends nothing to the peer | Nothing: no seen id, no change of a session, no prekey deleted, no pin | Yes                   |
+| ACCEPT     | Removes the padding and reads the `Content` (sections 19.5 and 19.6). It shows the text                                 | In one transaction (section 22.2): the new state of the session that decrypted, which moves to the head of the list and drops its initial header; the seen id; the text | Yes, after the commit |
+| ACCEPT-NEW | As ACCEPT, for the session that step 8 of section 16.8 made                                                            | As ACCEPT, and in the same transaction what step 9 of section 16.8 lists. The new session enters the list at its head; a fourth session is deleted | Yes, after the commit |
+| SEND       | Encrypts the text on the sending session (section 17.6), with the initial header while the session holds one, and sends the Send | In one transaction (section 22.2), before the Send leaves: the new state of the session, the outbox row and the text | No Deliver to ack     |
+| START      | Sends a FetchBundle for the contact and runs section 16.6 with the Bundle. A failure is reported with its result: NOT_FOUND, BAD_BUNDLE, IDENTITY_KEY_MISMATCH or ZERO_DH | On success, in one transaction, the new session at the head of the list and, when the contact had none, the pin (section 16.6, step 8); a fourth session is deleted. On failure nothing: no session and no pin | No Deliver to ack     |
+| REFUSE     | Does nothing and reports NOT_A_CONTACT. A client sends to a contact only                                               | Nothing                                                                | No Deliver to ack     |
+| GAP        | Tells the user how many messages of the contact are missing: the number of skipped keys that were removed without use  | Nothing more                                                           | No Deliver to ack     |
+
+Rules that hold for every row [pending: task 12] [pending: task 13]:
+
+- Every Deliver is acked, whatever its action. A message that could not be read is gone
+  for good: the relay deletes it on the Ack, and this protocol has no frame that asks a
+  peer to send a message again.
+- A failure never starts a key agreement. A client that answered a message it cannot
+  read with a new session would let whoever controls the relay force key agreements and
+  use up one-time prekeys. Only L1 in state C0 and L2 start one.
+- A START that fails is followed by no SEND: the text is not sent, and the user is told
+  why.
+- A failure changes nothing in the store. In particular, of the actions of this table
+  only ACCEPT-NEW deletes the private key of a one-time prekey, so a forged initial
+  message uses none up. Sections 21.3 and 21.4 name the two deletions that no message
+  causes.
+- An ACCEPT whose plaintext gives BAD_PADDING, BAD_CONTENT or UNKNOWN_CONTENT saves the
+  state and the seen id without a text. The first two are shown as a message that could
+  not be read. A client MAY show the third as a message of a kind it does not know.
+- A bundle without a one-time prekey starts a session all the same: START never fails
+  for the lack of one (section 16.6). A client that refused such a bundle could be cut
+  off from a contact by anyone who empties the handout bucket of that contact
+  (section 9.3).
+
+### 20.4 Seen ids and records
+
+Seen ids [pending: task 12]:
+
+- ACCEPT and ACCEPT-NEW save the pair (sender, message id) of the message. No other
+  action saves one. The id of a message that did not decrypt is not authentic
+  (section 18.2): a saved id of that kind would let whoever controls the relay block a
+  real message by delivering a forged one under its id first.
+- The seen ids are checked before the payload is parsed and before any key is touched.
+  The ratchet alone cannot tell a copy from a forgery: for both its answer is
+  DECRYPT_FAILED.
+- A seen id is kept for SEEN_ID_SECONDS, 3196800 seconds: MESSAGE_TTL_SECONDS and one
+  week, 37 days. The client deletes it at the first login after that time, and until it
+  is deleted it counts as seen.
+- A copy that arrives after the deletion is no duplicate for the table. The ratchet
+  refuses it, because its message key is used: the copy is shown as a message that could
+  not be read and is never read a second time.
+
+Records of accepted initial messages [pending: task 13]:
+
+- ACCEPT-NEW saves a record: the pair (IKsig_A, EK_A), each as the 32 bytes received,
+  the session it made, and the id of the signed prekey that the key agreement used.
+- A later message with the same `sender` and the same bytes in `ephemeral_key` belongs
+  to that session and is decrypted there (I4, I5). After steps 1 and 2 of section 16.8
+  the two prekey ids of its initial header are not read.
+- A record is kept while its session is in the list. The initiator sends the initial
+  header until it decrypts a message of the responder (section 16.7), which can be
+  longer than any signed prekey lives: for all that time the record is what leads its
+  messages to their session.
+- A record outlives its session. A record whose session is gone is kept until the
+  client deletes the private key of its signed prekey, and is deleted in the same
+  transaction (section 21.2). A session that leaves the list takes its record with it
+  when that private key is already deleted. A message that matches a record whose
+  session is gone is refused with REPLAYED_INITIAL (I6).
+- This closes the replay of an initial message. Without a one-time prekey nothing in the
+  key agreement is fresh on the side of the responder, so the same initial message would
+  be accepted again, as a new session with the same SK, for as long as the responder
+  holds the private key of the signed prekey. The record refuses it during that time,
+  and after it step 3 of section 16.8 does, with UNKNOWN_SIGNED_PREKEY.
+- A replay with other bytes in `ephemeral_key` that give the same Diffie-Hellman
+  outputs (section 16.5) finds no record and derives the same SK. It fails all the
+  same, with DECRYPT_FAILED: the bytes of `ephemeral_key` are part of the session
+  associated data.
+- A record survives a restart of the client.
+
+### 20.5 Several sessions and simultaneous initiation
+
+Two clients can each start a session with the other before either received the initial
+message of the other. Both key agreements are valid, and each client then holds two
+sessions for the peer: the one it made as initiator and the one it made as responder.
+
+The rule of section 20.1 settles which one is used, without a comparison of keys or
+clocks: a client sends on the session on which it last decrypted a message. This is the
+session rule of Sesame in its smallest form. Every message decrypts, because both
+sessions stay in the list [pending: task 13]. While messages of the two clients cross on
+the way, the two can send on different sessions. By the rule of section 20.1, once one
+client sends a message while none of the other is on the way, and the other receives it
+before it sends one, both send on the session of that message.
+
+The limit of 3 bounds the session states, with their skipped keys, that a peer can make
+a client store. It does not bound the records and the seen ids: every accepted initial
+message with a new ephemeral key adds a record, kept by the rules of section 20.4, and
+every accepted message adds a seen id for SEEN_ID_SECONDS. A session that leaves the
+list takes its skipped keys with it, and a message that arrives for it later fails (I6,
+I8 or I10).
+
+### 20.6 Reset, gaps and removal
+
+- A reset (L2) is the way out of a session that does not decrypt on one side: the client
+  makes a new session as initiator. The older sessions stay in the list behind it, so
+  that messages on the way still decrypt. The next text goes out on the new session with
+  its initial header. Only a user starts a reset [pending: task 13].
+- A gap (L3) is the one notice of a lost message. A skipped key stands for a message
+  whose number the peer used and which did not arrive. When the cap or the purge of
+  section 17.8 removes such a key, or a session that holds some is deleted from the
+  list, the message can never be read, and the client reports the number
+  [pending: task 13]. Messages that were lost at the end of a conversation, with no later
+  message behind them, leave no skipped key and no notice.
+- A client that removes a contact deletes the sessions of that contact. It keeps the
+  seen ids and the records until their own rules delete them: an initial message that
+  was accepted before the removal would otherwise be accepted again once the id is a
+  contact again [pending: task 13].
+
+## 21. The prekey lifecycle
+
+### 21.1 The clock and the prekey ids
+
+- A client reads the time from one clock, in whole seconds. An implementation takes the
+  clock as an argument, so that a test can set it [pending: task 13].
+- A client that does not run does nothing. The rules of this section take effect after
+  a LoggedIn; the deletion of step 1 of section 21.2 also takes effect when the client
+  starts.
+- A client keeps two counters per identity in its store, one for signed prekeys and one
+  for one-time prekeys. The first key of a kind gets the id 1, every later key the id of
+  the key before it plus 1. The counter is saved in the transaction that saves the key.
+  An id is so never used for two keys of one kind, after a crash and after the deletion
+  of a key included [pending: task 13].
+- An identity whose counter reached 2^32 - 1 makes no further key of that kind
+  [pending: task 13].
+- These are rules for the owner of the keys. A receiver accepts any id from 0 to
+  2^32 - 1 (section 5.2).
+
+### 21.2 The signed prekey
+
+The newest signed prekey of a client is the one it made last. After every LoggedIn the
+client does this, in this order [pending: task 13]:
+
+1. Deletion. For every signed prekey whose grace period is over, it deletes the private
+   key and, in the same transaction, every record of section 20.4 that names its id and
+   whose session is gone from the list.
+2. Rotation. When it holds no signed prekey, or it made the newest one
+   SIGNED_PREKEY_ROTATION_SECONDS, 604800 seconds or 7 days, ago or longer, it makes a
+   new one: a key pair from 32 random bytes, the next id, and a signature over the
+   string of section 4.4. It saves the key, with the time of the clock, before it
+   uploads it.
+3. Upload. When the relay has not confirmed the newest signed prekey with a
+   BundleStored, the client sends an UploadBundle that carries it (section 21.4)
+   [pending: task 14].
+
+Step 1 needs no connection. The client also runs it every time it starts, before it
+dials the relay [pending: task 14]. A client that stays on one connection SHOULD run the
+three steps again when the newest signed prekey reaches the age of step 2 or a grace
+period ends.
+
+The grace period [pending: task 13]:
+
+- A signed prekey is replaced at the moment the client saves a newer one (step 2). The
+  moment does not wait for the upload of the newer one or for its BundleStored.
+- Its grace period runs from that moment for SIGNED_PREKEY_GRACE_SECONDS, 3196800
+  seconds: MESSAGE_TTL_SECONDS and one week, 37 days. The relay hands out the replaced
+  key until it stores the newer one, and an initial message that was made with it can
+  wait in the queue for the whole MESSAGE_TTL_SECONDS. The week is for the clocks, for a
+  sender that was slow to send and for an upload that was late. When the upload is later
+  than that week and the client does not run in between, an initial message made with
+  the replaced key can arrive after the grace period and fails.
+- During the grace period the responder finds the key by its id (section 16.8, step 3).
+  After it the key counts as not held, whether or not step 1 has deleted it yet: an
+  initial message that names the id and matches no record gets UNKNOWN_SIGNED_PREKEY.
+- With the defaults the private key of a signed prekey exists for about 44 days: 7 until
+  it is replaced and 37 after. The 7 days are stretched by the time to the next
+  LoggedIn, the 37 days by the time to the next start or LoggedIn of the client. A relay
+  that withholds a BundleStored stretches neither. A relay that keeps a client from
+  logging in keeps the newest signed prekey of that client in use for as long (threat
+  model, "What the relay can do").
+- The deletion of the private key is what bounds the records whose session is gone, and
+  what ends the time in which the first messages of a session without a one-time prekey
+  can be opened with keys taken from the responder (threat model).
+
+### 21.3 One-time prekeys
+
+- A one-time prekey is a key pair from 32 random bytes with the next id. It is not
+  signed.
+- Refill. After every LoggedIn the client reads `one_time_prekey_count`, c. When c is
+  less than ONE_TIME_PREKEY_REFILL_BELOW, 50, it makes ONE_TIME_PREKEY_CAP - c new
+  one-time prekeys, 100 - c with the default, and uploads them in the UploadBundle of
+  this login (section 21.4). The first upload of an identity so carries 100
+  [pending: task 14].
+- The relay sends no notice when the number falls (section 9.4). A client MAY refill
+  during a connection as well, from the last count the relay reported less the number
+  of initial messages it accepted since then that named a one-time prekey.
+- The private key of a one-time prekey is deleted when the initial message that names
+  it is accepted (section 16.8, step 9), and not when a message that names it fails
+  [pending: task 12].
+- A client holds at most ONE_TIME_PREKEY_HELD_MAX, 1000, private keys of one-time
+  prekeys. Before it makes a batch that would go over, it deletes the ones with the
+  lowest ids until the batch fits [pending: task 13]. The count is the word of the
+  relay, and fetches by anyone lower it (section 9.3): without this bound a client would
+  make keys without end. An initial message that names a key deleted in this way gets
+  UNKNOWN_ONE_TIME_PREKEY.
+
+### 21.4 The upload
+
+- An UploadBundle carries the X25519 identity key with its signature, the newest signed
+  prekey with its id and its signature, and the new one-time prekeys, if any
+  (section 7.8).
+- After a LoggedIn a client sends at most one UploadBundle for the steps of sections
+  21.2 and 21.3, before any Send of that login (section 23.3) [pending: task 14]. A
+  rotation or a refill during the connection (sections 21.2 and 21.3) is a further
+  UploadBundle.
+- A one-time prekey is uploaded once (section 9.1). The client marks the one-time
+  prekeys of an UploadBundle as uploaded in its store before the frame leaves, and never
+  puts a marked key into another frame. The keys of an UploadBundle that got no answer
+  stay marked [pending: task 13].
+- An UploadBundle that the relay refused with an Error whose action is Back off is sent
+  again unchanged on the same connection (section 11.1): the same frame, not a new one
+  with the same keys in it.
+- An UploadBundle that waits in Back off, or that has no answer, when the connection
+  ends is not sent again, and after the next LoggedIn the steps of sections 21.2 and
+  21.3 build the UploadBundle of that login [pending: task 14]. The one-time prekeys of
+  a frame that has no answer stay marked: the relay can hold them. The relay holds none
+  of a frame that waits in Back off, because it refused the frame each time it was sent
+  (section 11.2): the client deletes the private keys of the one-time prekeys of that
+  frame [pending: task 13]. Kept, they would count toward the bound of section 21.3,
+  and while the relay refuses every upload a client would in the end delete the keys
+  that the relay still hands out.
+- The X25519 identity key and its signature are the same in every upload
+  (section 5.3).
+
+## 22. The client store
+
+### 22.1 What it holds
+
+A client keeps, for one identity [pending: task 12]:
+
+- the seed of the identity and the private key of its X25519 identity key;
+- the private keys of its signed prekeys and of its one-time prekeys with their ids, the
+  two counters of section 21.1 and the times that section 21.2 needs;
+- its contacts with their pinned X25519 identity keys;
+- the sessions of every contact, in their order (sections 17.2 and 20.1);
+- the seen ids and the records of accepted initial messages (section 20.4);
+- the outbox: for every message that it encrypted and that the relay has not confirmed,
+  the message id, the recipient and the bytes of the payload;
+- the message log: the texts it sent and received.
+
+No frame and no payload carries the seed or a private key [pending: task 14].
+
+### 22.2 The two ordering rules
+
+On receive [pending: task 12] [pending: task 14]:
+
+- The client sends the Ack for a message that it accepted only after one transaction
+  committed everything the message changes: the new ratchet state of its session, the
+  text and the seen id, and for an initial message what step 9 of section 16.8 lists.
+- An Ack tells the relay to delete the only other copy (section 10.5). A client that
+  stops between the commit and the Ack gets the message again after its next login and
+  drops it as a duplicate. A client that stops before the commit gets it again and
+  decrypts it: its state did not change.
+- The Ack for a Deliver that is dropped or that failed (section 20.3) waits for nothing:
+  the client saved nothing.
+
+On send [pending: task 12] [pending: task 14]:
+
+- One transaction commits the new ratchet state, with the sending chain moved on, and
+  the outbox row with the message id and the bytes of the payload. Only after the commit
+  does a Send with these bytes leave.
+- A message is encrypted once. A repeated Send (section 10.3) carries the bytes of the
+  row: the same message id, recipient and payload. A client never encrypts the text of
+  an outbox row again.
+- The row is removed when the relay answers its Send with Stored, or with an Error whose
+  action is Stop, which the client reports.
+- A client that stops between the commit and the Stored sends the row again after its
+  next login. Without the row it would either lose the message or encrypt it a second
+  time under the same message id, with a message key that was used.
+
+### 22.3 Deletion
+
+A key or a state that this text calls deleted is, after the commit of the transaction
+that deletes it, in none of the files of the store [pending: task 13]. What lies below the
+files, the blocks that a filesystem keeps of an overwritten or removed file, is out of
+scope, as it is for the relay (section 13.3).
+
+### 22.4 The store of the client of this repository
+
+The rules above hold for every client. How a client keeps its store is its own matter;
+the macOS client is free to keep keys in the keychain. The client of this repository does
+this [pending: task 12]:
+
+- The store is one SQLite file per identity in a data directory. The directory has mode
+  0700 and the file mode 0600, and both are set before the first byte is written.
+- The client refuses to start when the directory or the file gives any right to the
+  group or to others, that is, when its mode has one of the bits 077.
+- The database uses the rollback journal and not a write-ahead log, with `secure_delete`
+  on and one connection: no second file keeps older ratchet states.
+- The seed is never taken from a command line argument and never printed.
+
+Nothing in the store is encrypted. Whoever can read the file holds the identity and
+everything else in section 22.1; the threat model says what follows from that.
+
+## 23. The client transport
+
+### 23.1 The URL
+
+A client is given the URL of its relay; no URL is built into it [pending: task 14].
+
+- The scheme is `wss` or `ws`. The client dials the URL as given and takes the server
+  name from its host (section 8.2).
+- A `wss` URL is dialed with TLS, and the certificate of the server is verified against
+  the host of the URL with the trust store of the platform.
+- A `ws` URL has no TLS: the login and every frame are readable and changeable on the
+  path. A client dials a `ws` URL only when its host is a loopback host, unless the user
+  gave an explicit override for this start of the client. In the command-line client of
+  this repository the override is the option `--insecure`.
+- A loopback host is, as the server name of section 8.2: the name `localhost`; an IPv4
+  address of four decimal numbers from 0 to 255, each written without a leading zero,
+  whose first is 127; or an IPv6 address that is the loopback address of RFC 4291
+  section 2.5.3, in any text form of that address. A short form of an IPv4 address, such
+  as the `127.1` of section 8.2, is not one, and neither is `0127.0.0.1`.
+
+### 23.2 The connection
+
+- The client sets the receive limit of its WebSocket library to MAX_FRAME_BYTES
+  (section 6.3) [pending: task 14].
+- The client connects to the host of the URL itself. It takes no proxy from its
+  environment [pending: task 14]: a proxy that the user did not ask for would see the
+  address of the relay and, on a `ws` URL, every frame.
+- The client answers pings and requires no subprotocol (sections 6.2 and 6.4).
+
+### 23.3 After the login
+
+After a LoggedIn the client does this, in this order [pending: task 14]:
+
+1. The steps of sections 21.2 and 21.3, and the one UploadBundle they ask for. Until the
+   relay holds the bundle of an identity, the identity is not registered and nobody can
+   send to it (section 8.6), a peer that answers included.
+2. Every row of the outbox, oldest first, as a Send (section 22.2).
+3. The deletion of the seen ids whose time is over (section 20.4).
+
+A Deliver can arrive from the LoggedIn on, between any two of these steps, and is handled
+as it arrives (section 20.2).
+
+### 23.4 The reconnect schedule
+
+This is the wait of the action Retry of section 11.1 [pending: task 14].
+
+- n counts the attempts to connect since the last LoggedIn: the first attempt after a
+  connection ended has n = 1, and every attempt that ends without a LoggedIn raises n
+  by 1. A LoggedIn sets it back.
+- Before attempt n the client waits w + j seconds: w is 2^(n-1), at most
+  RETRY_MAX_SECONDS, 60; j is chosen evenly between 0 and w / 2.
+
+| n            | 1   | 2 | 3 | 4  | 5  | 6  | 7 and more |
+|--------------|-----|---|---|----|----|----|------------|
+| w            | 1   | 2 | 4 | 8  | 16 | 32 | 60         |
+| Longest wait | 1.5 | 3 | 6 | 12 | 24 | 48 | 90         |
+
+- The jitter j keeps clients that lost one relay at one moment from returning at one
+  moment. It needs no generator of the operating system.
+- A client that the user stops, or that was closed with a code whose action is Stop
+  (section 11.3), does not reconnect.
+
+### 23.5 The Back off schedule
+
+This is the wait of the action Back off of section 11.1 [pending: task 14].
+
+- k counts, for one frame, the times in a row that the relay refused it on this
+  connection with an Error whose action is Back off.
+- Before it sends the frame again, unchanged, the client waits w + j seconds: w is
+  FRAME_REFILL_SECONDS * 2^(k-1), at most RETRY_MAX_SECONDS; j is chosen evenly between
+  0 and w / 2. With the defaults these are the numbers of section 23.4, and the wait is
+  never shorter than FRAME_REFILL_SECONDS.
+- While a frame waits after RATE_LIMITED or STORAGE_FULL, the client SHOULD hold back
+  its other Send, UploadBundle and FetchBundle frames: the frame bucket and the page
+  ceiling are shared by all of them. An Ack is never held back.
+- A frame that waits when the connection ends is sent again after the next login
+  (section 11.1), with k at 1. An UploadBundle is the exception (section 21.4).
+
+## 24. Constants, local results and test vectors
+
+### 24.1 The constants of part 2
+
+| Name                           | Value   | Unit     | Meaning                                                                    |
+|--------------------------------|---------|----------|----------------------------------------------------------------------------|
+| MAX_SKIP                       | 1000    | keys     | The most message keys one decryption skips in one chain (section 17.8)     |
+| SKIPPED_KEYS_CAP               | 2000    | keys     | The most skipped keys one session stores (section 17.8)                    |
+| SKIPPED_KEY_STEPS              | 5       | steps    | The DH ratchet steps after which the skipped keys of a chain are purged (section 17.8) |
+| PADDING_BLOCK                  | 256     | bytes    | The block to which a plaintext is padded (section 19.6)                    |
+| MAX_TEXT_BYTES                 | 65019   | bytes    | The longest text a client sends, in UTF-8 (section 19.7)                   |
+| MAX_SESSIONS                   | 3       | sessions | The most sessions a client keeps for one contact (section 20.1)            |
+| SEEN_ID_SECONDS                | 3196800 | seconds  | The time a seen id is kept, 37 days (section 20.4)                         |
+| SIGNED_PREKEY_ROTATION_SECONDS | 604800  | seconds  | The age at which a signed prekey is replaced, 7 days (section 21.2)        |
+| SIGNED_PREKEY_GRACE_SECONDS    | 3196800 | seconds  | The time a replaced signed prekey keeps its private key, 37 days (section 21.2) |
+| ONE_TIME_PREKEY_REFILL_BELOW   | 50      | keys     | The count below which a client uploads one-time prekeys (section 21.3)     |
+| ONE_TIME_PREKEY_HELD_MAX       | 1000    | keys     | The most one-time prekey private keys a client holds (section 21.3)        |
+| RETRY_MAX_SECONDS              | 60      | seconds  | The cap of w in the two schedules (sections 23.4 and 23.5)                 |
+
+- MAX_SKIP, SKIPPED_KEYS_CAP, SKIPPED_KEY_STEPS, PADDING_BLOCK and MAX_TEXT_BYTES are
+  constants of end-to-end protocol version 1. Two clients that differ in one of them
+  disagree on which messages decrypt or fit. The vectors and the tests of the ratchet
+  hold the first three [pending: task 11]. No vector of section 24.3 covers the other
+  two, because the padded plaintext is an input of a ratchet vector: the tests of the
+  session hold the padding and the largest text [pending: task 12].
+- The other values are the defaults of a client. SEEN_ID_SECONDS and
+  SIGNED_PREKEY_GRACE_SECONDS are built on the default of MESSAGE_TTL_SECONDS
+  (section 12.1).
+
+### 24.2 Local results
+
+The checks of part 2 run inside a client and end in no frame. Like those of section 11.4
+their results have names, which a negative test vector states as its `error`
+(section 15.2).
+
+| Name                    | Where                    | Meaning                                                                          |
+|-------------------------|--------------------------|----------------------------------------------------------------------------------|
+| ZERO_DH                 | Section 16.3             | A Diffie-Hellman output is 32 zero bytes                                         |
+| BAD_INITIAL_HEADER      | Section 16.8, step 1     | The signature over the X25519 identity key of an initial header does not verify under the sender |
+| IDENTITY_KEY_MISMATCH   | Section 16.8, step 2     | The initial header carries another X25519 identity key than the pinned one       |
+| UNKNOWN_SIGNED_PREKEY   | Section 16.8, step 3     | The client holds no signed prekey private key with the id of the initial header  |
+| UNKNOWN_ONE_TIME_PREKEY | Section 16.8, step 4     | The client holds no one-time prekey private key with the id of the initial header |
+| DECRYPT_FAILED          | Section 17.7             | The message does not verify under the key of its header, or that key was used or purged |
+| TOO_MANY_SKIPPED        | Section 17.7             | The header asks for more than MAX_SKIP skipped keys in one chain                 |
+| CHAIN_EXHAUSTED         | Sections 17.6 and 17.9   | The message number 2^32 - 1: a sending chain at its end, or a header that names it |
+| NO_SENDING_CHAIN        | Section 17.6             | An encryption on a state without a sending chain: a responder before its first decryption |
+| UNSUPPORTED_VERSION     | Section 19.4             | The `version` of an envelope is not 1                                            |
+| BAD_ENVELOPE            | Section 19.4             | The payload is not a `PeerMessage`, or a field breaks its length                 |
+| BAD_PADDING             | Section 19.6             | A plaintext that decrypted has no padding                                        |
+| BAD_CONTENT             | Section 19.5             | A plaintext that decrypted does not parse as a `Content`                         |
+| UNKNOWN_CONTENT         | Section 19.5             | A `Content` has no member that the client knows                                  |
+| TEXT_TOO_LONG           | Section 19.7             | A text to send is longer than MAX_TEXT_BYTES                                     |
+| NOT_A_CONTACT           | Section 20.3             | The sender of a Deliver, or the identity of a local event, is not a contact      |
+| DUPLICATE               | Section 20.3             | The pair of sender and message id of a Deliver is a seen id                      |
+| REPLAYED_INITIAL        | Section 20.3             | An initial message matches a record whose session is gone                        |
+| NO_SESSION              | Section 20.3             | A message without an initial header came from a contact without a session        |
+
+IDENTITY_KEY_MISMATCH is the name of section 11.4 with the same meaning: another X25519
+identity key than the pinned one, in a bundle there and in an initial header here.
+
+### 24.3 What the test vectors record
+
+Section 15 holds the schema, and every rule of it applies: every private key, ephemeral
+key, nonce and message id is an input, and replaying a vector draws no random byte. The
+names of the operations and the keys of their objects enter section 15 with the files.
+
+A vector of the key agreement records [pending: task 10]:
+
+| Object          | Values                                                                                   |
+|-----------------|------------------------------------------------------------------------------------------|
+| `inputs`        | The identity keys of both sides. The private keys of IKdh_A and EK_A for an initiator; of IKdh_B, of the signed prekey and of the one-time prekey for a responder. The public keys, ids and signatures of the Bundle or of the initial header, as bytes to verify |
+| `intermediates` | The strings of sections 4.3 and 4.4 that were verified; DH1, DH2, DH3 and, when computed, DH4; the input key material of section 16.4 |
+| `outputs`       | SK and the session associated data of section 16.5                                       |
+
+Its negative case is a public key of small order, with the `error` ZERO_DH. Further
+cases are vectors of a responder with `outputs`, which differ from those of the
+initiator:
+
+- a one-time prekey that was replaced on the way: another SK;
+- the unknown key share of section 16.5: the same SK and another session associated
+  data;
+- an `ephemeral_key` with other bytes that give the same Diffie-Hellman outputs
+  (section 16.5), once with the most significant bit of its last byte set and once with
+  the u-coordinate replaced by its inverse modulo 2^255 - 19: the same SK and another
+  session associated data.
+
+A vector of the ratchet is one step of a scripted conversation and records
+[pending: task 11]:
+
+| Object          | Values                                                                                   |
+|-----------------|------------------------------------------------------------------------------------------|
+| `inputs`        | SK and the session associated data; the key pair of the signed prekey; the 32 random bytes of the ratchet private key of every initialisation of an initiator and of every decryption that reaches sub-step 4 of step 5 of section 17.7, a decryption that then fails included; for every message the message id, the nonce and the padded plaintext; the order in which the messages are delivered |
+| `intermediates` | For every DH ratchet step the Diffie-Hellman outputs and the root key and chain key of each KDF_RK; for every message the chain key before it, its message key, the 40 bytes of its header and the 217 bytes of its associated data; every skipped key that was stored or purged |
+| `outputs`       | For an encryption the bytes of the `ciphertext` field; for a decryption the plaintext    |
+
+The conversation covers messages in order and out of order, lost messages, several DH
+ratchet steps and the negative cases of section 17.7.
+
+Appendix A is reserved for one such run in full, written out in hex.
+
+## 25. Deviations and what is missing
+
+### 25.1 From X3DH Revision 1
+
+| X3DH Revision 1                                                          | This protocol                                                              | Reason                                                                     |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------------------------|
+| Signatures are XEdDSA, made with the X25519 identity key                 | Signatures are Ed25519 (RFC 8032), made with an Ed25519 identity key       | Neither the Python package cryptography nor CryptoKit has XEdDSA, and this project builds no cryptography of its own |
+| One identity key, X25519, serves for Diffie-Hellman and for signatures   | Two: the Ed25519 identity key, which is the user id, and an X25519 identity key that it signs once (section 4.3) | Follows from the first. No key is used for both a signature and a Diffie-Hellman computation |
+| The signed message is Encode(SPK)                                        | The signed strings of sections 4.3 and 4.4: a prefix, a zero byte, the key of the signer and the signed key | The same identity key signs the login. The prefix keeps a signature of one kind from being one of another kind |
+| Encode(PK) is recommended as a byte for the curve and the u-coordinate   | A public key is its 32 bytes, with no byte in front                        | One curve. The version byte of the session associated data and the prefixes carry the context |
+| AD is Encode(IK_A) \|\| Encode(IK_B); more can be appended (X3DH section 3.3) | The version byte and five keys: both Ed25519 keys, both X25519 identity keys and the bytes of the ephemeral key (section 16.5) | The Diffie-Hellman values authenticate the X25519 keys only; without the Ed25519 keys an unknown key share is possible (X3DH section 4.8). X25519 gives one output for more than one 32-byte string, so the ephemeral key is bound as bytes: the record of section 20.4 is found by them |
+| The initial message carries IK_A                                         | It carries the X25519 identity key with its signature. The Ed25519 key is the `sender` of the Deliver | One source for the identity of the sender, and the associated data binds it |
+| An all-zero Diffie-Hellman output is not mentioned                       | It ends the key agreement (section 16.3)                                   | The two libraries differ, and RFC 7748 allows the check                    |
+| A replayed initial message without a one-time prekey is accepted; mitigations are left open (X3DH section 4.2) | The responder keeps a record of every accepted initial message while its session or the private key of its signed prekey exists (section 20.4) | Without it the same SK would be accepted again                |
+| The lifetime of a signed prekey and of its private key is left open (X3DH section 3.2) | Replaced after 7 days, private key kept for 37 more (section 21.2)         | A value has to be written down                                             |
+| One-time prekey private keys are deleted as messages that use them arrive (X3DH sections 3.2 and 3.4) | A client also deletes the ones with the lowest ids before it would hold more than 1000 (section 21.3), and those of an upload that the relay refused and that is not sent again (section 21.4) | The count of the relay decides how many keys a client makes, and anyone lowers it by fetching: without a bound a client would make keys without end. The keys of a refused upload never reached the relay |
+| The initiator verifies one signature, over the signed prekey             | The four checks of section 5.4: the id, the signature over the X25519 identity key, the pinned key, the signature over the signed prekey | Follows from the second key. The first check is what keeps the relay from handing out keys of its own |
+| The server provides a one-time prekey if one exists (X3DH section 3.3)   | The relay withholds one while the handout bucket of the target is empty (section 9.3) | X3DH section 4.7 asks the server to hinder the draining of one-time prekeys. The bucket spreads the stored keys over time, at the price of sessions without a one-time prekey while it is empty |
+| No rule about who sends an initial message                               | A responder accepts one from a contact only (section 20.2)                 | Identities are free: this bounds what strangers can make a client compute and store |
+
+Kept as written: the four Diffie-Hellman values and their order; DH4 left out without a
+one-time prekey; the key derivation with F, a zero salt and an info string, here with
+SHA-256 and X25519; one-time prekeys that are not signed; the deletion of the one-time
+prekey private key when its initial message is accepted; the first message of the ratchet
+as the initial ciphertext.
+
+### 25.2 From the Double Ratchet, Revision 4
+
+| Double Ratchet, Revision 4                                               | This protocol                                                              | Reason                                                                     |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------------------------|
+| Double Ratchet sections 4, 5 and 6: header encryption, the Sparse Post-Quantum Ratchet and the Triple Ratchet | Double Ratchet sections 2 and 3 only | Each is a second protocol. The header is readable for the relay, and there is no post-quantum protection (section 25.4) |
+| ENCRYPT is recommended as SIV or as CBC with HMAC (Double Ratchet section 7.2) | ChaCha20-Poly1305 with a random nonce that is sent, which Double Ratchet section 3.1 permits | CryptoKit has no SIV mode, and both libraries have this AEAD. The random nonce is the hedge against a key used twice |
+| DH: "no need to check for invalid public keys" (Double Ratchet section 7.2) | An all-zero output fails the decryption (section 16.3)                  | The Python library raises on it and CryptoKit does not: one rule for both  |
+| The associated data is the AD of the key agreement and the header        | The session associated data, the message id and the header (section 18.2)  | The message id is the key by which copies are dropped, so it has to be authentic |
+| CONCAT can need a length in front of AD (Double Ratchet section 3.1)     | No length                                                                  | All three parts have fixed lengths                                         |
+| The encoding of the header is left open                                  | 40 fixed bytes (section 17.5)                                              | It is authenticated as received, and protobuf serialization is not canonical |
+| MAX_SKIP is checked chain by chain, the second check after keys of the first chain were derived | Both checks come before any key is derived (section 17.7) | A header that asks for too many keys costs the receiver no key derivation. The results are the same |
+| A message whose number lies behind Nr fails at the AEAD, after a key was derived | It fails before a key is derived (section 17.7, step 3)            | The same result at less cost                                               |
+| MKSKIPPED "raises an exception if too many elements are stored"; deletion after an interval is advised (Double Ratchet sections 3.2 and 8.4) | A cap of 2000 that removes the oldest key, and a purge after 5 DH ratchet steps (section 17.8) | A session that only failed at the cap could stay stuck. Deletion follows events, not a timer (Double Ratchet section 8.7) |
+| The state has no counter of DH ratchet steps                             | DHSTEPS (section 17.2)                                                     | The purge needs it                                                         |
+| The size of the counters is left open                                    | u32; a chain ends at 2^32 - 2 (section 17.9)                               | A width has to be written down                                             |
+| Double Ratchet section 7.1 joins the ratchet to PQXDH                    | To the key agreement of section 16, in the same way: SK, the associated data, the signed prekey as the first ratchet key | Section 25.4                                                   |
+
+Kept as written: the state variables and the initialisation of Double Ratchet sections
+3.2 and 3.3; KDF_RK and KDF_CK as Double Ratchet section 7.2 recommends them; the order
+of the steps of RatchetEncrypt and RatchetDecrypt; a new ratchet key pair made in the DH
+ratchet step, not deferred (Double Ratchet section 8.5); the state discarded when a
+decryption fails; the pattern of Double Ratchet section 7.1, the initial message of the
+key agreement in front of every message of the initiator until the first message of the
+responder decrypts.
+
+### 25.3 From Sesame
+
+This protocol takes one rule from Sesame, Revision 2: a list of sessions per peer in
+which a session that receives becomes the sending session (section 20.1). It has no
+devices and no user records, no stale records, no retry requests and no delivery
+receipts, and no expiry of a session by time.
+
+### 25.4 What Signal runs and this protocol lacks
+
+The two specifications that this protocol follows are not what the Signal applications
+run.
+
+- Signal's key agreement is PQXDH: it adds a post-quantum key encapsulation to the
+  Diffie-Hellman values. This protocol has X3DH Revision 1.
+- Signal's ratchet is the Triple Ratchet: the Double Ratchet together with the Sparse
+  Post-Quantum Ratchet, sections 5 and 6 of Revision 4. This protocol has the Double
+  Ratchet alone.
+
+This protocol has no post-quantum protection of any kind. Whoever records its traffic
+and later has a quantum computer that breaks X25519 can open what was recorded; the
+healing of the Double Ratchet does not help against that (Double Ratchet, section 8.11).
+Nothing is reserved for a post-quantum step but the two version numbers.
+
+### 25.5 Deniability
+
+This protocol claims no deniability.
+
+One fact is stated: no signature covers the content of a message. An identity key signs
+the three strings of section 4 and nothing else, and a message is authenticated by the
+AEAD under keys that both sides can compute.
+
+That fact is not a claim that a user can deny a conversation. The login signature shows
+the relay that the holder of an identity key was connected (section 8), the signatures of
+a bundle show that the identity published those keys, and the relay sees who sends to
+whom. The deniability that X3DH describes (X3DH, section 4.4) was not examined for the
+changes of section 25.1.
+
+## 26. Not part of this protocol
 
 These are left out on purpose. Each is a second protocol, or needs a deployed
 environment, or has no user before a later stage of the project.
@@ -1563,24 +3006,62 @@ environment, or has no user before a later stage of the project.
 - Expiry of identities.
 - Proof of work.
 - Hiding the sender from the relay, and encryption of the message header.
-- Post-quantum key agreement. Nothing is reserved for it beyond the two version numbers.
+- Post-quantum key agreement and a post-quantum ratchet (section 25.4). Nothing is
+  reserved for them beyond the two version numbers.
 - Verification of keys by a safety number.
 - Several devices per identity, groups, attachments and calls.
-- Any claim of deniability.
+- Any claim of deniability (section 25.5).
+- Encryption of the client store, and key storage in a keychain or in hardware.
+- Moving an identity to another device, and a backup of it.
+- Replacing or revoking an identity key.
+- Delivery receipts, read receipts and requests to send a message again.
+- Expiry of a session by time.
+- Kinds of content other than a text. The oneof of section 19.1 is their place.
 
-## 17. References
+## 27. References
 
+- RFC 2104, HMAC: Keyed-Hashing for Message Authentication.
 - RFC 3986, Uniform Resource Identifier (URI): Generic Syntax.
+- RFC 4291, IP Version 6 Addressing Architecture.
+- RFC 5869, HMAC-based Extract-and-Expand Key Derivation Function (HKDF).
 - RFC 5890, Internationalized Domain Names for Applications (IDNA): Definitions and
   Document Framework.
+- RFC 6234, US Secure Hash Algorithms (SHA and SHA-based HMAC and HKDF).
 - RFC 6455, The WebSocket Protocol.
 - RFC 7748, Elliptic Curves for Security.
 - RFC 8032, Edwards-Curve Digital Signature Algorithm (EdDSA).
+- RFC 8439, ChaCha20 and Poly1305 for IETF Protocols.
 - Protocol Buffers documentation, "Proto Serialization Is Not Canonical",
   https://protobuf.dev/programming-guides/serialization-not-canonical/
 - K. Chalkias, F. Garillot, V. Nikolaenko, "Taming the many EdDSAs", IACR ePrint
   2020/1244, https://eprint.iacr.org/2020/1244
 - M. Marlinspike, T. Perrin, "The X3DH Key Agreement Protocol", Revision 1,
   https://signal.org/docs/specifications/x3dh/
+- T. Perrin, M. Marlinspike, R. Schmidt, "The Double Ratchet Algorithm", Revision 4,
+  https://signal.org/docs/specifications/doubleratchet/
+- M. Marlinspike, T. Perrin, "The Sesame Algorithm: Session Management for Asynchronous
+  Message Encryption", Revision 2, https://signal.org/docs/specifications/sesame/
+- E. Kret, R. Schmidt, "The PQXDH Key Agreement Protocol", Revision 3,
+  https://signal.org/docs/specifications/pqxdh/
 - IANA, WebSocket Close Code Number Registry,
   https://www.iana.org/assignments/websocket/websocket.xhtml
+
+## Appendix A. One key agreement and two messages in hex
+
+This appendix is reserved. It follows the last numbered section and holds one run of the
+protocol written out in hex, every value in the order in which sections 16 to 19 compute
+it [pending: task 11]:
+
+- the key agreement between an initiator and a responder with a one-time prekey: every
+  private key and public key, the signed strings, DH1 to DH4, the input key material, SK
+  and the 161 bytes of the session associated data;
+- the first message of the initiator: the ratchet key pair, the Diffie-Hellman output,
+  the root key and the chain key, the message key, the 40 bytes of the header, the
+  message id, the nonce, the padded plaintext, the 217 bytes of the associated data, the
+  bytes of the `ciphertext` field, and the fields of its initial header;
+- the first message of the responder in answer: the same values for its DH ratchet step
+  and its message, without an initial header.
+
+The values are taken from the vector files of sections 15 and 24.3, so that the text and
+the vectors cannot differ. Until the appendix is filled, this text has no worked example
+of part 2.

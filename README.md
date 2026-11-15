@@ -13,12 +13,16 @@ opens one.
   holds the identity core, which the relay does not use yet: user ids, the three signed
   strings and the checks of a prekey bundle, with the shared test vectors in
   `vectors/identity.json`.
-- The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md) is
-  part 1: identity, the prekey bundle and the relay protocol. The relay half of
-  [docs/threat-model.md](docs/threat-model.md) lists
+- The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
+  holds both parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
+  the session rules and the client store. [docs/threat-model.md](docs/threat-model.md)
+  has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
   [what the relay can do](docs/threat-model.md#what-the-relay-can-do) and what is
-  [not protected](docs/threat-model.md#not-protected).
+  [not protected](docs/threat-model.md#not-protected). The client half covers a peer, a
+  stolen device or data directory, and what the keys of a session cover and what they do
+  not.
 
 ## Plan
 

@@ -45,7 +45,7 @@ class Operation:
 
 ROOT = Path(__file__).parent.parent.parent
 PROTOCOL = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
-VECTOR_FILE = (ROOT / "vectors" / "identity.json").read_text(encoding="utf-8")
+VECTOR_FILE = (ROOT / "vectors" / "identity.json").read_text(encoding="ascii")
 DOCUMENT = json.loads(VECTOR_FILE)
 VECTORS: list[Vector] = DOCUMENT["vectors"]
 POSITIVE = [vector for vector in VECTORS if "outputs" in vector]

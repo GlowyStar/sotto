@@ -9,7 +9,7 @@ CITING_DOCUMENTS = [*DOCS, ROOT / "README.md"]
 
 OPEN_POINT = re.compile(r"(?<!`)OPEN:")
 TEST_CITATION = re.compile(r"\[test: (tests/(?:\w+/)*\w+\.py)::(test_\w+)\]")
-PENDING_CITATION = re.compile(r"\[pending: task (?:[3-9]|1[0-4])\]")
+PENDING_CITATION = re.compile(r"\[pending: task (?:[4-8]|1[0-4])\]")
 CITATION_PART = re.compile(r"\[\w+:|\btests/|::|\bpending\b", re.IGNORECASE)
 
 
