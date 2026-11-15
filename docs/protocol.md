@@ -1585,12 +1585,15 @@ vector and gets the stated results agrees with the others on every byte the vect
 [test: tests/crypto/test_identity_vectors.py::test_positive_vectors_replay_byte_for_byte]
 [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error]
 [test: tests/crypto/test_x3dh_vectors.py::test_positive_vectors_replay_byte_for_byte]
-[test: tests/crypto/test_x3dh_vectors.py::test_negative_vectors_raise_their_named_error].
+[test: tests/crypto/test_x3dh_vectors.py::test_negative_vectors_raise_their_named_error]
+[test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_ratchet_vectors.py::test_negative_vectors_raise_their_named_error].
 The first file is `vectors/identity.json`; section 15.5 names its operations and the keys
 of their objects
 [test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
-The second is `vectors/x3dh.json`, whose operations section 15.6 names. Section 24.3 says
-what the vectors of the key agreement and of the ratchet record.
+The second is `vectors/x3dh.json`, whose operations section 15.6 names, and the third
+`vectors/ratchet.json`, whose operations section 15.7 names. Section 24.3 says what the
+vectors of the key agreement and of the ratchet record.
 
 ### 15.2 The schema of a vector file
 
@@ -1616,7 +1619,8 @@ Rules:
 
 - A vector has `outputs` or `error`, never both and never neither.
 - Bytes are hex strings as in section 2.1. Text is a JSON string. A count or an id is a
-  JSON number. A value that is absent in the operation is absent in the object.
+  JSON number. A list of records is a JSON array of objects whose values follow these
+  rules. A value that is absent in the operation is absent in the object.
 - Every private key, ephemeral key, nonce and message id that an operation uses is in
   `inputs`: replaying a vector draws no random byte.
 - `intermediates` holds each value an implementation needs to find where it went wrong,
@@ -1740,6 +1744,63 @@ are numbers, and every other value is a hex string.
   to 160 of their session associated data are the bytes received
   [test: tests/crypto/test_x3dh_vectors.py::test_outputs_of_the_two_sides_differ_as_section_24_3_states].
 
+### 15.7 The operations of `vectors/ratchet.json`
+
+The file covers sections 17 and 18 and records what section 24.3 lists
+[test: tests/crypto/test_ratchet_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_ratchet_vectors.py::test_intermediates_are_the_values_of_the_core].
+It is written by `scripts/generate_vectors.py`. `party` is text, `purged_count` is a
+number, `stored_skipped_keys` and `purged_skipped_keys` are arrays of objects, and every
+other value is a hex string.
+
+| Operation | Rule | `inputs` | `intermediates` | `outputs` | `error` |
+|-----------|------|----------|-----------------|-----------|---------|
+| `ratchet-init-initiator` | 17.3 | `sk`, `session_associated_data`, `signed_prekey_key`, `ratchet_private_key` | `ratchet_key`, `dh`, `root_key`, `chain_key` | | |
+| `ratchet-init-responder` | 17.3 | `sk`, `session_associated_data`, `signed_prekey_private_key` | `ratchet_key` | | |
+| `ratchet-encrypt` | 17.6, 18 | `party`, `message_id`, `nonce`, `padded_plaintext` | `chain_key`, `message_key`, `header`, `associated_data` | `ciphertext` | NO_SENDING_CHAIN |
+| `ratchet-decrypt` | 17.7, 17.8, 18 | `party`, `message_id`, `header`, `ciphertext`, `ratchet_private_key` | `dh_receiving`, `root_key_receiving`, `chain_key_receiving`, `ratchet_key`, `dh_sending`, `root_key_sending`, `chain_key_sending`, `chain_key`, `message_key`, `associated_data`, `stored_skipped_keys`, `purged_skipped_keys` | `padded_plaintext`, `purged_count` | DECRYPT_FAILED, TOO_MANY_SKIPPED, CHAIN_EXHAUSTED, ZERO_DH |
+
+- The vectors are the steps of one conversation, in the order in which they run. A vector
+  works on the states that the vectors before it in the file left, and `party`,
+  `initiator` or `responder`, names the side whose state it uses. A vector with an `error`
+  leaves that state as it was (section 17.7).
+- The session is the one of the two vectors of section 15.6 named
+  `with-a-one-time-prekey`: `sk` and `session_associated_data` of each initialisation are
+  the outputs of the vector of its side, and `signed_prekey_key` is the public key of
+  `signed_prekey_private_key`
+  [test: tests/crypto/test_ratchet_vectors.py::test_conversation_runs_on_the_session_of_the_x3dh_vectors].
+  The session associated data stays with the side for every later vector.
+- `ratchet-init-initiator` takes `ratchet_private_key` as the 32 random bytes of
+  section 17.3. `ratchet_key` is the public key of DHs, `dh` the Diffie-Hellman output,
+  `root_key` and `chain_key` the two outputs of KDF_RK. `ratchet-init-responder` records
+  the public key of its signed prekey as `ratchet_key`.
+- `ratchet-encrypt`: `chain_key` is CKs before the message and `message_key` the message
+  key derived from it; `header` is the 40 bytes of section 17.5, `associated_data` the
+  217 bytes of section 18.2 and `ciphertext` the field of section 18.3. The padded
+  plaintext of a message is a `Content` whose `text` is `message ` followed by the label
+  of the message, padded by section 19.6. The labels `i0` to `i9` are the messages of the
+  initiator and `r0` to `r6` those of the responder, numbered in the order in which they
+  are encrypted.
+- `ratchet-decrypt` takes `message_id`, `header` and `ciphertext` of the message it opens,
+  as they were sent or as the vector changed them. `ratchet_private_key` is the 32 random
+  bytes of section 17.7 and is present exactly when the decryption reaches sub-step 4 of
+  step 5, a decryption that then fails included. The seven keys from `dh_receiving` to
+  `chain_key_sending` are present exactly when a DH ratchet step was taken: the
+  Diffie-Hellman output, the root key and the chain key of each KDF_RK, and the new
+  ratchet public key between them. `chain_key` is CKr before the key of the message was
+  derived and is absent when that key came from MKSKIPPED (step 2).
+- An object of `stored_skipped_keys` or `purged_skipped_keys` is an entry of MKSKIPPED
+  (section 17.2) with the keys `ratchet_key`, `number`, `message_key` and `step`; the two
+  numbers are JSON numbers. `stored_skipped_keys` lists the entries the decryption added,
+  `purged_skipped_keys` those that the cap or the purge of section 17.8 removed, and
+  `purged_count` is the number of step 9 of section 17.7.
+- A vector with an `error` records no intermediate. The vectors `ratchet-decrypt-tampered-`
+  followed by `header`, `nonce`, `ciphertext` or `tag` change one byte of that part of a
+  message that was sent, and `ratchet-decrypt-other-message-id` gives a message the id of
+  another one. The other negative vectors of a decryption carry a header that names
+  numbers or a ratchet key that no message of the conversation has, or a message a second
+  time, or a message whose key was purged.
+
 ## 16. Key agreement
 
 ### 16.1 What it is
@@ -1788,7 +1849,7 @@ Terms of part 2:
 - A public key is stored, compared and put into a byte layout as the 32 bytes that were
   generated or received. No implementation decodes a public key and encodes it again
   [test: tests/crypto/test_x3dh.py::test_public_keys_enter_the_associated_data_as_the_bytes_received]
-  [pending: task 11].
+  [test: tests/crypto/test_ratchet.py::test_ratchet_keys_are_kept_as_the_bytes_received].
 - An identity makes the key pair of IKdh together with its Ed25519 key pair and signs the
   string of section 4.3 for it. Any signature that verifies serves: the initial header and
   the bundle of one identity can carry different signature bytes (section 4.1, rule 5).
@@ -1909,7 +1970,8 @@ One Bundle starts at most one session.
    (section 17.3) and deletes SK. In one transaction it stores the session with its
    initial header (section 16.7) and, when the contact has no pinned X25519 identity
    key, `identity_dh_key` of the Bundle as its pin
-   [pending: task 11] [pending: task 12].
+   [test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte]
+   [pending: task 12].
 
 A key agreement that ends in a failure stores nothing, a pin included, and the client
 reports the result (section 20.3). A session without a one-time prekey is a session like
@@ -2072,8 +2134,10 @@ post-quantum parts. Section 25.2 lists every difference from that text with its 
 
 An implementation is a state machine without input or output of its own: it takes the
 state, the bytes of a message and every random value as arguments and returns the new
-state [pending: task 11]. The same code can so be driven by a test, by a vector and by the
-client.
+state
+[test: tests/crypto/test_ratchet.py::test_same_arguments_give_the_same_bytes]
+[test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte].
+The same code can so be driven by a test, by a vector and by the client.
 
 ### 17.2 The state
 
@@ -2101,7 +2165,8 @@ client.
 ### 17.3 Initialisation
 
 The initiator, from SK and SPK_B of the key agreement and from 32 random bytes
-(section 16.6, step 8) [pending: task 11]:
+(section 16.6, step 8)
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 ```
 DHs       = a new X25519 key pair from the 32 random bytes
@@ -2113,7 +2178,7 @@ MKSKIPPED = no entry
 ```
 
 The responder, from SK and the key pair of SPK_B (section 16.8, step 8)
-[pending: task 11]:
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 ```
 DHs       = the key pair of SPK_B
@@ -2134,7 +2199,7 @@ key of the signed prekey [pending: task 12].
 ### 17.4 The two key derivations
 
 KDF_RK(rk, dh) is one call of HKDF (RFC 5869). It returns a root key and a chain key
-[pending: task 11]:
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Parameter          | Value                                                                    |
 |--------------------|--------------------------------------------------------------------------|
@@ -2146,7 +2211,8 @@ KDF_RK(rk, dh) is one call of HKDF (RFC 5869). It returns a root key and a chain
 | Split              | Bytes 0 to 31 are the new root key. Bytes 32 to 63 are the chain key     |
 
 KDF_CK(ck) is two calls of HMAC (RFC 2104) with SHA-256 under the same key. It returns a
-message key and the next chain key [pending: task 11]:
+message key and the next chain key
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Output         | Key              | Data             | Length                                  |
 |----------------|------------------|------------------|-----------------------------------------|
@@ -2157,11 +2223,14 @@ KDF_CK has no salt, no info and no split. The calls are the `hmac` module of the
 standard library and `HMAC<SHA256>` in CryptoKit.
 
 This protocol calls HKDF in two places, sections 16.4 and 17.4, and their info strings
-differ: `sotto/1 x3dh` and `sotto/1 ratchet` [pending: task 11].
+differ: `sotto/1 x3dh` and `sotto/1 ratchet`
+[test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts].
 
 ### 17.5 The message header
 
-The header of a message is 40 bytes [pending: task 11]:
+The header of a message is 40 bytes
+[test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts]
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Offset | Length | Field | Value                                                                  |
 |--------|--------|-------|------------------------------------------------------------------------|
@@ -2180,7 +2249,10 @@ data and protobuf serialization is not canonical. A receiver authenticates and c
 
 Inputs: the state; the padded plaintext P (section 19.6); A, the 177 bytes of the session
 associated data followed by the message id (section 18.2); a nonce of 12 random bytes. The
-steps, in this order [pending: task 11]:
+steps, in this order
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]
+[test: tests/crypto/test_ratchet_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_ratchet.py::test_responder_has_no_sending_chain_before_its_first_decryption]:
 
 1. When CKs is empty, the result is NO_SENDING_CHAIN; no stored session is in that state
    (section 17.3). When Ns is 2^32 - 1, the result is CHAIN_EXHAUSTED (section 17.9).
@@ -2200,7 +2272,10 @@ Inputs: the state; H, the 40 bytes of the `header` field as received; W, the byt
 by the `message_id` of the Deliver; 32 random bytes, which become the private key of
 sub-step 4 of step 5 when the decryption takes a DH ratchet step and are not used
 otherwise. Every step works on a copy of the state. The steps, in this order
-[pending: task 11]:
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]
+[test: tests/crypto/test_ratchet_vectors.py::test_negative_vectors_raise_their_named_error]
+[test: tests/crypto/test_ratchet.py::test_random_conversations_keep_the_invariants]
+[test: tests/crypto/test_ratchet.py::test_a_ratchet_key_of_small_order_is_refused]:
 
 1. When `H.N` is 2^32 - 1, the result is CHAIN_EXHAUSTED (section 17.9).
 2. When MKSKIPPED has an entry for the pair (`H.DH`, `H.N`): mk is its message key, the
@@ -2244,13 +2319,16 @@ otherwise. Every step works on a copy of the state. The steps, in this order
    5 and 6. An entry that is replaced by a new one (section 17.8) is not counted.
 
 Every result but that of step 9 discards the copy: the state is byte for byte what it was
-before, and so are the skipped keys [pending: task 11]. A forged header can therefore not
+before, and so are the skipped keys
+[test: tests/crypto/test_ratchet.py::test_failed_decryption_leaves_the_state_as_it_was]
+[test: tests/crypto/test_ratchet.py::test_random_conversations_keep_the_invariants].
+A forged header can therefore not
 move a chain, replace a ratchet key or remove a stored key. The client keeps the new state
 only by the transaction of section 22.2.
 
 Steps 3 and 4 make every check of a count before step 5, 6 or 7 derives a key: a header
 that asks for more than MAX_SKIP keys costs the receiver no key derivation
-[pending: task 11].
+[test: tests/crypto/test_ratchet.py::test_too_many_skipped_keys_are_refused_before_any_key_is_derived].
 
 ### 17.8 Skipped message keys
 
@@ -2267,9 +2345,15 @@ Nr   = Nr + 1
 ```
 
 An entry that MKSKIPPED already has for the same ratchet public key and the same number
-is removed before the new one is added [pending: task 11].
+is removed before the new one is added
+[test: tests/crypto/test_ratchet.py::test_an_entry_for_the_same_key_and_number_is_replaced_and_not_counted].
 
-The rules [pending: task 11]:
+The rules
+[test: tests/crypto/test_ratchet.py::test_a_header_may_skip_exactly_max_skip_keys]
+[test: tests/crypto/test_ratchet.py::test_the_cap_removes_the_oldest_entry_and_counts_it]
+[test: tests/crypto/test_ratchet.py::test_entries_are_purged_with_the_fifth_dh_ratchet_step]
+[test: tests/crypto/test_ratchet.py::test_too_many_skipped_keys_are_refused_before_any_key_is_derived]
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 - MAX_SKIP is 1000. One decryption skips at most 1000 keys of the chain that ends and at
   most 1000 keys of the chain of its message (section 17.7, steps 3 and 4).
@@ -2295,7 +2379,8 @@ entry and removes none.
 ### 17.9 The end of a chain
 
 A chain holds the message numbers 0 to 2^32 - 2. The number 2^32 - 1 is never sent, so
-that Ns, Nr and PN, which count the messages of a chain, fit a u32 [pending: task 11].
+that Ns, Nr and PN, which count the messages of a chain, fit a u32
+[test: tests/crypto/test_ratchet.py::test_a_chain_ends_at_the_number_before_the_last].
 
 - A client whose Ns is 2^32 - 1 cannot encrypt on that sending chain: the result is
   CHAIN_EXHAUSTED. The next DH ratchet step, taken when a message of the peer with a new
@@ -2309,7 +2394,7 @@ that Ns, Nr and PN, which count the messages of a chain, fit a u32 [pending: tas
 ### 18.1 The cipher
 
 A message is sealed with ChaCha20-Poly1305, the AEAD of RFC 8439 section 2.8
-[pending: task 11]:
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Input           | Value                                                                        |
 |-----------------|------------------------------------------------------------------------------|
@@ -2335,23 +2420,31 @@ away the XOR of two plaintexts. A test vector takes the nonce as an input (secti
 | 161    | 16     | Message id                  | The `message_id` of the Send and of the Deliver          |
 | 177    | 40     | Header                      | Section 17.5: the bytes of the `header` field            |
 
-Total length: 217 bytes [pending: task 11].
+Total length: 217 bytes
+[test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts]
+[test: tests/crypto/test_ratchet_vectors.py::test_associated_data_is_the_session_data_the_message_id_and_the_header].
 
 - The sender takes the message id that it puts into the Send. The receiver takes the
   `message_id` of the Deliver and the `header` field exactly as it received them. It
-  never builds the header again from numbers [pending: task 11] [pending: task 12].
+  never builds the header again from numbers
+  [test: tests/crypto/test_ratchet.py::test_random_conversations_keep_the_invariants]
+  [pending: task 12].
 - The three parts have fixed lengths, so the 217 bytes split in one way only and no
   length is written in front of a part.
 - The message id is the key by which a receiver discards copies (section 20.4). In the
   associated data it is authentic: a message whose id was changed on the way does not
   decrypt [pending: task 13].
 - The caller of the ratchet passes the first 177 bytes with every call, and the ratchet
-  adds the header [pending: task 11].
+  adds the header
+  [test: tests/crypto/test_ratchet_vectors.py::test_associated_data_is_the_session_data_the_message_id_and_the_header]
+  [test: tests/crypto/test_ratchet.py::test_arguments_of_another_length_are_refused].
 
 ### 18.3 The wire layout
 
 The `ciphertext` field of the envelope (section 19.2) holds, for a padded plaintext of L
-bytes [pending: task 11]:
+bytes
+[test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts]
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Offset | Length | Field      | Value                                              |
 |--------|--------|------------|----------------------------------------------------|
@@ -3001,7 +3094,10 @@ This is the wait of the action Back off of section 11.1 [pending: task 14].
 - MAX_SKIP, SKIPPED_KEYS_CAP, SKIPPED_KEY_STEPS, PADDING_BLOCK and MAX_TEXT_BYTES are
   constants of end-to-end protocol version 1. Two clients that differ in one of them
   disagree on which messages decrypt or fit. The vectors and the tests of the ratchet
-  hold the first three [pending: task 11]. No vector of section 24.3 covers the other
+  hold the first three
+  [test: tests/crypto/test_ratchet.py::test_constants_are_those_of_section_24_1]
+  [test: tests/crypto/test_ratchet_recompute.py::test_document_and_vectors_agree_on_the_layouts].
+  No vector of section 24.3 covers the other
   two, because the padded plaintext is an input of a ratchet vector: the tests of the
   session hold the padding and the largest text [pending: task 12].
 - The other values are the defaults of a client. SEEN_ID_SECONDS and
@@ -3068,7 +3164,8 @@ initiator:
   session associated data.
 
 A vector of the ratchet is one step of a scripted conversation and records
-[pending: task 11]:
+[test: tests/crypto/test_ratchet_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_ratchet_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Object          | Values                                                                                   |
 |-----------------|------------------------------------------------------------------------------------------|
@@ -3079,7 +3176,7 @@ A vector of the ratchet is one step of a scripted conversation and records
 The conversation covers messages in order and out of order, lost messages, several DH
 ratchet steps and the negative cases of section 17.7.
 
-Appendix A is reserved for one such run in full, written out in hex.
+Appendix A writes out one such run in full, in hex.
 
 ## 25. Deviations and what is missing
 
@@ -3222,20 +3319,206 @@ environment, or has no user before a later stage of the project.
 
 ## Appendix A. One key agreement and two messages in hex
 
-This appendix is reserved. It follows the last numbered section and holds one run of the
-protocol written out in hex, every value in the order in which sections 16 to 19 compute
-it [pending: task 11]:
+This appendix holds one run of the protocol written out in hex, every value in the order
+in which sections 16 to 19 compute it. The values are taken from the vector files of
+sections 15.6 and 15.7, so that the text and the vectors cannot differ
+[test: tests/crypto/test_ratchet_vectors.py::test_appendix_a_is_taken_from_the_vector_files].
+Each value is named by its vector, its object and its key; a long value is broken into
+lines of 32 bytes, and the two prekey ids are numbers.
 
-- the key agreement between an initiator and a responder with a one-time prekey: every
-  private key and public key, the signed strings, DH1 to DH4, the input key material, SK
-  and the 161 bytes of the session associated data;
-- the first message of the initiator: the ratchet key pair, the Diffie-Hellman output,
-  the root key and the chain key, the message key, the 40 bytes of the header, the
-  message id, the nonce, the padded plaintext, the 217 bytes of the associated data, the
-  bytes of the `ciphertext` field, and the fields of its initial header;
-- the first message of the responder in answer: the same values for its DH ratchet step
-  and its message, without an initial header.
+The key agreement between the initiator A and the responder B with a one-time prekey
+(section 16): the keys of A, the keys of B with the signatures of its bundle, the two
+signed strings, DH1 to DH4, the input key material, SK and the 161 bytes of the session
+associated data.
 
-The values are taken from the vector files of sections 15 and 24.3, so that the text and
-the vectors cannot differ. Until the appendix is filled, this text has no worked example
-of part 2.
+```
+x3dh-initiate-with-a-one-time-prekey inputs.identity_key
+  ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1
+x3dh-initiate-with-a-one-time-prekey inputs.identity_dh_private_key
+  3131313131313131313131313131313131313131313131313131313131313131
+x3dh-respond-with-a-one-time-prekey inputs.identity_dh_key
+  04f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f3a
+x3dh-initiate-with-a-one-time-prekey inputs.ephemeral_private_key
+  3232323232323232323232323232323232323232323232323232323232323232
+x3dh-respond-with-a-one-time-prekey inputs.ephemeral_key
+  59d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d06418
+x3dh-respond-with-a-one-time-prekey inputs.identity_key
+  8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c
+x3dh-respond-with-a-one-time-prekey inputs.identity_dh_private_key
+  1111111111111111111111111111111111111111111111111111111111111111
+x3dh-initiate-with-a-one-time-prekey inputs.identity_dh_key
+  7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13
+x3dh-initiate-with-a-one-time-prekey inputs.identity_dh_signature
+  75544e6d894bec2c438c747fd0305e6193611aa4c118baecde09ee521f8bb7c8
+  3a2d4f61513cc382ac7a16c862d0d9520157a1f56179b18bd3481f50ea6e510e
+x3dh-respond-with-a-one-time-prekey inputs.signed_prekey_private_key
+  1212121212121212121212121212121212121212121212121212121212121212
+x3dh-initiate-with-a-one-time-prekey inputs.signed_prekey_key
+  052a50773ac8d91773f2dc9662e12f0defe915e415b8a1c8e20a5a3d6ab2b843
+x3dh-initiate-with-a-one-time-prekey inputs.signed_prekey_signature
+  7ac73331f4eb7c8377c639f83fa454d1661d106263622b96ae6901091b42bb41
+  376ad531dce6d2295b1c350bbb42a4031a046e4b29a8ba64270233e97a91e907
+x3dh-respond-with-a-one-time-prekey inputs.one_time_prekey_private_key
+  1313131313131313131313131313131313131313131313131313131313131313
+x3dh-initiate-with-a-one-time-prekey inputs.one_time_prekey_key
+  197fc2c567dc03ee2aadf0ed86681dac24daa76e83ca555875dd3be7376e5306
+x3dh-initiate-with-a-one-time-prekey intermediates.identity_dh_string
+  736f74746f2f31206964656e746974792d6468008a88e3dd7409f195fd52db2d
+  3cba5d72ca6709bf1d94121bf3748801b40f6f5c7b4e909bbe7ffe44c465a220
+  037d608ee35897d31ef972f07f74892cb0f73f13
+x3dh-initiate-with-a-one-time-prekey intermediates.signed_prekey_string
+  736f74746f2f31207369676e65642d7072656b6579008a88e3dd7409f195fd52
+  db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c052a50773ac8d91773f2
+  dc9662e12f0defe915e415b8a1c8e20a5a3d6ab2b843
+x3dh-initiate-with-a-one-time-prekey intermediates.dh1
+  d61c769f51f4ef4d2ccd152d0bebf2b146baf820e2332a7399848906b5d87a49
+x3dh-initiate-with-a-one-time-prekey intermediates.dh2
+  2d57023133fd4411f3c2663f1a4ac1f36d5a2e97861023606d09aa7a431af676
+x3dh-initiate-with-a-one-time-prekey intermediates.dh3
+  bb7fe367bd6607a50eedf8c32c1accd4f8a5800dc7bdc431fe35f2e3caab9e42
+x3dh-initiate-with-a-one-time-prekey intermediates.dh4
+  12b8310a65a694bf345962dfd28ba47be3fee735d0a57c63fb506da80cd88001
+x3dh-initiate-with-a-one-time-prekey intermediates.input_key_material
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  d61c769f51f4ef4d2ccd152d0bebf2b146baf820e2332a7399848906b5d87a49
+  2d57023133fd4411f3c2663f1a4ac1f36d5a2e97861023606d09aa7a431af676
+  bb7fe367bd6607a50eedf8c32c1accd4f8a5800dc7bdc431fe35f2e3caab9e42
+  12b8310a65a694bf345962dfd28ba47be3fee735d0a57c63fb506da80cd88001
+x3dh-initiate-with-a-one-time-prekey outputs.sk
+  44df5354681736f7e0f3e7b1236263c07e0b4458ee6d5acf8b209a33fcd613ad
+x3dh-initiate-with-a-one-time-prekey outputs.session_associated_data
+  01ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737
+  d104f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f
+  3a8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f
+  5c7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f
+  1359d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d064
+  18
+```
+
+The first message of the initiator (sections 17.3, 17.6 and 18): its ratchet key pair, the
+Diffie-Hellman output, the root key and the chain key, the message key, the 40 bytes of
+the header, the message id, the nonce, the padded plaintext, the 217 bytes of the
+associated data and the bytes of the `ciphertext` field, then the fields of its initial
+header (section 16.7). The chain key of the message is the chain key of the
+initialisation.
+
+```
+ratchet-init-initiator-with-a-one-time-prekey inputs.ratchet_private_key
+  5050505050505050505050505050505050505050505050505050505050505050
+ratchet-init-initiator-with-a-one-time-prekey intermediates.ratchet_key
+  ef38b4abd14b0a919cbe6839f6185b97d32607bee359c6c53c12cc7597867d59
+ratchet-init-initiator-with-a-one-time-prekey intermediates.dh
+  1292b40f5316616960cfa35969655da0e3f02ec4c9b6018e316e678dfb106b18
+ratchet-init-initiator-with-a-one-time-prekey intermediates.root_key
+  75fed0c88f85961cba32ec90c683343a431ccb89f3acd158df6a09f73f1dd5f5
+ratchet-init-initiator-with-a-one-time-prekey intermediates.chain_key
+  74fbfa0a0b6865361f7e3976c705044463bc8e8a91a91bdd01ab64827b2fd3b7
+ratchet-encrypt-i0 intermediates.message_key
+  07552617906c9a3ecb017f635e5c44e579f714c66a5f6763cb2311cc5f56167d
+ratchet-encrypt-i0 intermediates.header
+  ef38b4abd14b0a919cbe6839f6185b97d32607bee359c6c53c12cc7597867d59
+  0000000000000000
+ratchet-encrypt-i0 inputs.message_id
+  41414141414141414141414141414141
+ratchet-encrypt-i0 inputs.nonce
+  818181818181818181818181
+ratchet-encrypt-i0 inputs.padded_plaintext
+  0a0a6d6573736167652069308000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+ratchet-encrypt-i0 intermediates.associated_data
+  01ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737
+  d104f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f
+  3a8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f
+  5c7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f
+  1359d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d064
+  1841414141414141414141414141414141ef38b4abd14b0a919cbe6839f6185b
+  97d32607bee359c6c53c12cc7597867d590000000000000000
+ratchet-encrypt-i0 outputs.ciphertext
+  8181818181818181818181813fd253b39f0190934e2ae4347e1b90651a299b67
+  a738fb370af6992d39c4b15aceb6434cdf1720ca87f0631225a9c41dc379ff24
+  fa40f9274f208a042e0f6f7563258c8c0fc1e63a784bd5928f8154f575a930eb
+  229888efb6a3701e40a5a3bc868db9efc959ea5a3a4f28db878d5cb7723aa784
+  ad6c26f0ed8985a953d0b4b698080f70ee4e82249b4b518ed948d488413e659a
+  052a53e024fd8abf0adfa93fa2c38dfaecd17f66bc3e3de1ffc9c42d1630941e
+  8cf238feebab69c93f0d6a393dfad82c95b52b1fed4192fa5e1d807aa05429c4
+  48337f27118152bc3dc45bc7989fc9a0a13a38847b812f6ef67fa038bd1f8a8f
+  b618f0f4c5efc227f2e3ef5c774b5a5a0d67a52ddfcd65a73a2fe764
+x3dh-respond-with-a-one-time-prekey inputs.identity_dh_key
+  04f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f3a
+x3dh-respond-with-a-one-time-prekey inputs.identity_dh_signature
+  2df31e115b6bd119f507d1fc769325cd171ec5f1b897ba1064eb53403556c56a
+  3d675e46dfe313e0dd8e98d0f67cbd27e95c0f6e1ccba3fc7101cc4b89456d08
+x3dh-respond-with-a-one-time-prekey inputs.ephemeral_key
+  59d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d06418
+x3dh-respond-with-a-one-time-prekey inputs.signed_prekey_id
+  7
+x3dh-respond-with-a-one-time-prekey inputs.one_time_prekey_id
+  41
+```
+
+The first message of the responder in answer: the DH ratchet step that the responder
+takes when it decrypts the first message of the initiator (section 17.7, step 5), with
+the 32 random bytes of its new ratchet key, then the same values for its own message.
+The chain key of that message is the chain key of the second KDF_RK of the step. It
+carries no initial header.
+
+```
+ratchet-decrypt-i0-first-message inputs.ratchet_private_key
+  5252525252525252525252525252525252525252525252525252525252525252
+ratchet-decrypt-i0-first-message intermediates.dh_receiving
+  1292b40f5316616960cfa35969655da0e3f02ec4c9b6018e316e678dfb106b18
+ratchet-decrypt-i0-first-message intermediates.root_key_receiving
+  75fed0c88f85961cba32ec90c683343a431ccb89f3acd158df6a09f73f1dd5f5
+ratchet-decrypt-i0-first-message intermediates.chain_key_receiving
+  74fbfa0a0b6865361f7e3976c705044463bc8e8a91a91bdd01ab64827b2fd3b7
+ratchet-decrypt-i0-first-message intermediates.ratchet_key
+  f68b05ba03f7185e1ba88878682f8dd0b15158f6050889c9481d79c2d7d2fa07
+ratchet-decrypt-i0-first-message intermediates.dh_sending
+  731a0e9015f7835416d6e020e07af563075bacb78ad13d8013a16f644b3c7806
+ratchet-decrypt-i0-first-message intermediates.root_key_sending
+  80589a645dd6847e1382b7a6803e1be1a8b8dad011a49b61314083886c296827
+ratchet-decrypt-i0-first-message intermediates.chain_key_sending
+  fe7dd7d9a266e3fa8b81d2ce18101119d37636f53ac74717d16509918895abba
+ratchet-encrypt-r0 intermediates.message_key
+  44a3dae0d4309fc78d0e33d492f4271440912767a6d2b68588a38eac21720fec
+ratchet-encrypt-r0 intermediates.header
+  f68b05ba03f7185e1ba88878682f8dd0b15158f6050889c9481d79c2d7d2fa07
+  0000000000000000
+ratchet-encrypt-r0 inputs.message_id
+  46464646464646464646464646464646
+ratchet-encrypt-r0 inputs.nonce
+  868686868686868686868686
+ratchet-encrypt-r0 inputs.padded_plaintext
+  0a0a6d6573736167652072308000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+  0000000000000000000000000000000000000000000000000000000000000000
+ratchet-encrypt-r0 intermediates.associated_data
+  01ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737
+  d104f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f
+  3a8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f
+  5c7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f
+  1359d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d064
+  1846464646464646464646464646464646f68b05ba03f7185e1ba88878682f8d
+  d0b15158f6050889c9481d79c2d7d2fa070000000000000000
+ratchet-encrypt-r0 outputs.ciphertext
+  86868686868686868686868637b065eb53fa3d6a41596033c93d1e78b0a4a52b
+  405c73c2a7f749830e30d6cbec9a3da5c4e5657f84ac538a3e5e1cc631ff9ac6
+  14853a91f5b956990979bb2eae81952e2f1601446b36ca701e46400e27498620
+  9e7a6e904120789100be211d1eceb436b5ef60a9a8d529e6dc1927f0039e7a31
+  d6a2f35dacf9bb869973b244ecf4c2b2b28e7c0e1fd6c5ce62e8fb1f36be5bd8
+  3d02852549fb184512d6585f37805943bfa3c6fa5a776cb994a3970aebbc91c4
+  708002a5758b1a9581f8e5932af8d075fd85aeff023421093287f361c7076223
+  57d7f1b291a27e916e4d81ea5a4c0d0849e4aec5c0c7f02687493b5543ff7dd5
+  06c1ba4b6168acc68c50e2287297a72caec342f3e4f05e93ecb9efbf
+```
