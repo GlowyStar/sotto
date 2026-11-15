@@ -13,10 +13,9 @@ protocol: a peer, the device with its store, and what the keys of a session cove
   and to nothing else about it. The list "What the relay learns" is the other side of
   that word.
 - A guarantee in this document cites the test that holds it, in the syntax of section 2.6
-  of the protocol. A guarantee whose citation names a task is held by no test in this
-  repository, and the code behind it can be missing as well. What this document admits
-  (what the relay learns, what it can do, what is not protected, what a peer or a thief
-  can do) is no guarantee and needs no citation.
+  of the protocol. What this document admits (what the relay learns, what it can do,
+  what is not protected, what a peer or a thief can do) is no guarantee and needs no
+  citation.
 - "The relay" in the lists below is whoever controls the relay. The rules of the protocol
   describe the relay of this repository, run unchanged; they bind that code and not the
   person who runs it.
@@ -117,7 +116,7 @@ Whoever controls the relay learns all of this, with or without the rules of the 
   has the full list.
 
 The relay does not learn the content of a message: it holds no key that opens a payload
-(protocol, sections 16 to 18) [pending: task 14].
+(protocol, sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
 
 What the relay of this repository writes down, run unchanged:
 
@@ -353,7 +352,7 @@ its id.
   initial message. The rate at which the relay takes messages is the only brake, and
   the user's remedy is to remove the contact.
 - A text is whatever the peer chose to send, control characters included. The
-  command-line client escapes them before it prints [pending: task 14].
+  command-line client escapes them before it prints [test: tests/client/test_cli.py::test_peer_text_is_printed_with_control_characters_escaped].
 - A peer that stops answering, loses its store or goes back to an older copy of it
   leaves messages that fail and sessions that only a reset repairs (protocol,
   section 20.6). The user sees the failures; the protocol does not say why they happen.
@@ -555,7 +554,7 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
 
 The header is not encrypted, and hiding it is not part of this protocol (protocol,
 section 26). What the relay does not see is the sealed text: it holds no key of a session
-(protocol, sections 16 to 18) [pending: task 14].
+(protocol, sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
 
 ## One-time prekeys are not authenticated
 

@@ -16,8 +16,7 @@ CITING_DOCUMENTS = [*DOCS, ROOT / "README.md"]
 
 OPEN_POINT = re.compile(r"(?<!`)OPEN:")
 TEST_CITATION = re.compile(r"\[test: (tests/(?:\w+/)*\w+\.py)::(test_\w+)\]")
-PENDING_CITATION = re.compile(r"\[pending: task 14\]")
-CITATION_PART = re.compile(r"\[\w+:|\btests/|::|\bpending\b", re.IGNORECASE)
+CITATION_PART = re.compile(r"\[\w+:|\btests/|::")
 
 PROTOCOL = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
 SCHEMA = ROOT / "proto" / "sotto.proto"
@@ -61,7 +60,7 @@ def test_docs_have_no_open_point() -> None:
 def test_citations_are_well_formed() -> None:
     malformed = []
     for location, line in numbered_lines(CITING_DOCUMENTS):
-        outside_citations = PENDING_CITATION.sub("", TEST_CITATION.sub("", line))
+        outside_citations = TEST_CITATION.sub("", line)
         if CITATION_PART.search(outside_citations):
             malformed.append(f"{location}: {line.strip()}")
 

@@ -9,7 +9,7 @@ both parts, and Appendix A follows section 27.
 ### 1.1 What this document is
 
 sotto is an end-to-end encrypted one-to-one messenger. Clients exchange ciphertext through
-a relay that holds no key that opens a message (sections 16 to 18) [pending: task 14].
+a relay that holds no key that opens a message (sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
 This document is the contract between the implementations: the relay and the command-line
 client of this repository, and a macOS client in a repository of its own. It is written at
 the level of bytes. Where an implementation and this text disagree, the implementation is
@@ -32,9 +32,8 @@ sections.
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee in this document carries a citation (section 2.6). A guarantee whose
-  citation names a task instead of a test is held by no test in this repository, and the
-  code behind it can be missing as well.
+- Every guarantee in this document carries a citation (section 2.6), which names the
+  test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
 
@@ -141,27 +140,20 @@ rule.
 - A sentence that points to a rule by the number of its section, or that gives the reason
   for a rule, carries no citation of its own.
 
-A citation is written on one line and has one of two forms, shown here by a real example
-of each:
+A citation is written on one line and has one form, shown here by a real example:
+`[test: tests/test_routing.py::test_healthz_answers_200]` names the test function that
+holds the statement: the path of the test file from the root of the repository, two
+colons, the name of the function. A parametrized test is cited by its function name. A
+statement of part 1 that rests on a rule of part 2 names the section of that rule and
+carries the citation of the test behind it.
 
-- `[test: tests/test_routing.py::test_healthz_answers_200]` names the test function that
-  holds the statement: the path of the test file from the root of the repository, two
-  colons, the name of the function. A parametrized test is cited by its function name.
-- `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 14, of the task of the project plan that brings it.
-  The pull request of that task replaces the citation with the first form. No citation
-  names task 9: that task is part 2 of this text and brings no test. A statement of
-  part 1 that rests on a rule of part 2 names the section of that rule and carries the
-  citation of the test, or of the task, behind it.
-
-The two forms are checked by machine, here and in the other documents of `docs/` and in
-the README. A citation of the first form has to name a test function that exists
-[test: tests/test_docs.py::test_cited_tests_exist]. Four marks appear only inside a
-citation: an opening square bracket followed by a word and a colon, the word that opens
-the second form, a path into the test folder and a pair of colons. Text that carries one
-of the marks and is not a citation of one of the two forms fails the check
-[test: tests/test_docs.py::test_citations_are_well_formed]. The check sees the form of a
-citation, not whether a guarantee has one.
+The form is checked by machine, here and in the other documents of `docs/` and in the
+README. A citation has to name a test function that exists
+[test: tests/test_docs.py::test_cited_tests_exist]. Three marks appear only inside a
+citation: an opening square bracket followed by a word and a colon, a path into the test
+folder and a pair of colons. Text that carries one of the marks and is not a citation
+fails the check [test: tests/test_docs.py::test_citations_are_well_formed]. The check
+sees the form of a citation, not whether a guarantee has one.
 
 A point that is not decided is marked `OPEN:`, at the start of a line, of a list item or of
 a table cell. A merged revision carries the mark only directly after a backtick, as in this
@@ -527,7 +519,7 @@ The relay process speaks WebSocket without TLS
 [test: tests/test_routing.py::test_websocket_opens_on_ws]. In a deployment a reverse proxy
 in front of it ends TLS and forwards the path `/ws`. The protocol makes no use of the TLS
 session: the login is not bound to it (section 8.7). What a client refuses to dial without
-TLS is specified in section 23.1 [pending: task 14].
+TLS is specified in section 23.1 [test: tests/client/test_transport.py::test_url_rules_of_sections_8_2_and_23_1].
 
 ## 7. Frames
 
@@ -748,7 +740,7 @@ Rules of state for the relay:
   and so does every Send
   [test: tests/test_messages.py::test_every_send_gets_one_answer_in_the_order_of_the_requests].
 
-Rules of state for a client [pending: task 14]:
+Rules of state for a client [test: tests/client/test_transport.py::test_frame_out_of_its_state_closes_with_1008] [test: tests/client/test_transport.py::test_answer_that_matches_no_request_is_ignored]:
 
 - A first frame that is not a Hello and a second Hello are treated as a malformed frame.
 - Between the Hello and the LoggedIn, every frame other than LoggedIn is treated as a
@@ -997,7 +989,7 @@ The client derives it from the URL it dialed:
 3. Replace each ASCII letter `A` to `Z` by its lowercase letter.
 4. The result has to be 1 to 255 bytes long and hold only the bytes `a` to `z`, `0` to
    `9`, `.`, `-`, `_` and `:`. A client MUST NOT dial a URL whose host gives any other
-   result [pending: task 14].
+   result [test: tests/client/test_transport.py::test_url_rules_of_sections_8_2_and_23_1].
 
 | URL as given                      | Server name                                           |
 |-----------------------------------|-------------------------------------------------------|
@@ -1067,7 +1059,7 @@ it nothing but the close
 [test: tests/test_login.py::test_every_login_of_an_identity_replaces_the_one_before].
 
 A client that is closed with 4001 stops: it does not reconnect by itself
-[pending: task 14]. Two copies of one identity would otherwise replace each other without
+[test: tests/client/test_transport.py::test_replaced_client_stops]. Two copies of one identity would otherwise replace each other without
 end. This is the case of a second login of one identity.
 
 ### 8.6 Registration
@@ -1200,7 +1192,7 @@ A bundle without a one-time prekey still starts a session
 LoggedIn and BundleStored carry the number of one-time prekeys that the relay holds for
 the identity at that moment
 [test: tests/test_bundles.py::test_counts_of_logged_in_and_bundle_stored_follow_the_stored_one_time_prekeys].
-A client uses it to decide when to upload more (section 21.3) [pending: task 14]. The relay
+A client uses it to decide when to upload more (section 21.3) [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox]. The relay
 sends no other notice when the number falls
 [test: tests/test_bundles.py::test_owner_gets_no_notice_when_a_one_time_prekey_is_handed_out].
 
@@ -1333,7 +1325,7 @@ An Ack names messages by the pair (sender, message id), as the Deliver carried t
   [test: tests/test_messages.py::test_unacked_message_is_delivered_again_after_the_next_login].
 
 A client acks a message only after it saved everything it needs from it; the exact rule is
-in section 22.2 [pending: task 14]. An Ack tells the relay to delete the only other copy.
+in section 22.2 [test: tests/client/test_transport.py::test_connection_cut_between_deliver_and_ack_gives_one_text]. An Ack tells the relay to delete the only other copy.
 
 ### 10.6 Lost frames
 
@@ -1363,13 +1355,13 @@ Three actions are named in the tables below.
 - Retry: the connection is gone. The client opens a new connection, logs in and repeats
   every Send that has no Stored and no Error whose action is Stop. It waits before each
   attempt and lengthens the wait while attempts fail; the schedule is specified in
-  section 23.4 [pending: task 14].
+  section 23.4 [test: tests/client/test_transport.py::test_waits_follow_the_schedules] [test: tests/client/test_transport.py::test_relay_restarted_in_the_middle_of_a_conversation_loses_nothing].
 - Stop: the client does not reconnect and does not repeat the frame by itself. It reports
   the condition, and the next step is taken by a person.
 - Back off: the connection stays open. The client waits before it sends the refused frame
   again, unchanged. The wait is FRAME_REFILL_SECONDS or longer and grows while the same
   frame keeps being refused; the schedule is specified in section 23.5
-  [pending: task 14]. A frame that waits in Back off when the connection ends is sent
+  [test: tests/client/test_transport.py::test_waits_follow_the_schedules] [test: tests/client/test_transport.py::test_rate_limited_send_is_sent_again_after_the_back_off]. A frame that waits in Back off when the connection ends is sent
   again after the next login. An UploadBundle is the exception: section 21.4 says what
   the next login uploads.
 
@@ -1423,7 +1415,7 @@ meaning, and a peer MUST NOT parse it.
 | 4001 | REPLACED           | relay       | A newer login of the same identity succeeded (section 8.5)                | Stop   |
 
 - The column "Client" is what a client does when the relay closed with the code
-  [pending: task 14]. 1003, 1008 and 1009 from the relay mean that the client broke the
+  [test: tests/client/test_transport.py::test_close_codes_get_the_action_of_section_11_3] [test: tests/client/test_transport.py::test_replaced_client_stops]. 1003, 1008 and 1009 from the relay mean that the client broke the
   protocol, and a new connection would break it again.
 - A client that closes because the relay sent a text message, a malformed frame or a
   message above the limit uses the same codes and then retries.
@@ -1463,7 +1455,7 @@ bundle
 [test: tests/client/test_session.py::test_invalid_id_adds_no_contact]
 [test: tests/client/test_session.py::test_bundle_of_another_identity_is_refused_before_any_diffie_hellman]
 [test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]
-[pending: task 14]. Section 24.2 names the local results of the end-to-end protocol.
+[test: tests/client/test_transport.py::test_substituted_bundle_is_refused_and_nothing_is_sent]. Section 24.2 names the local results of the end-to-end protocol.
 
 ## 12. Limits
 
@@ -1614,7 +1606,7 @@ of Hello, the first frame of every connection.
 - A client reads `version` before it applies any other rule to the Hello. A client that
   reads a `version` other than 1, 0 included, sends no Login, closes the connection with
   close code 1000, reports that the relay speaks a version it does not implement, and
-  stops (section 11.1) [pending: task 14].
+  stops (section 11.1) [test: tests/client/test_transport.py::test_unknown_relay_version_ends_with_1000_and_stops].
 - A client states no version. A client that stays on the connection speaks the version of
   the Hello.
 - A change that an implementation of version 1 would refuse or misread is a new version:
@@ -2673,7 +2665,7 @@ the bytes as a `Content`
   UNKNOWN_CONTENT. A client of version 1 knows one member, `text`.
 - The text is whatever the peer chose to send. The command-line client of this
   repository prints it with the C0, C1 and bidirectional control characters escaped
-  [pending: task 14].
+  [test: tests/client/test_cli.py::test_peer_text_is_printed_with_control_characters_escaped].
 
 A message with the result BAD_CONTENT or UNKNOWN_CONTENT is a real message of the peer:
 it decrypted. The client keeps the new ratchet state and the seen id and acks the
@@ -2989,10 +2981,10 @@ client does this, in this order
    uploads it.
 3. Upload. When the relay has not confirmed the newest signed prekey with a
    BundleStored, the client sends an UploadBundle that carries it (section 21.4)
-   [pending: task 14].
+   [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 
 Step 1 needs no connection. The client also runs it every time it starts, before it
-dials the relay [pending: task 14]. A client that stays on one connection SHOULD run the
+dials the relay [test: tests/client/test_transport.py::test_expired_signed_prekey_is_deleted_at_start_before_any_dial]. A client that stays on one connection SHOULD run the
 three steps again when the newest signed prekey reaches the age of step 2 or a grace
 period ends.
 
@@ -3029,7 +3021,7 @@ The grace period
   less than ONE_TIME_PREKEY_REFILL_BELOW, 50, it makes ONE_TIME_PREKEY_CAP - c new
   one-time prekeys, 100 - c with the default, and uploads them in the UploadBundle of
   this login (section 21.4). The first upload of an identity so carries 100
-  [pending: task 14].
+  [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 - The relay sends no notice when the number falls (section 9.4). A client MAY refill
   during a connection as well, from the last count the relay reported less the number
   of initial messages it accepted since then that named a one-time prekey.
@@ -3051,7 +3043,7 @@ The grace period
   prekey with its id and its signature, and the new one-time prekeys, if any
   (section 7.8).
 - After a LoggedIn a client sends at most one UploadBundle for the steps of sections
-  21.2 and 21.3, before any Send of that login (section 23.3) [pending: task 14]. A
+  21.2 and 21.3, before any Send of that login (section 23.3) [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox]. A
   rotation or a refill during the connection (sections 21.2 and 21.3) is a further
   UploadBundle.
 - A one-time prekey is uploaded once (section 9.1). The client saves the one-time
@@ -3064,7 +3056,7 @@ The grace period
   with the same keys in it.
 - An UploadBundle that waits in Back off, or that has no answer, when the connection
   ends is not sent again, and after the next LoggedIn the steps of sections 21.2 and
-  21.3 build the UploadBundle of that login [pending: task 14]. The one-time prekeys of
+  21.3 build the UploadBundle of that login [test: tests/client/test_transport.py::test_upload_open_when_the_connection_ends_is_not_sent_again]. The one-time prekeys of
   a frame that has no answer are kept: the relay can hold them. The relay holds none
   of a frame that waits in Back off, because it refused the frame each time it was sent
   (section 11.2): the client deletes the private keys of the one-time prekeys of that
@@ -3094,14 +3086,14 @@ A client keeps, for one identity
   the message id, the recipient and the bytes of the payload;
 - the message log: the texts it sent and received.
 
-No frame and no payload carries the seed or a private key [pending: task 14].
+No frame and no payload carries the seed or a private key [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 
 ### 22.2 The two ordering rules
 
 On receive
 [test: tests/client/test_session.py::test_crash_between_decryption_and_commit_changes_nothing_and_the_message_decrypts_again]
 [test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks]
-[pending: task 14]:
+[test: tests/client/test_transport.py::test_connection_cut_between_deliver_and_ack_gives_one_text]:
 
 - The client sends the Ack for a message that it accepted only after one transaction
   committed everything the message changes: the new ratchet state of its session, the
@@ -3115,7 +3107,7 @@ On receive
 
 On send
 [test: tests/client/test_session.py::test_outbox_bytes_sent_again_after_a_crash_give_one_text]
-[pending: task 14]:
+[test: tests/client/test_transport.py::test_client_killed_between_commit_and_stored_delivers_one_text]:
 
 - One transaction commits the new ratchet state, with the sending chain moved on, and
   the outbox row with the message id and the bytes of the payload. Only after the commit
@@ -3153,7 +3145,7 @@ this
   group or to others, that is, when its mode has one of the bits 077.
 - The database uses the rollback journal and not a write-ahead log, with `secure_delete`
   on and one connection: no second file keeps older ratchet states.
-- The seed is never taken from a command line argument and never printed [pending: task 14].
+- The seed is never taken from a command line argument and never printed [test: tests/client/test_cli.py::test_seed_is_neither_an_argument_nor_printed].
 
 Nothing in the store is encrypted. Whoever can read the file holds the identity and
 everything else in section 22.1; the threat model says what follows from that.
@@ -3162,7 +3154,10 @@ everything else in section 22.1; the threat model says what follows from that.
 
 ### 23.1 The URL
 
-A client is given the URL of its relay; no URL is built into it [pending: task 14].
+A client is given the URL of its relay; no URL of a relay that serves other hosts is
+built into it. The command-line client of this repository has a default, the loopback URL
+`ws://127.0.0.1:8765/ws` of a relay on the same machine, and the option `--relay` for any
+other [test: tests/client/test_transport.py::test_url_rules_of_sections_8_2_and_23_1] [test: tests/client/test_cli.py::test_ws_url_off_loopback_is_refused_without_insecure].
 
 - The scheme is `wss` or `ws`. The client dials the URL as given and takes the server
   name from its host (section 8.2).
@@ -3181,15 +3176,15 @@ A client is given the URL of its relay; no URL is built into it [pending: task 1
 ### 23.2 The connection
 
 - The client sets the receive limit of its WebSocket library to MAX_FRAME_BYTES
-  (section 6.3) [pending: task 14].
+  (section 6.3) [test: tests/client/test_transport.py::test_broken_server_frame_closes_with_its_code_and_the_client_reconnects].
 - The client connects to the host of the URL itself. It takes no proxy from its
-  environment [pending: task 14]: a proxy that the user did not ask for would see the
+  environment [test: tests/client/test_transport.py::test_proxy_of_the_environment_is_not_used]: a proxy that the user did not ask for would see the
   address of the relay and, on a `ws` URL, every frame.
 - The client answers pings and requires no subprotocol (sections 6.2 and 6.4).
 
 ### 23.3 After the login
 
-After a LoggedIn the client does this, in this order [pending: task 14]:
+After a LoggedIn the client does this, in this order [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox]:
 
 1. The steps of sections 21.2 and 21.3, and the one UploadBundle they ask for. Until the
    relay holds the bundle of an identity, the identity is not registered and nobody can
@@ -3197,12 +3192,13 @@ After a LoggedIn the client does this, in this order [pending: task 14]:
 2. Every row of the outbox, oldest first, as a Send (section 22.2).
 3. The deletion of the seen ids whose time is over (section 20.4).
 
-A Deliver can arrive from the LoggedIn on, between any two of these steps, and is handled
-as it arrives (section 20.2).
+A Deliver can arrive from the LoggedIn on, between any two of these steps. The steps only
+send frames; the frames of the relay that arrive meanwhile wait and are handled in their
+order once the steps are done (section 20.2).
 
 ### 23.4 The reconnect schedule
 
-This is the wait of the action Retry of section 11.1 [pending: task 14].
+This is the wait of the action Retry of section 11.1 [test: tests/client/test_transport.py::test_waits_follow_the_schedules] [test: tests/client/test_transport.py::test_relay_restarted_in_the_middle_of_a_conversation_loses_nothing].
 
 - n counts the attempts to connect since the last LoggedIn: the first attempt after a
   connection ended has n = 1, and every attempt that ends without a LoggedIn raises n
@@ -3222,7 +3218,7 @@ This is the wait of the action Retry of section 11.1 [pending: task 14].
 
 ### 23.5 The Back off schedule
 
-This is the wait of the action Back off of section 11.1 [pending: task 14].
+This is the wait of the action Back off of section 11.1 [test: tests/client/test_transport.py::test_waits_follow_the_schedules] [test: tests/client/test_transport.py::test_rate_limited_send_is_sent_again_after_the_back_off].
 
 - k counts, for one frame, the times in a row that the relay refused it on this
   connection with an Error whose action is Back off.

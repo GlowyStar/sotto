@@ -8,15 +8,14 @@ opens one.
 
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
-- Nothing is encrypted so far. The relay answers a health check, logs a connection in by
-  a signature over its own challenge, and stores and hands out prekey bundles. It stores
-  a message for a registered recipient, answers the sender once the message is
-  committed, delivers it when the recipient is logged in and deletes it when the
-  recipient acks it or it expires; the payload is opaque bytes that it never parses or
-  logs. Queue caps and rate limits are not there yet. The frames
-  are protobuf messages, whose schema is `proto/sotto.proto`. The identity core holds the
-  user ids, the three signed strings and the checks of a prekey bundle, with the shared
-  test vectors in `vectors/identity.json`.
+- An alpha. Two people chat from two terminals through a relay: the command-line client
+  `sotto` encrypts every text end to end (the key agreement and the Double Ratchet of
+  part 2 of the protocol), and the text is in no frame, log line or file of the relay
+  [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
+  The relay logs a connection in by a signature over its own challenge, stores and hands
+  out prekey bundles, and keeps a message until its recipient acks it or it expires; it
+  caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
+  `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
   holds both parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
@@ -38,6 +37,73 @@ opens one.
   come from vetted libraries only.
 - The protocol is written down, and shared test vectors keep the implementations in step:
   a command-line client here and a macOS client in a repository of its own.
+
+## Try it
+
+Two terminals on one machine, about five minutes. Needs [uv](https://docs.astral.sh/uv/),
+Python 3.14 and Docker.
+
+1. Start the relay from the root of the repository:
+
+   ```sh
+   docker compose up --build -d --wait
+   ```
+
+   It listens on `127.0.0.1:8765` and serves metrics on `127.0.0.1:9765`. When a port is
+   taken, `RELAY_PORT` and `RELAY_METRICS_PORT` move them, and every `chat` below then
+   gets `--relay ws://127.0.0.1:<port>/ws`:
+
+   ```sh
+   RELAY_PORT=8784 RELAY_METRICS_PORT=9784 docker compose up --build -d --wait
+   ```
+
+2. Make two identities, one per terminal. Each command prints the user id, 64 hex
+   characters:
+
+   ```sh
+   uv run sotto --data-dir alice init    # terminal 1
+   uv run sotto --data-dir bob init      # terminal 2
+   ```
+
+3. Exchange the ids and give each other a local name:
+
+   ```sh
+   uv run sotto --data-dir alice add bob <the id that bob printed>      # terminal 1
+   uv run sotto --data-dir bob add alice <the id that alice printed>    # terminal 2
+   ```
+
+4. Chat, Bob first: an identity can receive once its client has connected one time,
+   because that is when its prekey bundle reaches the relay.
+
+   ```sh
+   uv run sotto --data-dir bob chat alice    # terminal 2
+   uv run sotto --data-dir alice chat bob    # terminal 1
+   ```
+
+   Both print `connected`. A line typed in one terminal is printed in the other as
+   `alice: <the line>`. `/quit` or the end of input leaves the chat; what the other side
+   sends meanwhile waits at the relay and is printed by the next `chat`.
+
+5. Stop the relay and delete its data: `docker compose down -v`.
+
+Without `--data-dir` the identity lives in `~/.sotto`. `sotto contacts` lists the
+contacts, `sotto id` prints the own id and `sotto reset <name>` starts a new session with
+a contact. Dial the relay as `127.0.0.1`, not `localhost`: the relay of `compose.yaml`
+refuses a login signed for another host name (see `RELAY_NAME` below).
+
+What the alpha does not do yet:
+
+- No TLS on the way to the relay of `compose.yaml`. The client dials a `ws://` URL only
+  to a loopback host; `--insecure` overrides that, and then the login and every frame
+  cross the network readable. A relay on another machine belongs behind a TLS proxy and
+  is dialed as `wss://`.
+- The data directory is not encrypted: whoever can read it holds the identity, the keys
+  and the message log.
+- One device per identity, one-to-one chats, text only. No groups, no files, no
+  history view and no notice that a message was delivered or read.
+- Nothing checks that an id belongs to the person you think; ids are compared out of
+  band, by you.
+- No security audit.
 
 ## Run the relay
 

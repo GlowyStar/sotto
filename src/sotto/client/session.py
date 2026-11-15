@@ -24,6 +24,7 @@ from sotto.client.store import Identity, OutboxRow, Store, StoredSession, Stored
 from sotto.crypto import ratchet, x3dh
 from sotto.crypto.identity import (
     KEY_LENGTH,
+    NONCE_LENGTH,
     BadBundleError,
     Bundle,
     CryptoError,
@@ -34,12 +35,13 @@ from sotto.crypto.identity import (
     derive_identity_key,
     derive_x25519_public_key,
     sign_identity_dh_key,
+    sign_login,
     sign_signed_prekey,
     verify_identity_dh_key,
 )
 from sotto.crypto.ratchet import MESSAGE_NONCE_LENGTH, DecryptFailedError, RatchetState
 from sotto.crypto.x3dh import BadInitialHeaderError
-from sotto.proto.sotto_pb2 import InitialHeader, PeerMessage
+from sotto.proto.sotto_pb2 import InitialHeader, Login, PeerMessage
 
 MESSAGE_ID_LENGTH = 16
 SEEN_ID_SECONDS = 3196800
@@ -156,6 +158,19 @@ class Client:
     def now(self) -> int:
         return int(self.clock())
 
+    def sign_login(self, *, server_name: str, server_nonce: bytes) -> Login:
+        """The Login of section 8.1 for the nonce of a Hello and the server name of 8.2."""
+        client_nonce = self.random_bytes(NONCE_LENGTH)
+        signature = sign_login(
+            self._identity.seed,
+            server_name=server_name,
+            server_nonce=server_nonce,
+            client_nonce=client_nonce,
+        )
+        return Login(
+            identity_key=self.identity_key, client_nonce=client_nonce, signature=signature
+        )
+
     def make_prekeys(self, one_time_count: int) -> PrekeyUpload:
         """Makes a new signed prekey and `one_time_count` one-time prekeys and saves them."""
         now = self.now()
@@ -219,8 +234,9 @@ class Client:
         with self.store.transaction():
             self.store.delete_seen_ids(seen_at_or_before=seen_at_or_before)
 
-    def add_contact(self, user_id: str) -> bytes:
-        """Adds the identity of a user id and returns its identity key.
+    def add_contact(self, user_id: str, *, name: str | None = None) -> bytes:
+        """Adds the identity of a user id, under a local name if given, and returns its
+        identity key; a contact that exists keeps its name.
 
         Raises:
             InvalidIdError: The string is not a user id.
@@ -230,7 +246,7 @@ class Client:
         if contact == self.identity_key:
             raise OwnIdentityError("the id of the client's own identity is never a contact")
         with self.store.transaction():
-            self.store.add_contact(contact)
+            self.store.add_contact(contact, name=name)
         return contact
 
     def remove_contact(self, contact: bytes) -> None:
@@ -353,6 +369,11 @@ class Client:
 
     def confirm_stored(self, message_id: bytes) -> None:
         """Removes the outbox row of a Send that the relay answered with Stored."""
+        with self.store.transaction():
+            self.store.remove_from_outbox(message_id)
+
+    def drop_refused_send(self, message_id: bytes) -> None:
+        """Removes the outbox row of a Send that the relay refused with an action Stop."""
         with self.store.transaction():
             self.store.remove_from_outbox(message_id)
 

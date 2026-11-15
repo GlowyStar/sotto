@@ -46,7 +46,8 @@ TABLES = (
     """
     CREATE TABLE IF NOT EXISTS contacts (
         identity_key BLOB PRIMARY KEY,
-        pinned_identity_dh_key BLOB
+        pinned_identity_dh_key BLOB,
+        name TEXT UNIQUE
     ) STRICT, WITHOUT ROWID
     """,
     # AUTOINCREMENT because a record keeps the id of a session that is gone, and no later
@@ -373,9 +374,16 @@ class Store:
     def delete_lowest_one_time_prekeys(self, count: int) -> None:
         self._change(DELETE_LOWEST_ONE_TIME_PREKEYS, (count,))
 
-    def add_contact(self, identity_key: bytes) -> None:
+    def contacts(self) -> list[tuple[bytes, str | None]]:
+        """Every contact with the local name the user gave it, by name."""
+        return self.connection.execute(
+            "SELECT identity_key, name FROM contacts ORDER BY name, identity_key"
+        ).fetchall()
+
+    def add_contact(self, identity_key: bytes, *, name: str | None = None) -> None:
         self._change(
-            "INSERT INTO contacts VALUES (?, NULL) ON CONFLICT DO NOTHING", (identity_key,)
+            "INSERT INTO contacts (identity_key, name) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            (identity_key, name),
         )
 
     def remove_contact(self, contact: bytes) -> None:
