@@ -10,6 +10,12 @@ opens one.
   anything that matters.
 - Nothing is encrypted so far. The repository holds the scaffold of the relay: a process
   that answers a health check and accepts WebSocket connections on one path.
+- The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md) is
+  part 1: identity, the prekey bundle and the relay protocol. The relay half of
+  [docs/threat-model.md](docs/threat-model.md) lists
+  [what the relay learns](docs/threat-model.md#what-the-relay-learns),
+  [what the relay can do](docs/threat-model.md#what-the-relay-can-do) and what is
+  [not protected](docs/threat-model.md#not-protected).
 
 ## Plan
 
