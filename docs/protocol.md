@@ -147,8 +147,8 @@ of each:
 - `[test: tests/test_routing.py::test_healthz_answers_200]` names the test function that
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
-- `[pending: task 4]` says that what the statement rests on is not in this revision and
-  gives the number, 4 to 8 or 10 to 14, of the task of the project plan that brings it.
+- `[pending: task 14]` says that what the statement rests on is not in this revision and
+  gives the number, 5 to 8 or 10 to 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -477,7 +477,10 @@ WebSocket port serves no metrics [pending: task 8].
 One frame is one WebSocket binary message that holds one serialized envelope message
 (section 7.1). A receiver that gets a WebSocket text message closes the connection with
 close code 1003, in every state of the connection, before login and after it
-[pending: task 4].
+[test: tests/test_login.py::test_text_message_closes_with_1003]. A text message that is not
+valid UTF-8 does not reach this rule: the WebSocket library of the receiver ends the
+connection with close code 1007 (RFC 6455 section 8.1)
+[test: tests/test_login.py::test_text_message_that_is_not_utf_8_closes_with_1007].
 
 A client MUST answer a WebSocket ping with a pong (RFC 6455 section 5.5.2). The relay MAY
 end a connection that leaves its pings unanswered.
@@ -487,7 +490,8 @@ end a connection that leaves its pings unanswered.
 A frame is at most MAX_FRAME_BYTES long, 65536 bytes (section 12.1). The length is that of
 the whole WebSocket message, after fragments are joined. A receiver that gets a longer
 message closes the connection with close code 1009; the WebSocket library sends that code
-before any frame is parsed [pending: task 4]. A client MUST set the receive limit of its
+before any frame is parsed
+[test: tests/test_login.py::test_message_above_the_largest_frame_closes_with_1009]. A client MUST set the receive limit of its
 WebSocket library to the same value. The relay sends no frame above the limit
 [pending: task 6].
 
@@ -496,7 +500,9 @@ WebSocket library to the same value. The relay sends no frame above the limit
 The relay negotiates no WebSocket extension: its handshake answer carries no
 `Sec-WebSocket-Extensions` header, so no message is compressed
 [test: tests/test_routing.py::test_websocket_opens_on_ws]. Ciphertext does not compress.
-The relay selects no subprotocol [pending: task 4], and a client MUST NOT require one.
+The relay selects no subprotocol
+[test: tests/test_routing.py::test_no_subprotocol_is_selected], and a client MUST NOT require
+one.
 
 ### 6.5 TLS
 
@@ -513,8 +519,11 @@ TLS is specified in section 23.1 [pending: task 14].
 The frames are protobuf messages, proto3 syntax. The schema lives in `proto/sotto.proto`,
 which is normative for the names, numbers and types of the fields; this section lists its
 content for the relay protocol and adds the rules that a schema cannot express. A message
-enters the file with the pull request that implements its handler, the login frames first
-[pending: task 4]. The messages of the end-to-end protocol are in the same file and are
+enters the file with the pull request that implements its handler; the login frames and
+Error come first. Until every frame is in the file, the file is a part of the listing
+below: an envelope lacks the members whose frames the file does not have, and every other
+message and enum of the file is as listed
+[test: tests/test_docs.py::test_schema_file_is_a_part_of_the_listing_in_the_spec]. The messages of the end-to-end protocol are in the same file and are
 listed in section 19.1.
 
 ```proto
@@ -670,13 +679,14 @@ holds:
    frame states (sections 7.5 to 7.16). For a Hello a client applies this rule only after
    it read the `version` (section 7.5).
 
-A field that the receiver's schema does not have is ignored [pending: task 4]. A frame that
+A field that the receiver's schema does not have is ignored
+[test: tests/test_login.py::test_login_with_unknown_fields_is_accepted]. A frame that
 parses is not valid by that alone: proto3 has no required fields and reads an absent field
 as empty, so rule 3 is what makes a frame complete.
 
 The receiver of a malformed frame closes the connection with close code 1008. For the
 relay this holds for every malformed frame, before login and after it
-[pending: task 4]. A client that closed for this reason retries (section 11.1).
+[test: tests/test_login.py::test_malformed_frame_closes_with_1008]. A client that closed for this reason retries (section 11.1).
 
 Nothing in this protocol depends on how a peer serialized a message: no serialized message
 is signed, hashed or compared.
@@ -695,18 +705,23 @@ is signed, hashed or compared.
 | Deliver      | relay   | After LoggedIn, at any time                            | an Ack, when the client saved the message |
 | BundleStored, Bundle, Stored, Error | relay | As answers only                       | none                           |
 
-Rules of state for the relay [pending: task 4]:
+Rules of state for the relay:
 
 - A first client frame that is not a Login closes the connection with 1008. This is the
-  case of a frame before login.
-- A Login that is not the first client frame closes the connection with 1008.
+  case of a frame before login
+  [test: tests/test_login.py::test_frame_before_login_closes_with_1008].
+- A Login that is not the first client frame closes the connection with 1008
+  [test: tests/test_login.py::test_second_login_on_a_connection_closes_with_1008].
 - A client MAY send further frames right after its Login without waiting for LoggedIn. The
-  relay handles them only after it accepted the Login; when it refuses the Login it closes
-  the connection and handles none of them.
+  relay handles them only after it accepted the Login
+  [test: tests/test_login.py::test_frames_sent_with_the_login_are_handled_after_it]; when it
+  refuses the Login it closes the connection and handles none of them
+  [test: tests/test_login.py::test_frames_sent_with_a_refused_login_are_not_handled].
 - The relay handles the frames of one connection one at a time, in the order it received
   them, and sends the answer to a frame before it handles the next frame of that
-  connection. A Deliver is not an answer and can arrive between any two other frames that
-  follow the LoggedIn.
+  connection [test: tests/test_login.py::test_frames_sent_with_the_login_are_handled_after_it].
+  A Deliver is not an answer and can arrive between any two other frames that follow the
+  LoggedIn [pending: task 6].
 - Every UploadBundle and FetchBundle gets exactly one answer [pending: task 5], and so
   does every Send [pending: task 6].
 
@@ -726,7 +741,8 @@ Rules of state for a client [pending: task 14]:
 | `version` | 1   | uint32 | 1, the relay protocol version (section 14.1)     |
 | `nonce`   | 2   | bytes  | 32, random, made for this connection only        |
 
-- Sent by the relay as the first frame of every connection [pending: task 4].
+- Sent by the relay as the first frame of every connection
+  [test: tests/test_login.py::test_relay_speaks_first_with_a_nonce_of_its_own].
 - Valid answer: Login.
 - Violations, seen by the client: `version` is read first. When it is not 1, section 14.1
   applies whatever the other fields hold. With `version` 1, a `nonce` that is not 32 bytes
@@ -743,10 +759,17 @@ Rules of state for a client [pending: task 14]:
 - Sent by the client as its first frame, once per connection.
 - Valid answer: LoggedIn. A Login that is refused gets no frame: the connection closes
   (section 8.3).
-- Violations [pending: task 4]: a malformed Login closes with 1008; an `identity_key` that
-  fails step 3 or 4 of section 3.3 closes with 3000; a signature that does not verify
-  closes with 3000; no Login within LOGIN_DEADLINE_SECONDS closes with 3008; a second Login
-  on the connection closes with 1008. Section 8 has the full rules.
+- Violations: a malformed Login closes with 1008
+  [test: tests/test_login.py::test_malformed_frame_closes_with_1008]; an `identity_key` that
+  fails step 3 or 4 of section 3.3 closes with 3000
+  [test: tests/test_login.py::test_login_with_an_excluded_key_closes_with_3000]; a signature
+  that does not verify closes with 3000
+  [test: tests/test_login.py::test_login_whose_signature_does_not_verify_closes_with_3000];
+  no Login within LOGIN_DEADLINE_SECONDS closes with 3008
+  [test: tests/test_connection.py::test_silence_after_the_hello_closes_with_3008]; a second Login
+  on the connection closes with 1008
+  [test: tests/test_login.py::test_second_login_on_a_connection_closes_with_1008]. Section 8
+  has the full rules.
 
 ### 7.7 LoggedIn
 
@@ -754,8 +777,10 @@ Rules of state for a client [pending: task 14]:
 |-------------------------|-----|--------|---------------------------------------------------------|
 | `one_time_prekey_count` | 1   | uint32 | The number of one-time prekeys the relay holds for the identity, 0 for an identity that is not registered |
 
-- Sent by the relay once, when it accepted the Login [pending: task 4]. The count is that
-  of section 9.4 [pending: task 5].
+- Sent by the relay once, when it accepted the Login
+  [test: tests/test_login.py::test_login_is_accepted]
+  [test: tests/test_login.py::test_second_login_on_a_connection_closes_with_1008]. The count
+  is that of section 9.4 [pending: task 5].
 - No answer.
 - Violations, seen by the client: a second LoggedIn, or one that arrives before the client
   sent its Login, is a malformed frame (section 7.4).
@@ -913,7 +938,8 @@ client                                        relay
 ```
 
 The relay speaks first. Its Hello carries a 32-byte nonce that is random and that the
-relay uses for this connection only [pending: task 4]. The client answers with its
+relay uses for this connection only
+[test: tests/test_login.py::test_relay_speaks_first_with_a_nonce_of_its_own]. The client answers with its
 identity key, a 32-byte random nonce of its own and a signature over the login string of
 section 4.2. The client nonce means that the relay never chooses all the bytes an
 identity key signs.
@@ -945,24 +971,29 @@ A host name with characters outside ASCII breaks rule 4 as well, percent-encoded
 Such a name is given to the client in its ASCII form, the A-label of RFC 5890 (`xn--` and
 what follows), and RELAY_NAME holds the same form.
 
-The relay takes the name from its setting RELAY_NAME, default `127.0.0.1`, and does not
-start with a value that breaks rule 4 [pending: task 4]. The operator sets it to the host
+The relay takes the name from its setting RELAY_NAME, default `127.0.0.1`
+[test: tests/test_connection.py::test_login_is_verified_under_the_name_in_the_settings], and
+does not start with a value that breaks rule 4
+[test: tests/test_process.py::test_relay_does_not_start_with_a_server_name_that_breaks_rule_4].
+The operator sets it to the host
 that clients dial, in the form that steps 1 to 3 give.
 
 No frame carries the name, so the relay compares it with RELAY_NAME through the signature:
 it builds the login string with RELAY_NAME, and a signature that a client made for another
-name does not verify. The login is refused with 3000 [pending: task 4]. This is the case
+name does not verify. The login is refused with 3000
+[test: tests/test_login.py::test_login_signed_for_another_server_name_closes_with_3000]. This is the case
 of a login answer replayed to another server: a relay that received a login cannot use it
 to log in at a relay with another server name. Relays that clients dial under one host, on
 different ports, have one server name, and the login does not tell them apart: either of
 them can pass a login it receives on to the other. It is for the operator to give a relay
 a host that no relay of another party shares. A recorded login is of no use on another
 connection of the same relay either, because every connection has its own nonce
-[pending: task 4].
+[test: tests/test_login.py::test_login_replayed_on_another_connection_closes_with_3000].
 
 ### 8.3 The relay's checks
 
-For every connection, in this order [pending: task 4]:
+For every connection, in this order
+[test: tests/test_login.py::test_login_checks_stop_at_the_first_that_fails]:
 
 1. The relay sends Hello and starts the login deadline.
 2. When no client frame arrived LOGIN_DEADLINE_SECONDS after the Hello was sent, the relay
@@ -982,14 +1013,19 @@ For every connection, in this order [pending: task 4]:
 
 A connection has one nonce and one login attempt. Every failure of section 8.3 closes the
 connection; a client that tries again opens a new connection and gets a new nonce. The
-relay sends no second Hello and accepts no second Login (section 7.4) [pending: task 4].
+relay sends no second Hello and accepts no second Login (section 7.4)
+[test: tests/test_login.py::test_second_login_on_a_connection_closes_with_1008].
 
 ### 8.5 One live connection per identity
 
 The relay keeps at most one logged-in connection per identity. When a login succeeds for
 an identity that has a live connection, the relay closes the older connection with close
-code 4001 and serves the newer one. From that login on, the relay handles no further frame
-of the older connection and sends it nothing but the close [pending: task 4].
+code 4001 and serves the newer one
+[test: tests/test_login.py::test_every_login_of_an_identity_replaces_the_one_before]. From
+that login on, the relay handles no further frame of the older connection
+[test: tests/test_connection.py::test_frame_of_a_replaced_connection_is_not_handled] and sends
+it nothing but the close
+[test: tests/test_login.py::test_every_login_of_an_identity_replaces_the_one_before].
 
 A client that is closed with 4001 stops: it does not reconnect by itself
 [pending: task 14]. Two copies of one identity would otherwise replace each other without
@@ -1301,8 +1337,17 @@ meaning, and a peer MUST NOT parse it.
 - Any other close code, and a connection that ends without a close, is handled as Retry.
 - Close code 1000 is not a violation. A client that ends a connection for a reason of its
   own closes with it, the unknown version of section 14.1 included.
-- The relay sends each code under the stated condition [pending: task 4]. On an orderly
-  shutdown it closes every open connection with 1001 [pending: task 4] and exits with
+- The numbers and the names of the table are those in the code of the relay
+  [test: tests/test_docs.py::test_close_codes_of_the_relay_are_those_of_the_spec].
+- The relay sends each code under the stated condition. Sections 6.2, 6.3, 7.3, 7.4, 7.6
+  and 8.5 state the conditions as rules and cite their tests.
+- When the relay fails while it serves a connection, its WebSocket library closes the
+  connection with 1011
+  [test: tests/test_connection.py::test_failed_handler_closes_with_1011_and_logs_no_text_of_the_exception].
+  Like the 1007 of section 6.2 it is no code of this protocol, and the rule for any other
+  close code applies.
+- On an orderly shutdown the relay closes every open connection with 1001
+  [test: tests/test_connection.py::test_shutdown_closes_every_connection_with_1001] and exits with
   status 0 [test: tests/test_process.py::test_relay_logs_json_lines_and_exits_0_on_sigterm].
 
 ### 11.4 Local results

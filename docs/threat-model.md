@@ -124,9 +124,15 @@ What the relay of this repository writes down, run unchanged:
   [pending: task 7].
 - The log is JSON lines on standard output
   [test: tests/test_process.py::test_relay_logs_json_lines_and_exits_0_on_sigterm]. No log
-  line holds payload bytes, a nonce, a signature, a key, a full user id, a pair of sender
-  and recipient or the network address of a client, on error paths included
-  [pending: task 4].
+  line holds a nonce, a signature, a key, a full user id or the network address of a
+  client. Every test of the relay runs under a check of the log, which fails on eight bytes
+  in a row of a message of the test and on the address of one of its clients
+  [test: tests/test_logs.py::test_scan_finds_bytes_of_the_wire_in_a_log_line]. On an error
+  path an exception is logged as its type and its stack, without its text
+  [test: tests/test_logs.py::test_text_of_an_exception_stays_out_of_the_line], the failure
+  of a connection handler included
+  [test: tests/test_connection.py::test_failed_handler_closes_with_1011_and_logs_no_text_of_the_exception].
+  No log line holds payload bytes or a pair of sender and recipient [pending: task 6].
 - Metrics are counters and gauges without a label that names an identity. They are served
   on a listener of their own, which is off unless it is configured, and never on the
   WebSocket port [pending: task 8].
@@ -199,9 +205,12 @@ What it cannot do:
   distinct prefixes
   [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
   The relay never chooses all the bytes of a login string, because the client adds a nonce
-  of its own [pending: task 4].
-- Use a login it received to log in at a relay with another server name, or on another
-  connection [pending: task 4]. Relays that clients dial under one host, on different
+  of its own
+  [test: tests/test_login.py::test_login_signed_over_another_client_nonce_closes_with_3000].
+- Use a login it received to log in at a relay with another server name
+  [test: tests/test_login.py::test_login_signed_for_another_server_name_closes_with_3000], or
+  on another connection
+  [test: tests/test_login.py::test_login_replayed_on_another_connection_closes_with_3000]. Relays that clients dial under one host, on different
   ports, share a server name and are not told apart (protocol, section 8.2).
 - Read the content of a message, or make a message of its own that the recipient's client
   accepts (protocol, sections 16 to 18) [pending: task 13].
