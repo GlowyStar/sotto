@@ -5,9 +5,10 @@ import base64
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import dataclass, field
 
 from google.protobuf import text_encoding
@@ -43,13 +44,35 @@ WINDOW_BYTES = 8
 BASE64_WINDOW_BYTES = 9
 
 
+@dataclass(slots=True)
+class Clock:
+    """The clock of a relay or a storage, moved by the test."""
+
+    now: int = 1_800_000_000
+
+    def __call__(self) -> float:
+        return self.now
+
+
 @asynccontextmanager
 async def running_relay(
-    settings: Settings, *, clock: Callable[[], float] = time.time
+    settings: Settings,
+    *,
+    clock: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[str]:
-    async with serve_relay(settings, clock=clock) as server:
-        port = server.sockets[0].getsockname()[1]
+    async with serve_relay(settings, clock=clock, monotonic=monotonic) as listeners:
+        port = listeners.websocket.sockets[0].getsockname()[1]
         yield f"ws://127.0.0.1:{port}"
+
+
+def messages_in(settings: Settings) -> list[tuple[bytes, bytes, bytes, bytes, int]]:
+    """Reads the queued messages from the file, beside the connection of a running relay."""
+    with closing(sqlite3.connect(settings.database)) as database:
+        rows = database.execute(
+            "SELECT sender, recipient, message_id, payload, stored_at FROM messages"
+        ).fetchall()
+    return rows
 
 
 def make_public_key() -> bytes:

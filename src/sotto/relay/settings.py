@@ -19,6 +19,13 @@ class Settings:
     max_pages: int = 262144
     message_ttl_seconds: int = 2592000
     sweep_interval_seconds: float = 60
+    queue_max_messages: int = 1000
+    queue_max_bytes: int = 16777216
+    frame_bucket_size: int = 60
+    frame_refill_seconds: float = 1
+    handout_bucket_size: int = 20
+    handout_refill_seconds: float = 300
+    metrics_port: int | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> Self:
@@ -34,6 +41,10 @@ class Settings:
         port = environ.get("RELAY_PORT", str(defaults.port))
         if not port.isdecimal():
             raise ValueError(f"RELAY_PORT is not a port number: {port!r}")
+
+        metrics_port = environ.get("RELAY_METRICS_PORT")
+        if metrics_port is not None and not metrics_port.isdecimal():
+            raise ValueError(f"RELAY_METRICS_PORT is not a port number: {metrics_port!r}")
 
         name = environ.get("RELAY_NAME", defaults.name)
         if SERVER_NAME.fullmatch(name) is None:
@@ -59,6 +70,25 @@ class Settings:
             sweep_interval_seconds=_read_whole_number_above_0(
                 environ, "RELAY_SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
             ),
+            queue_max_messages=_read_whole_number_above_0(
+                environ, "RELAY_QUEUE_MAX_MESSAGES", defaults.queue_max_messages
+            ),
+            queue_max_bytes=_read_whole_number_above_0(
+                environ, "RELAY_QUEUE_MAX_BYTES", defaults.queue_max_bytes
+            ),
+            frame_bucket_size=_read_whole_number_above_0(
+                environ, "RELAY_FRAME_BUCKET_SIZE", defaults.frame_bucket_size
+            ),
+            frame_refill_seconds=_read_whole_number_above_0(
+                environ, "RELAY_FRAME_REFILL_SECONDS", defaults.frame_refill_seconds
+            ),
+            handout_bucket_size=_read_whole_number_above_0(
+                environ, "RELAY_HANDOUT_BUCKET_SIZE", defaults.handout_bucket_size
+            ),
+            handout_refill_seconds=_read_whole_number_above_0(
+                environ, "RELAY_HANDOUT_REFILL_SECONDS", defaults.handout_refill_seconds
+            ),
+            metrics_port=None if metrics_port is None else int(metrics_port),
         )
 
 

@@ -147,7 +147,10 @@ What the relay of this repository writes down, run unchanged:
   [test: tests/test_storage.py::test_failed_send_closes_with_1011_and_the_relay_serves_on].
 - Metrics are counters and gauges without a label that names an identity. They are served
   on a listener of their own, which is off unless it is configured, and never on the
-  WebSocket port [pending: task 8].
+  WebSocket port
+  [test: tests/test_metrics.py::test_metrics_move_by_a_login_send_delivery_and_ack]
+  [test: tests/test_metrics.py::test_metrics_listener_is_off_unless_its_port_is_set]
+  [test: tests/test_routing.py::test_websocket_port_answers_404_for_metrics].
 
 ## What the relay can do
 
@@ -287,7 +290,8 @@ What it cannot do:
 - One-time prekeys. Anyone can keep a target without one-time prekeys by spending its
   handout bucket: 20 fetches empty it, and after that one fetch every 5 minutes takes each
   token as it returns. Every other client gets a bundle without a one-time prekey. The
-  bucket keeps the stored keys from being taken in one burst [pending: task 8]; it does
+  bucket keeps the stored keys from being taken in one burst
+  [test: tests/test_limits.py::test_fetches_past_the_handout_bucket_leave_the_stored_one_time_prekeys]; it does
   not keep them available. What the first messages of a session lose without a one-time
   prekey is stated under "One-time prekeys are not authenticated".
 - Connections and Acks. There is no limit per address: anyone can open connections and

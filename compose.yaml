@@ -1,8 +1,14 @@
 services:
   relay:
     build: .
+    environment:
+      # The stand's tests burst from one source, so its buckets are larger than the defaults.
+      RELAY_FRAME_BUCKET_SIZE: "1000"
+      RELAY_HANDOUT_BUCKET_SIZE: "1000"
+      RELAY_METRICS_PORT: "9765"
     ports:
       - "127.0.0.1:${RELAY_PORT:-8765}:8765"
+      - "127.0.0.1:${RELAY_METRICS_PORT:-9765}:9765"
     volumes:
       - relay-data:/data
     read_only: true

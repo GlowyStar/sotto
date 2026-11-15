@@ -3,7 +3,8 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from enum import IntEnum
 from http import HTTPStatus
 
@@ -41,14 +42,22 @@ from sotto.relay.frames import (
     ParsedFrame,
     parse_client_frame,
 )
+from sotto.relay.limits import TokenBuckets
 from sotto.relay.logs import ConnectionLogger
+from sotto.relay.metrics import Metrics
 from sotto.relay.settings import Settings
-from sotto.relay.storage import Storage, StorageFullError, UnknownRecipientError
+from sotto.relay.storage import (
+    QueueFullError,
+    Storage,
+    StorageFullError,
+    UnknownRecipientError,
+)
 
 logger = logging.getLogger(__name__)
 
 WEBSOCKET_PATH = "/ws"
 HEALTH_PATH = "/healthz"
+METRICS_PATH = "/metrics"
 PROTOCOL_VERSION = 1
 # The code that websockets closes with when a handler fails (section 11.3).
 INTERNAL_ERROR = 1011
@@ -98,18 +107,61 @@ async def close_connection(connection: ServerConnection, code: CloseCode) -> Non
     await connection.close(code)
 
 
+def refusal(frame: UploadBundle | FetchBundle | Send, code: ErrorCode) -> ServerFrame:
+    """Builds the Error for a refused frame with the key field of section 7.16."""
+    match frame:
+        case Send():
+            return ServerFrame(error=Error(code=code, message_id=frame.message_id))
+        case FetchBundle():
+            return ServerFrame(error=Error(code=code, identity=frame.identity))
+        case UploadBundle():
+            return ServerFrame(error=Error(code=code))
+
+
+def result_of(answer: ServerFrame) -> str:
+    """Names an answer for the metrics: the frame it is, or the code of its Error."""
+    if answer.HasField("error"):
+        return ErrorCode.Name(answer.error.code)
+    return str(answer.WhichOneof("frame"))
+
+
+async def refuse_connection(connection: ServerConnection) -> None:
+    """The handler of the metrics listener, whose answers never open a connection."""
+
+
+@dataclass(frozen=True, slots=True)
+class Listeners:
+    websocket: Server
+    metrics: Server | None
+
+
 class Relay:
     """What the connections of one relay process share."""
 
-    def __init__(self, settings: Settings, storage: Storage) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        storage: Storage,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.settings = settings
         self.storage = storage
         self.logged_in: dict[bytes, ServerConnection] = {}
         # Set for the live connection of an identity when a message to it is stored.
         self.wakeups: dict[bytes, asyncio.Event] = {}
         self.closings: set[asyncio.Task[None]] = set()
+        self.frame_buckets = TokenBuckets(
+            settings.frame_bucket_size, settings.frame_refill_seconds, monotonic
+        )
+        self.handout_buckets = TokenBuckets(
+            settings.handout_bucket_size, settings.handout_refill_seconds, monotonic
+        )
+        self.metrics = Metrics()
+        self.open_connections = 0
 
     async def handle_connection(self, connection: ServerConnection) -> None:
+        self.open_connections += 1
         try:
             identity_key = await self.log_in(connection)
             await self.serve_logged_in(connection, identity_key)
@@ -119,6 +171,18 @@ class Relay:
             return
         except ViolationError as violation:
             await close_connection(connection, violation.code)
+        finally:
+            self.open_connections -= 1
+
+    def answer_metrics(self, connection: ServerConnection, request: Request) -> Response:
+        """Answers a request to the metrics listener, which never upgrades a connection."""
+        if request.path != METRICS_PATH:
+            return connection.respond(HTTPStatus.NOT_FOUND, "Not found\n")
+        gauges = {
+            "sotto_connections_open": self.open_connections,
+            "sotto_database_bytes": self.storage.size_bytes(),
+        }
+        return connection.respond(HTTPStatus.OK, self.metrics.render(gauges))
 
     async def log_in(self, connection: ServerConnection) -> bytes:
         """Runs steps 1 to 5 of section 8.3 and returns the identity key that logged in."""
@@ -161,6 +225,7 @@ class Relay:
 
         try:
             connection.logger.info("logged in")
+            self.metrics.count("sotto_logins_total")
             count = self.storage.count_one_time_prekeys(identity_key)
             logged_in = ServerFrame(logged_in=LoggedIn(one_time_prekey_count=count))
             await connection.send(logged_in.SerializeToString())
@@ -189,19 +254,36 @@ class Relay:
                 # 1000 before the 4001 is sent.
                 continue
 
-            match read_frame(message):
-                case Login():
-                    raise ViolationError(CloseCode.PROTOCOL_VIOLATION)
-                case UploadBundle() as upload:
-                    answer = self.answer_upload(identity_key, upload)
-                case FetchBundle() as fetch:
-                    answer = self.answer_fetch(fetch)
-                case Send() as send:
-                    answer = self.answer_send(identity_key, send)
-                case Ack() as ack:
-                    self.storage.delete_messages(identity_key, ack.messages)
-                    continue
+            frame = read_frame(message)
+            if isinstance(frame, Login):
+                raise ViolationError(CloseCode.PROTOCOL_VIOLATION)
+            if isinstance(frame, Ack):
+                acked = self.storage.delete_messages(identity_key, frame.messages)
+                self.metrics.count("sotto_messages_acked_total", acked)
+                self.metrics.count("sotto_frames_total", type="Ack", result="none")
+                continue
+
+            if self.frame_buckets.take(identity_key):
+                answer = self.answer_request(identity_key, frame)
+            else:
+                self.metrics.count("sotto_limit_refusals_total", kind="frame_bucket")
+                answer = refusal(frame, ErrorCode.RATE_LIMITED)
+            self.metrics.count(
+                "sotto_frames_total", type=type(frame).__name__, result=result_of(answer)
+            )
             await connection.send(answer.SerializeToString())
+
+    def answer_request(
+        self, identity_key: bytes, frame: UploadBundle | FetchBundle | Send
+    ) -> ServerFrame:
+        """Answers a frame that took its token from the frame bucket of the identity."""
+        match frame:
+            case UploadBundle():
+                return self.answer_upload(identity_key, frame)
+            case FetchBundle():
+                return self.answer_fetch(frame)
+            case Send():
+                return self.answer_send(identity_key, frame)
 
     async def deliver_queue(
         self, connection: ServerConnection, identity_key: bytes, wakeup: asyncio.Event
@@ -225,6 +307,7 @@ class Relay:
                     return
                 after, deliver = queued
                 await connection.send(ServerFrame(deliver=deliver).SerializeToString())
+                self.metrics.count("sotto_messages_delivered_total")
         except ConnectionClosed:
             return
         except Exception:
@@ -263,12 +346,22 @@ class Relay:
     def answer_send(self, sender: bytes, send: Send) -> ServerFrame:
         """Runs steps 2 to 6 of section 10.2; the recipient's delivery sends the message."""
         try:
-            self.storage.store_message(sender, send)
+            is_new = self.storage.store_message(
+                sender,
+                send,
+                max_messages=self.settings.queue_max_messages,
+                max_bytes=self.settings.queue_max_bytes,
+            )
         except UnknownRecipientError:
             code = ErrorCode.UNKNOWN_RECIPIENT
+        except QueueFullError:
+            self.metrics.count("sotto_limit_refusals_total", kind="queue")
+            code = ErrorCode.QUEUE_FULL
         except StorageFullError:
             code = ErrorCode.STORAGE_FULL
         else:
+            if is_new:
+                self.metrics.count("sotto_messages_stored_total")
             wakeup = self.wakeups.get(send.recipient)
             if wakeup is not None:
                 wakeup.set()
@@ -276,51 +369,89 @@ class Relay:
         return ServerFrame(error=Error(code=code, message_id=send.message_id))
 
     def answer_fetch(self, fetch: FetchBundle) -> ServerFrame:
-        """Runs steps 2 to 4 of section 9.2."""
-        bundle = self.storage.fetch_bundle(fetch.identity)
+        """Runs steps 2 to 4 of section 9.2, with the handout of section 9.3."""
+        target = fetch.identity
+        if self.handout_buckets.has_token(target):
+            bundle = self.storage.fetch_bundle(target)
+        else:
+            self.metrics.count("sotto_limit_refusals_total", kind="handout_bucket")
+            bundle = self.storage.read_bundle(target)
         if bundle is None:
-            return ServerFrame(error=Error(code=ErrorCode.NOT_FOUND, identity=fetch.identity))
+            return ServerFrame(error=Error(code=ErrorCode.NOT_FOUND, identity=target))
+
+        has_one_time_prekey = bundle.HasField("one_time_prekey")
+        if has_one_time_prekey:
+            self.handout_buckets.take(target)
+        handed_out = "yes" if has_one_time_prekey else "no"
+        self.metrics.count("sotto_bundle_fetches_total", one_time_prekey=handed_out)
         return ServerFrame(bundle=bundle)
 
 
-async def sweep_periodically(storage: Storage, settings: Settings) -> None:
-    """Sweeps the database every sweep interval until it is cancelled (section 13.2)."""
+async def sweep_periodically(relay: Relay) -> None:
+    """Sweeps the database every sweep interval until it is cancelled (section 13.2).
+
+    Each sweep also forgets the token buckets that are full again (section 12.2).
+    """
+    settings = relay.settings
     while True:
         await asyncio.sleep(settings.sweep_interval_seconds)
+        relay.frame_buckets.forget_full()
+        relay.handout_buckets.forget_full()
         try:
-            expired = storage.sweep(ttl_seconds=settings.message_ttl_seconds)
+            expired = relay.storage.sweep(ttl_seconds=settings.message_ttl_seconds)
         except Exception:
             # The next sweep can succeed, and a relay that stopped sweeping would keep
             # deleted messages in its files without a sign.
             logger.exception("the sweep failed")
             continue
+        relay.metrics.count("sotto_messages_expired_total", expired)
         if expired:
             logger.info("the sweep deleted %d expired messages", expired)
 
 
 @asynccontextmanager
 async def serve_relay(
-    settings: Settings, *, clock: Callable[[], float] = time.time
-) -> AsyncIterator[Server]:
+    settings: Settings,
+    *,
+    clock: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> AsyncIterator[Listeners]:
     """Serves until the block ends, then closes the database once every handler returned.
 
-    The sweep runs from the start and stops before the database closes.
+    The sweep runs from the start and stops before the database closes. The metrics
+    listener runs only when `settings.metrics_port` is set.
     """
     storage = Storage(settings.database, max_pages=settings.max_pages, clock=clock)
-    sweeping = asyncio.create_task(sweep_periodically(storage, settings))
+    relay = Relay(settings, storage, monotonic=monotonic)
+    sweeping = asyncio.create_task(sweep_periodically(relay))
+    connection_logger = ConnectionLogger(logging.getLogger("websockets.server"))
     try:
-        relay = Relay(settings, storage)
-        async with serve(
-            relay.handle_connection,
-            settings.host,
-            settings.port,
-            process_request=route_request,
-            compression=None,
-            server_header=None,
-            max_size=MAX_FRAME_BYTES,
-            logger=ConnectionLogger(logging.getLogger("websockets.server")),
-        ) as server:
-            yield server
+        async with AsyncExitStack() as servers:
+            websocket = await servers.enter_async_context(
+                serve(
+                    relay.handle_connection,
+                    settings.host,
+                    settings.port,
+                    process_request=route_request,
+                    compression=None,
+                    server_header=None,
+                    max_size=MAX_FRAME_BYTES,
+                    logger=connection_logger,
+                )
+            )
+            metrics = None
+            if settings.metrics_port is not None:
+                metrics = await servers.enter_async_context(
+                    serve(
+                        refuse_connection,
+                        settings.host,
+                        settings.metrics_port,
+                        process_request=relay.answer_metrics,
+                        server_header=None,
+                        logger=connection_logger,
+                    )
+                )
+            yield Listeners(websocket, metrics)
     finally:
         # The task waits only in its sleep, so once cancelled it touches the database no more.
         sweeping.cancel()
