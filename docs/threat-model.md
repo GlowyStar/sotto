@@ -64,8 +64,11 @@ Someone on the path between a client and the relay.
   the recipients of its messages and a false Stored included. Of the content it reads
   only ciphertext, and it cannot replace the victim's X25519 identity key or signed prekey
   with keys of its own, because those need a signature of the identity
-  [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]. That the ciphertext stays closed rests on the key agreement and the
-  ratchet (protocol, sections 16 to 18) [pending: task 10] [pending: task 11].
+  [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing].
+  That the ciphertext stays closed rests on the key agreement and the ratchet (protocol,
+  sections 16 to 18)
+  [test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data]
+  [pending: task 11].
 
 ### An abuser with free identities
 
@@ -180,7 +183,8 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   is a session that does not start; of two sessions made with one key, the first that
   reaches the responder starts and the other does not. When the relay takes the one-time
   prekey away, the result is a session without one (protocol, section 16.9)
-  [pending: task 10] [pending: task 12].
+  [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
+  [pending: task 12].
 - Report a wrong count of stored one-time prekeys, so that a client uploads none when it
   has to, or more than it has to. Whatever the count says, a client holds at most 1000
   private keys of one-time prekeys (protocol, section 21.3) [pending: task 13].
@@ -219,7 +223,8 @@ What it cannot do:
 - Make a message decrypt at another identity than the one its sender meant, by handing
   out the X25519 keys of one identity under the signature of another: the associated
   data of every message names the Ed25519 keys of both sides (protocol, section 16.5)
-  [pending: task 10] [pending: task 13].
+  [test: tests/crypto/test_x3dh.py::test_unknown_key_share_gives_the_same_secret_under_other_associated_data]
+  [pending: task 13].
 - Make a client read a message twice, or start a second session from an initial message
   that it replays, as it was sent or with other bytes in its ephemeral key that give
   the same secret (protocol, sections 16.5 and 20.4) [pending: task 13].
@@ -528,7 +533,9 @@ section 5.2).
   does not start: the first messages fail at the responder. Of two sessions made with
   one key, the first that reaches the responder starts and the other does not. None lets
   the relay read a message, because the secret of a session also rests on the signed
-  keys (protocol, section 16.9) [pending: task 10] [pending: task 12]. A session that
+  keys (protocol, section 16.9)
+  [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
+  [pending: task 12]. A session that
   does not start can also be without the protection of its one-time prekey: the relay
   holds the private key of a key of its own, and a real key keeps its private key in the
   responder's store for as long as no initial message that names it is accepted
