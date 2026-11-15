@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 6 to 8 or 10 to 14, of the task of the project plan that brings it.
+  gives the number, 7, 8 or 11 to 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -266,7 +266,7 @@ when either fails (section 8.3). It applies no such check to the recipient of a 
 the identity of a FetchBundle: a key that those steps exclude cannot log in, so it is
 never registered and the frame gets the answer for an identity that is not registered
 [test: tests/test_bundles.py::test_fetch_for_an_identity_that_is_not_registered_answers_not_found]
-[pending: task 6].
+[test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient].
 
 ## 4. Signed strings
 
@@ -501,7 +501,7 @@ message closes the connection with close code 1009; the WebSocket library sends 
 before any frame is parsed
 [test: tests/test_login.py::test_message_above_the_largest_frame_closes_with_1009]. A client MUST set the receive limit of its
 WebSocket library to the same value. The relay sends no frame above the limit
-[pending: task 6].
+[test: tests/test_messages.py::test_largest_payload_is_delivered_in_a_frame_within_the_limit].
 
 ### 6.4 No compression, no extension, no subprotocol
 
@@ -658,7 +658,10 @@ message Error {
 No client frame names its own sender. After the login the relay takes the identity of a
 frame from the connection that carried it, never from a field: Send has a recipient only,
 UploadBundle has no identity field, and the `sender` of a MessageRef is the sender of the
-acked message, not of the Ack [pending: task 6]. The identity key of a Login is not an
+acked message, not of the Ack
+[test: tests/test_messages.py::test_no_client_frame_names_its_sender]
+[test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte]
+[test: tests/test_messages.py::test_ack_of_a_message_queued_for_another_identity_deletes_nothing]. The identity key of a Login is not an
 exception: it is the claim that the signature of the same frame proves.
 
 ### 7.2 Field numbers are frozen
@@ -729,10 +732,12 @@ Rules of state for the relay:
   them, and sends the answer to a frame before it handles the next frame of that
   connection [test: tests/test_login.py::test_frames_sent_with_the_login_are_handled_after_it].
   A Deliver is not an answer and can arrive between any two other frames that follow the
-  LoggedIn [pending: task 6].
+  LoggedIn
+  [test: tests/test_messages.py::test_every_send_gets_one_answer_in_the_order_of_the_requests].
 - Every UploadBundle and FetchBundle gets exactly one answer
   [test: tests/test_bundles.py::test_every_upload_and_fetch_gets_one_answer_in_the_order_of_the_requests],
-  and so does every Send [pending: task 6].
+  and so does every Send
+  [test: tests/test_messages.py::test_every_send_gets_one_answer_in_the_order_of_the_requests].
 
 Rules of state for a client [pending: task 14]:
 
@@ -873,12 +878,15 @@ Rules of state for a client [pending: task 14]:
 - Sent by a logged-in client.
 - Valid answers: Stored; or Error with RATE_LIMITED, UNKNOWN_RECIPIENT, QUEUE_FULL or
   STORAGE_FULL, with `message_id` set to the `message_id` of the request (section 7.16).
-- Violations [pending: task 6]: a malformed Send closes with 1008, an empty payload and a
-  payload above the limit included; a Send before login closes with 1008. Section 10.2 has
+- Violations: a malformed Send closes with 1008, an empty payload and a payload above the
+  limit included
+  [test: tests/test_messages.py::test_malformed_send_closes_with_1008]; a Send before login closes
+  with 1008 [test: tests/test_login.py::test_frame_before_login_closes_with_1008]. Section 10.2 has
   the full rules.
 
 The payload is opaque to the relay: the relay stores and forwards its bytes and parses
-none of them [pending: task 6]. The 64 bytes are a bound on what the envelope and the
+none of them
+[test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte]. The 64 bytes are a bound on what the envelope and the
 other fields add to a payload in a Send or a Deliver (60 bytes in the shortest encoding),
 so that every stored payload fits into a Deliver.
 
@@ -889,7 +897,8 @@ so that every stored payload fits into a Deliver.
 | `message_id` | 1   | bytes | 16, the `message_id` of the Send       |
 
 - Sent by the relay as the answer to a Send, after the message is committed
-  (section 10.2) [pending: task 6].
+  (section 10.2)
+  [test: tests/test_storage.py::test_stored_is_sent_after_the_commit_of_the_message].
 - No answer.
 - Violations, seen by the client: a `message_id` that is not 16 bytes is a malformed
   frame.
@@ -902,7 +911,8 @@ so that every stored payload fits into a Deliver.
 | `sender`     | 2   | bytes | 32, the identity key of the connection that sent the Send  |
 | `payload`    | 3   | bytes | 1 to MAX_FRAME_BYTES - 64, the bytes of the Send           |
 
-- Sent by the relay to the logged-in recipient (section 10.4) [pending: task 6].
+- Sent by the relay to the logged-in recipient (section 10.4)
+  [test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte].
 - Answer: an Ack that names the message, sent when the client has saved it. The relay does
   not wait for it (section 10.4).
 - Violations, seen by the client: a wrong length is a malformed frame.
@@ -917,8 +927,9 @@ so that every stored payload fits into a Deliver.
 
 - Sent by a logged-in client.
 - No answer and no Error, whatever the pairs name (section 10.5).
-- Violations [pending: task 6]: a malformed Ack closes with 1008, an Ack without a pair
-  included; an Ack before login closes with 1008.
+- Violations: a malformed Ack closes with 1008, an Ack without a pair included
+  [test: tests/test_messages.py::test_malformed_ack_closes_with_1008]; an Ack before login closes with 1008
+  [test: tests/test_login.py::test_frame_before_login_closes_with_1008].
 
 ### 7.16 Error
 
@@ -934,7 +945,7 @@ so that every stored payload fits into a Deliver.
 - The key fields tell the client which frame was refused: `message_id` set means a Send,
   `identity` set means a FetchBundle, neither set means an UploadBundle
   [test: tests/test_bundles.py::test_refused_frames_get_an_error_with_their_key_and_the_connection_goes_on]
-  [pending: task 6]. Answers arrive in the order of their requests
+  [test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]. Answers arrive in the order of their requests
   (section 7.4), which tells two requests with one key apart.
 - No answer.
 - Violations, seen by the client: a `message_id` that is neither empty nor 16 bytes, an
@@ -1184,7 +1195,7 @@ sends no other notice when the number falls
 
 The sender chooses the id of a message: 16 random bytes. The relay assigns no id of its
 own: no frame carries an id, a counter or a position that the relay gave to a message
-[pending: task 6].
+[test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte].
 
 - A client uses one id for one message and repeats a message with the id, the recipient
   and the payload unchanged.
@@ -1195,7 +1206,9 @@ own: no frame carries an id, a counter or a position that the relay gave to a me
 ### 10.2 Send and Stored
 
 The relay handles a well-formed Send of a logged-in connection in this order
-[pending: task 6]. The sender is the identity of the connection. Steps 2 to 5 are one
+[test: tests/test_messages.py::test_repeated_send_is_stored_once_and_delivered_once]
+[test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]
+[test: tests/test_storage.py::test_send_into_a_full_database_answers_storage_full_and_stores_nothing]. The sender is the identity of the connection. Steps 2 to 5 are one
 transaction.
 
 1. It takes a token from the frame bucket of the sender (section 12.2). Without a token
@@ -1213,7 +1226,9 @@ transaction.
 6. The answer is Stored with the `message_id` of the Send.
 
 Stored means: the message is committed. The relay sends Stored only after the commit, and
-a committed message survives a kill of the relay process [pending: task 6]. Whether it
+a committed message survives a kill of the relay process
+[test: tests/test_storage.py::test_stored_is_sent_after_the_commit_of_the_message]
+[test: tests/test_process.py::test_message_answered_with_stored_survives_a_kill_of_the_relay]. Whether it
 survives a loss of power or a crash of the operating system depends on the host and its
 storage honouring fsync; no test covers that.
 
@@ -1231,10 +1246,11 @@ ended (section 11.1).
 - While the relay holds the message, the repeat stores nothing and gets Stored again: one
   row, one delivery, a Stored for each Send. The relay compares only the sender and the
   `message_id`; the recipient and the payload of the repeat are not looked at
-  [pending: task 6].
+  [test: tests/test_messages.py::test_repeated_send_is_stored_once_and_delivered_once]
+  [test: tests/test_storage.py::test_message_is_one_row_until_its_recipient_acks_it].
 - When the relay does not hold the message, because the recipient acked it or it expired,
   the relay cannot know the repeat. It stores the message again and delivers it again
-  [pending: task 6]. The recipient's client discards the second copy by the pair (sender,
+  [test: tests/test_messages.py::test_send_repeated_after_the_ack_is_a_new_message]. The recipient's client discards the second copy by the pair (sender,
   message id) and acks it (section 20.2) [pending: task 12].
 
 This is the case of a Send repeated after a lost Stored.
@@ -1243,26 +1259,35 @@ The two cases look different to a sender that repeats a message id with another 
 While the relay holds the first message, the repeat is answered with Stored and nothing is
 stored for the other recipient. Once the first message is acked or expired, the repeat is
 a new message: it is refused with UNKNOWN_RECIPIENT when the other recipient is not
-registered, and stored and delivered when it is [pending: task 6]. A sender learns in this
+registered, and stored and delivered when it is
+[test: tests/test_messages.py::test_send_repeated_after_the_ack_is_a_new_message]. A sender learns in this
 way when the recipient of the first message acked it (threat model, "Not protected").
 
 ### 10.4 Deliver, order and redelivery
 
 - The relay sends the messages of a queue to the logged-in connection of the recipient,
   each as one Deliver with the sender, the message id and the payload as stored
-  [pending: task 6].
+  [test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte].
 - Order: the messages of one queue go out in the order in which the relay committed them,
-  across all senders [pending: task 6].
+  across all senders
+  [test: tests/test_messages.py::test_queue_is_delivered_in_the_order_the_messages_were_stored].
 - After a login the relay first sends LoggedIn and then every message of the queue, oldest
   first, the ones that an earlier connection received and did not ack included. Messages
-  committed during the connection follow as they are committed [pending: task 6].
+  committed during the connection follow as they are committed
+  [test: tests/test_messages.py::test_queue_is_delivered_in_the_order_the_messages_were_stored]
+  [test: tests/test_messages.py::test_unacked_message_is_delivered_again_after_the_next_login].
 - On one connection a message is sent once. The relay does not wait for the Ack of a
   message before it sends the next one, and it does not send a message a second time on
-  that connection, however long the Ack takes [pending: task 6].
+  that connection, however long the Ack takes
+  [test: tests/test_messages.py::test_message_is_sent_once_per_connection].
 - A message that is not acked stays in the queue and is delivered again after the next
-  login of the recipient, until it is acked or expires [pending: task 6].
+  login of the recipient, until it is acked or expires
+  [test: tests/test_messages.py::test_unacked_message_is_delivered_again_after_the_next_login]
+  [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_delivers_the_queued_message].
 - The relay delivers a message to its recipient only, and the handling of one sender's
-  Send never waits for a recipient to read [pending: task 6].
+  Send never waits for a recipient to read
+  [test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte]
+  [test: tests/test_messages.py::test_recipient_that_stops_reading_does_not_delay_stored].
 
 Delivery is at least once. A client receives a message more than once after a lost Ack, a
 replaced connection or a repeated Send, and discards the copies by the pair (sender,
@@ -1273,16 +1298,20 @@ message id) (section 20.2) [pending: task 12].
 An Ack names messages by the pair (sender, message id), as the Deliver carried them.
 
 - For every pair the relay deletes the message that has this sender, this message id and
-  the identity of the acking connection as its recipient [pending: task 6].
+  the identity of the acking connection as its recipient
+  [test: tests/test_messages.py::test_ack_deletes_the_message_and_is_safe_to_repeat]
+  [test: tests/test_storage.py::test_message_is_one_row_until_its_recipient_acks_it].
 - A pair that matches no such message is ignored. This covers a message that is already
   deleted and a message that is queued for another identity: an Ack never deletes a
   message of another recipient's queue, and the acking client learns nothing about it
-  [pending: task 6]. This is the case of an Ack for a message queued for someone else.
-- An Ack is safe to repeat [pending: task 6].
-- An Ack has no answer, and the relay sends no Error for it [pending: task 6]. It takes no
+  [test: tests/test_messages.py::test_ack_of_a_message_queued_for_another_identity_deletes_nothing]. This is the case of an Ack for a message queued for someone else.
+- An Ack is safe to repeat [test: tests/test_messages.py::test_ack_deletes_the_message_and_is_safe_to_repeat].
+- An Ack has no answer, and the relay sends no Error for it
+  [test: tests/test_messages.py::test_ack_of_a_message_queued_for_another_identity_deletes_nothing]
+  [test: tests/test_messages.py::test_ack_deletes_the_message_and_is_safe_to_repeat]. It takes no
   token from the frame bucket (section 12.2).
 - An Ack for a message of an earlier connection is valid: the pair is the whole key
-  [pending: task 6].
+  [test: tests/test_messages.py::test_unacked_message_is_delivered_again_after_the_next_login].
 
 A client acks a message only after it saved everything it needs from it; the exact rule is
 in section 22.2 [pending: task 14]. An Ack tells the relay to delete the only other copy.
@@ -1341,7 +1370,7 @@ section 7.1.
 - A refused frame stored nothing and deleted nothing at the relay
   [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]
   [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on]
-  [pending: task 6].
+  [test: tests/test_storage.py::test_send_into_a_full_database_answers_storage_full_and_stores_nothing].
 - Stop applies to the refused frame only: the connection and the other frames go on.
 - BAD_BUNDLE and IDENTITY_KEY_MISMATCH are also results of the client's own checks of a
   fetched bundle (sections 5.4 and 11.4).
@@ -1351,7 +1380,9 @@ The relay sends each code under the stated condition and no other
 [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]
 [test: tests/test_bundles.py::test_fetch_for_an_identity_that_is_not_registered_answers_not_found]
 [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on]
-[pending: task 6] [pending: task 8].
+[test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]
+[test: tests/test_storage.py::test_send_into_a_full_database_answers_storage_full_and_stores_nothing]
+[pending: task 8].
 
 ### 11.3 Close codes
 
@@ -1495,7 +1526,8 @@ The relay deletes a message in two cases:
 - MESSAGE_TTL_SECONDS passed since it was stored (section 10.7): the deletion is part of a
   sweep.
 
-The relay delivers no message that it deleted [pending: task 6] [pending: task 7]. A Send
+The relay delivers no message that it deleted [test: tests/test_messages.py::test_ack_deletes_the_message_and_is_safe_to_repeat]
+[pending: task 7]. A Send
 that is repeated after the deletion is a new message for the relay (section 10.3).
 
 ### 13.2 What "deleted" means

@@ -82,8 +82,8 @@ identities as it wants, and each of them logs in like any other.
   a whole and the one-time prekeys of one target. "Not protected" says what an abuser can
   still do inside those bounds.
 - One identity cannot act for another through the relay of this repository: an Ack deletes
-  only messages queued for the acking identity [pending: task 6], the sender of a message
-  is the identity of the connection and not a field of the frame [pending: task 6], and an
+  only messages queued for the acking identity [test: tests/test_messages.py::test_ack_of_a_message_queued_for_another_identity_deletes_nothing], the sender of a message
+  is the identity of the connection and not a field of the frame [test: tests/test_messages.py::test_no_client_frame_names_its_sender], and an
   upload changes only the bundle of the identity that is logged in
   [test: tests/test_bundles.py::test_upload_changes_only_the_bundle_of_its_own_identity].
 
@@ -108,7 +108,8 @@ Whoever controls the relay learns all of this, with or without the rules of the 
 - The depth of every queue: how many messages wait for a recipient and how large they are.
 - Whether a given id is registered.
 - The parts of a payload that are not encrypted. The payload is opaque to the relay
-  protocol, and the relay of this repository does not parse it [pending: task 6], but its
+  protocol, and the relay of this repository does not parse it
+  [test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte], but its
   bytes pass through. The envelope leaves readable: which messages are the first of a
   session, the ratchet public key and the two message counters of every message, and the
   length of a text in steps of 256 bytes. "What the relay sees of the end-to-end layer"
@@ -122,7 +123,7 @@ What the relay of this repository writes down, run unchanged:
 - The database holds the bundle of every registered identity
   [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_serves_the_bundle] and every
   queued message with its sender, recipient, message id, payload and time of storing
-  [pending: task 6].
+  [test: tests/test_storage.py::test_message_is_one_row_until_its_recipient_acks_it].
 - A message leaves the database when its recipient acks it or when it expires. "Deleted
   after the ack" means: after the next sweep its payload and its message id are in none of
   the files of the database, the write-ahead log included (protocol, section 13)
@@ -137,7 +138,9 @@ What the relay of this repository writes down, run unchanged:
   [test: tests/test_logs.py::test_text_of_an_exception_stays_out_of_the_line], the failure
   of a connection handler included
   [test: tests/test_connection.py::test_failed_handler_closes_with_1011_and_logs_no_text_of_the_exception].
-  No log line holds payload bytes or a pair of sender and recipient [pending: task 6].
+  No log line holds payload bytes or a pair of sender and recipient
+  [test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]
+  [test: tests/test_storage.py::test_failed_send_closes_with_1011_and_the_relay_serves_on].
 - Metrics are counters and gauges without a label that names an identity. They are served
   on a listener of their own, which is off unless it is configured, and never on the
   WebSocket port [pending: task 8].
@@ -283,7 +286,7 @@ What it cannot do:
   again. What the filesystem, the storage device, a snapshot or a backup keeps is out of
   scope (protocol, section 13).
 - Durability. A message that was answered with Stored survives a kill of the relay
-  process [pending: task 6]. It can be lost with the power when the host does not honour
+  process [test: tests/test_process.py::test_message_answered_with_stored_survives_a_kill_of_the_relay]. It can be lost with the power when the host does not honour
   fsync.
 - The clock. The relay's clock decides when a message expires.
 - Prekey ids. A client numbers its signed prekeys and its one-time prekeys from 1 upward
@@ -497,7 +500,8 @@ users who hold each other's ids hold each other's keys.
 ## What the relay sees of the end-to-end layer
 
 The relay protocol carries the envelope of a message as bytes that the relay of this
-repository does not parse [pending: task 6]. Whoever controls the relay can parse them.
+repository does not parse
+[test: tests/test_messages.py::test_message_to_an_online_recipient_is_delivered_byte_for_byte]. Whoever controls the relay can parse them.
 Everything in the envelope but the sealed text is readable (protocol, sections 17.5 and
 19):
 

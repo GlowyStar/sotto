@@ -28,6 +28,7 @@ from sotto.proto.sotto_pb2 import (
     Hello,
     Login,
     OneTimePrekey,
+    Send,
     ServerFrame,
     SignedPrekey,
     UploadBundle,
@@ -130,12 +131,15 @@ class RawClient:
         await self.send(self.login(seed))
         return await self.receive()
 
-    async def ask(self, frame: UploadBundle | FetchBundle) -> ServerFrame:
+    async def ask(self, frame: UploadBundle | FetchBundle | Send) -> ServerFrame:
         """Sends a frame that has an answer and returns the next frame of the relay."""
-        if isinstance(frame, UploadBundle):
-            await self.send(ClientFrame(upload_bundle=frame))
-        else:
-            await self.send(ClientFrame(fetch_bundle=frame))
+        match frame:
+            case UploadBundle():
+                await self.send(ClientFrame(upload_bundle=frame))
+            case FetchBundle():
+                await self.send(ClientFrame(fetch_bundle=frame))
+            case Send():
+                await self.send(ClientFrame(send=frame))
         return await self.receive()
 
     async def frames_until_close(self) -> tuple[list[ServerFrame], int | None]:

@@ -9,8 +9,11 @@ opens one.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 - Nothing is encrypted so far. The relay answers a health check, logs a connection in by
-  a signature over its own challenge, and stores and hands out prekey bundles; it
-  forwards no message yet. The frames
+  a signature over its own challenge, and stores and hands out prekey bundles. It stores
+  a message for a registered recipient, answers the sender once the message is
+  committed, delivers it when the recipient is logged in and deletes it when the
+  recipient acks it; the payload is opaque bytes that it never parses or logs. Queue caps,
+  rate limits and the expiry of messages are not there yet. The frames
   are protobuf messages, whose schema is `proto/sotto.proto`. The identity core holds the
   user ids, the three signed strings and the checks of a prekey bundle, with the shared
   test vectors in `vectors/identity.json`.
@@ -66,7 +69,7 @@ has no default. It opens the file in write-ahead mode, so a `-wal` and a `-shm` 
 next to it while it runs, and it removes the two on an orderly stop. Keep the three on a
 directory of their own: the image keeps them in `/data`, which `compose.yaml` mounts as the
 named volume `relay-data`. `RELAY_MAX_PAGES` caps the file, 262144 pages of 4096 bytes by
-default; an upload into a full database is refused and the relay stays up.
+default; an upload or a message into a full database is refused and the relay stays up.
 `RELAY_ONE_TIME_PREKEY_CAP`, 100 by default, caps the one-time prekeys kept per identity.
 
 Logs are JSON lines on stdout. On SIGTERM the relay closes its connections and exits
@@ -88,8 +91,8 @@ the committed files differ.
 
 `scripts/stand.sh <project>` builds the image, starts the relay with Docker Compose under
 that project name and runs the tests marked `stand` against it. It restarts the relay
-and runs the tests marked `stand_after_restart`, which fetch a bundle uploaded before the
-restart. It then checks that the
+and runs the tests marked `stand_after_restart`, which fetch a bundle uploaded and receive
+a message sent before the restart. It then checks that the
 container runs as a non-root user and exits with 0 on stop, and removes the stand.
 `RELAY_PORT` moves the published port off 8765.
 

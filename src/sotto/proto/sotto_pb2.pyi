@@ -27,28 +27,36 @@ BAD_BUNDLE: ErrorCode
 IDENTITY_KEY_MISMATCH: ErrorCode
 
 class ClientFrame(_message.Message):
-    __slots__ = ("login", "upload_bundle", "fetch_bundle")
+    __slots__ = ("login", "upload_bundle", "fetch_bundle", "send", "ack")
     LOGIN_FIELD_NUMBER: _ClassVar[int]
     UPLOAD_BUNDLE_FIELD_NUMBER: _ClassVar[int]
     FETCH_BUNDLE_FIELD_NUMBER: _ClassVar[int]
+    SEND_FIELD_NUMBER: _ClassVar[int]
+    ACK_FIELD_NUMBER: _ClassVar[int]
     login: Login
     upload_bundle: UploadBundle
     fetch_bundle: FetchBundle
-    def __init__(self, login: _Optional[_Union[Login, _Mapping]] = ..., upload_bundle: _Optional[_Union[UploadBundle, _Mapping]] = ..., fetch_bundle: _Optional[_Union[FetchBundle, _Mapping]] = ...) -> None: ...
+    send: Send
+    ack: Ack
+    def __init__(self, login: _Optional[_Union[Login, _Mapping]] = ..., upload_bundle: _Optional[_Union[UploadBundle, _Mapping]] = ..., fetch_bundle: _Optional[_Union[FetchBundle, _Mapping]] = ..., send: _Optional[_Union[Send, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ...) -> None: ...
 
 class ServerFrame(_message.Message):
-    __slots__ = ("hello", "logged_in", "bundle_stored", "bundle", "error")
+    __slots__ = ("hello", "logged_in", "bundle_stored", "bundle", "stored", "deliver", "error")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     LOGGED_IN_FIELD_NUMBER: _ClassVar[int]
     BUNDLE_STORED_FIELD_NUMBER: _ClassVar[int]
     BUNDLE_FIELD_NUMBER: _ClassVar[int]
+    STORED_FIELD_NUMBER: _ClassVar[int]
+    DELIVER_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     logged_in: LoggedIn
     bundle_stored: BundleStored
     bundle: Bundle
+    stored: Stored
+    deliver: Deliver
     error: Error
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., logged_in: _Optional[_Union[LoggedIn, _Mapping]] = ..., bundle_stored: _Optional[_Union[BundleStored, _Mapping]] = ..., bundle: _Optional[_Union[Bundle, _Mapping]] = ..., error: _Optional[_Union[Error, _Mapping]] = ...) -> None: ...
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., logged_in: _Optional[_Union[LoggedIn, _Mapping]] = ..., bundle_stored: _Optional[_Union[BundleStored, _Mapping]] = ..., bundle: _Optional[_Union[Bundle, _Mapping]] = ..., stored: _Optional[_Union[Stored, _Mapping]] = ..., deliver: _Optional[_Union[Deliver, _Mapping]] = ..., error: _Optional[_Union[Error, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("version", "nonce")
@@ -129,6 +137,46 @@ class Bundle(_message.Message):
     signed_prekey: SignedPrekey
     one_time_prekey: OneTimePrekey
     def __init__(self, identity: _Optional[bytes] = ..., identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., signed_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., one_time_prekey: _Optional[_Union[OneTimePrekey, _Mapping]] = ...) -> None: ...
+
+class Send(_message.Message):
+    __slots__ = ("message_id", "recipient", "payload")
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    RECIPIENT_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    recipient: bytes
+    payload: bytes
+    def __init__(self, message_id: _Optional[bytes] = ..., recipient: _Optional[bytes] = ..., payload: _Optional[bytes] = ...) -> None: ...
+
+class Stored(_message.Message):
+    __slots__ = ("message_id",)
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    def __init__(self, message_id: _Optional[bytes] = ...) -> None: ...
+
+class Deliver(_message.Message):
+    __slots__ = ("message_id", "sender", "payload")
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    SENDER_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    sender: bytes
+    payload: bytes
+    def __init__(self, message_id: _Optional[bytes] = ..., sender: _Optional[bytes] = ..., payload: _Optional[bytes] = ...) -> None: ...
+
+class MessageRef(_message.Message):
+    __slots__ = ("message_id", "sender")
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    SENDER_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    sender: bytes
+    def __init__(self, message_id: _Optional[bytes] = ..., sender: _Optional[bytes] = ...) -> None: ...
+
+class Ack(_message.Message):
+    __slots__ = ("messages",)
+    MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    messages: _containers.RepeatedCompositeFieldContainer[MessageRef]
+    def __init__(self, messages: _Optional[_Iterable[_Union[MessageRef, _Mapping]]] = ...) -> None: ...
 
 class Error(_message.Message):
     __slots__ = ("code", "message_id", "identity")

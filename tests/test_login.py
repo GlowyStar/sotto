@@ -7,7 +7,7 @@ from relay_harness import PATIENCE_SECONDS, OpenClient, RawClient, build_upload
 from websockets.exceptions import ConnectionClosed
 
 from sotto.crypto.identity import sign_login
-from sotto.proto.sotto_pb2 import ClientFrame, FetchBundle, Login
+from sotto.proto.sotto_pb2 import Ack, ClientFrame, FetchBundle, Login, MessageRef, Send
 from sotto.relay.frames import MAX_FRAME_BYTES
 from sotto.relay.server import CloseCode
 
@@ -300,7 +300,19 @@ def complete_fetch() -> ClientFrame:
     return ClientFrame(fetch_bundle=FetchBundle(identity=os.urandom(32)))
 
 
-@pytest.mark.parametrize("make_frame", [complete_upload, complete_fetch])
+def complete_send() -> ClientFrame:
+    send = Send(message_id=os.urandom(16), recipient=os.urandom(32), payload=b"payload")
+    return ClientFrame(send=send)
+
+
+def complete_ack() -> ClientFrame:
+    pair = MessageRef(message_id=os.urandom(16), sender=os.urandom(32))
+    return ClientFrame(ack=Ack(messages=[pair]))
+
+
+@pytest.mark.parametrize(
+    "make_frame", [complete_upload, complete_fetch, complete_send, complete_ack]
+)
 async def test_frame_before_login_closes_with_1008(
     relay_url: str, open_client: OpenClient, make_frame: Callable[[], ClientFrame]
 ) -> None:
