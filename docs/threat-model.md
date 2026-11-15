@@ -159,11 +159,16 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
 What it cannot do:
 
 - Make a client accept an X25519 identity key or a signed prekey that the identity did
-  not sign, or accept another X25519 identity key for a contact whose key the client
-  pinned [pending: task 3].
+  not sign
+  [test: tests/crypto/test_identity.py::test_changed_signed_field_fails_the_bundle_check]
+  [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error],
+  or accept another X25519 identity key for a contact whose key the client pinned
+  [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
 - Turn a login into a prekey statement or the reverse: the three signed strings have
-  distinct prefixes [pending: task 3]. The relay never chooses all the bytes of a login
-  string, because the client adds a nonce of its own [pending: task 4].
+  distinct prefixes
+  [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
+  The relay never chooses all the bytes of a login string, because the client adds a nonce
+  of its own [pending: task 4].
 - Use a login it received to log in at a relay with another server name, or on another
   connection [pending: task 4]. Relays that clients dial under one host, on different
   ports, share a server name and are not told apart (protocol, section 8.2).
