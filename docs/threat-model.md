@@ -165,7 +165,8 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
 - Deliver a payload of its own under any sender, or change a real message: its sender,
   its message id, its header, its nonce or its sealed bytes, or the X25519 identity key
   or the ephemeral key of its initial header. The recipient's client does not decrypt
-  the result (protocol, section 20.3) [pending: task 13]. From a sender that is not a
+  the result (protocol, section 20.3)
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]. From a sender that is not a
   contact it is dropped unseen. From a contact it is shown as a message that could not
   be read: the relay can put such a notice under the name of any contact, as often as it
   likes.
@@ -173,7 +174,9 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   header whose session exists, the signature bytes of an initial header, and whether a
   message carries the initial header of its session. The client then reads the plaintext
   that the sender sealed or nothing. No change gives another plaintext, another sender
-  or another message id (protocol, sections 16.9 and 18.2) [pending: task 13].
+  or another message id (protocol, sections 16.9 and 18.2)
+  [test: tests/client/test_hostile_relay.py::test_changed_prekey_ids_of_a_message_with_a_record_change_nothing]
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - Make a real message unreadable for good: by changing it, or by the order in which it
   delivers. A message fails when it arrives after its skipped key was purged, when it
   arrives while more than 1000 earlier messages of its chain are missing, and, for an
@@ -183,7 +186,8 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
 - Hand out a bundle with a signed prekey that the identity replaced long ago, or refuse
   to store the next one: the old signature still verifies. A session made with that key
   starts during its grace period, 37 days from the moment the identity made the next
-  key, and not after (protocol, section 21.2) [pending: task 13].
+  key, and not after (protocol, section 21.2)
+  [test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period].
 - Keep a client from logging in. The client then makes no new signed prekey (protocol,
   section 21.2). Its newest one stays in use for as long, which stretches the time in
   which the first messages of sessions without a one-time prekey can be opened with
@@ -198,7 +202,8 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   [test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session].
 - Report a wrong count of stored one-time prekeys, so that a client uploads none when it
   has to, or more than it has to. Whatever the count says, a client holds at most 1000
-  private keys of one-time prekeys (protocol, section 21.3) [pending: task 13].
+  private keys of one-time prekeys (protocol, section 21.3)
+  [test: tests/client/test_lifecycle.py::test_held_one_time_prekeys_are_bounded_by_deleting_the_lowest_ids].
 - Keep a target without one-time prekeys: withhold them, or let fetches spend the handout
   bucket of the target, so that every bundle of the target goes out without one.
 - Keep the Login of a connection and show it to anyone. The signature proves that the
@@ -231,18 +236,22 @@ What it cannot do:
   [test: tests/test_login.py::test_login_replayed_on_another_connection_closes_with_3000]. Relays that clients dial under one host, on different
   ports, share a server name and are not told apart (protocol, section 8.2).
 - Read the content of a message, or make a message of its own that the recipient's client
-  accepts (protocol, sections 16 to 18) [pending: task 13].
+  accepts (protocol, sections 16 to 18)
+  [test: tests/client/test_hostile_relay.py::test_arbitrary_bytes_from_any_sender_end_in_a_named_result]
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - Make a message decrypt at another identity than the one its sender meant, by handing
   out the X25519 keys of one identity under the signature of another: the associated
   data of every message names the Ed25519 keys of both sides (protocol, section 16.5)
   [test: tests/crypto/test_x3dh.py::test_unknown_key_share_gives_the_same_secret_under_other_associated_data]
-  [pending: task 13].
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - Make a client read a message twice, or start a second session from an initial message
   that it replays, as it was sent or with other bytes in its ephemeral key that give
-  the same secret (protocol, sections 16.5 and 20.4) [pending: task 13].
+  the same secret (protocol, sections 16.5 and 20.4)
+  [test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart]
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - Make a client start a key agreement or delete a one-time prekey by delivering messages
   that fail: a failure starts nothing and deletes nothing (protocol, section 20.3)
-  [pending: task 13].
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 
 ## Not protected
 
@@ -330,7 +339,8 @@ its id.
 - A peer cannot be told from the person the user has in mind by anything in the
   protocol: a contact is an id, and "The id and its channel" says what that rests on.
 - Two things that a peer can make a client keep are bounded: 3 sessions (protocol,
-  section 20.1) [pending: task 13], and 2000 skipped message keys in each (protocol,
+  section 20.1)
+  [test: tests/client/test_sessions.py::test_fourth_session_drops_the_oldest_and_reports_its_missing_messages], and 2000 skipped message keys in each (protocol,
   section 17.8)
   [test: tests/crypto/test_ratchet.py::test_the_cap_removes_the_oldest_entry_and_counts_it].
   What it can make a client compute for one message is bounded as well: a header that
@@ -394,7 +404,7 @@ or a program that runs as the user.
   store (protocol, section 22.3), not about memory.
 - Below the files nothing is promised. The store deletes with `secure_delete` and keeps
   no write-ahead log, so a deleted key is in none of its files after the commit
-  [pending: task 13]. The blocks of a removed journal file, a snapshot of the filesystem
+  [test: tests/client/test_lifecycle.py::test_replaced_chain_keys_are_in_no_file_of_the_store]. The blocks of a removed journal file, a snapshot of the filesystem
   and a backup can still hold it.
 - A data directory that is put back from an older copy is an older state of every
   session. The client then sends under chain keys it used before, and the peer refuses
@@ -419,7 +429,8 @@ What forward secrecy covers:
   that message as it was recorded on the wire
   [test: tests/crypto/test_ratchet.py::test_copy_after_a_message_opens_none_of_the_messages_before].
 - After the commit that follows a message, the chain key that was replaced is in none of
-  the files of the store [pending: task 13].
+  the files of the store
+  [test: tests/client/test_lifecycle.py::test_replaced_chain_keys_are_in_no_file_of_the_store].
 
 What it does not cover, because it stays on disk:
 
@@ -436,7 +447,9 @@ What it does not cover, because it stays on disk:
   private key is deleted when the first of those messages is accepted. The private key
   of a signed prekey is deleted 37 days after the client made the next one, which it
   does after a login once the key is 7 days old: with the defaults about 44 days after
-  the key was made, and not earlier (protocol, section 21.2) [pending: task 13]. The
+  the key was made, and not earlier (protocol, section 21.2)
+  [test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period]
+  [test: tests/client/test_lifecycle.py::test_rotation_follows_the_age_of_the_newest_signed_prekey]. The
   client counts on its own clock and waits for no answer to an upload. It deletes when
   it starts or logs in and makes the next key only after a login: a client that does
   not run, that stays on one connection or that the relay keeps from logging in can
@@ -582,7 +595,7 @@ section 5.2).
     initial message could be accepted again. The responder's record of accepted initial
     messages refuses the replay while the session or the private key of the signed
     prekey exists, and without that key no key agreement runs (protocol, section 20.4)
-    [pending: task 13].
+    [test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart].
 
 ## No post-quantum protection
 
