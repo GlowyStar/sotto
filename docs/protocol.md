@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 13 or 14, of the task of the project plan that brings it.
+  gives the number, 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -1143,7 +1143,8 @@ again after it was handed out is stored again and handed out a second time
 A client therefore MUST NOT upload a one-time prekey a second time,
 unless the relay refused the frame that carried it with an Error: after an UploadBundle
 that got no answer, the client counts the one-time prekeys of that frame as uploaded
-[pending: task 13]. The other fields of an UploadBundle are safe to repeat.
+[test: tests/client/test_lifecycle.py::test_unanswered_upload_keeps_its_keys_and_a_refused_one_deletes_them].
+The other fields of an UploadBundle are safe to repeat.
 
 ### 9.2 Fetch
 
