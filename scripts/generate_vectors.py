@@ -12,6 +12,9 @@ import json
 from pathlib import Path
 
 from sotto.crypto.identity import (
+    Bundle,
+    OneTimePrekey,
+    SignedPrekey,
     derive_identity_key,
     derive_x25519_public_key,
     encode_user_id,
@@ -22,6 +25,7 @@ from sotto.crypto.identity import (
     sign_signed_prekey,
     signed_prekey_string,
 )
+from sotto.crypto.x3dh import KeyAgreement, dh, initiate, respond
 
 type Fields = dict[str, str | int]
 type Vector = dict[str, str | Fields]
@@ -43,13 +47,23 @@ MALLORY = derive_identity_key(MALLORY_SEED)
 
 ALICE_IDENTITY_DH_PRIVATE_KEY = bytes([0x11]) * 32
 ALICE_IDENTITY_DH = derive_x25519_public_key(ALICE_IDENTITY_DH_PRIVATE_KEY)
-ALICE_SIGNED_PREKEY = derive_x25519_public_key(bytes([0x12]) * 32)
-ALICE_ONE_TIME_PREKEY = derive_x25519_public_key(bytes([0x13]) * 32)
+ALICE_SIGNED_PREKEY_PRIVATE_KEY = bytes([0x12]) * 32
+ALICE_SIGNED_PREKEY = derive_x25519_public_key(ALICE_SIGNED_PREKEY_PRIVATE_KEY)
+ALICE_ONE_TIME_PREKEY_PRIVATE_KEY = bytes([0x13]) * 32
+ALICE_ONE_TIME_PREKEY = derive_x25519_public_key(ALICE_ONE_TIME_PREKEY_PRIVATE_KEY)
 ALICE_OTHER_IDENTITY_DH = derive_x25519_public_key(bytes([0x14]) * 32)
 ALICE_NEXT_SIGNED_PREKEY = derive_x25519_public_key(bytes([0x15]) * 32)
 ALICE_OTHER_ONE_TIME_PREKEY = derive_x25519_public_key(bytes([0x16]) * 32)
 MALLORY_IDENTITY_DH = derive_x25519_public_key(bytes([0x21]) * 32)
 MALLORY_SIGNED_PREKEY = derive_x25519_public_key(bytes([0x22]) * 32)
+
+BOB_SEED = bytes([0x03]) * 32
+BOB = derive_identity_key(BOB_SEED)
+BOB_IDENTITY_DH_PRIVATE_KEY = bytes([0x31]) * 32
+BOB_IDENTITY_DH = derive_x25519_public_key(BOB_IDENTITY_DH_PRIVATE_KEY)
+EPHEMERAL_PRIVATE_KEY = bytes([0x32]) * 32
+EPHEMERAL_PRIVATE_KEY_AFTER_A_REPLACEMENT = bytes([0x33]) * 32
+EPHEMERAL_PRIVATE_KEY_FOR_MALLORY = bytes([0x34]) * 32
 
 EXAMPLE_NAME = "127.0.0.1"
 HOST_NAME = "relay.example.org"
@@ -76,6 +90,15 @@ SMALL_ORDER = {
 NEUTRAL_POINT = SMALL_ORDER["1"]
 NOT_A_POINT = "02" + "00" * 31
 FORGED_SIGNATURE = bytes.fromhex(NEUTRAL_POINT) + bytes(32)
+
+X25519_PRIME = 2**255 - 19
+# The u-coordinates of https://cr.yp.to/ecdh.html#validate: 0 has order 2, the other one
+# order 8.
+X25519_ORDER_2 = bytes(32)
+X25519_ORDER_8 = bytes.fromhex(
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"
+)
+KEY_MATERIAL_PREFIX = b"\xff" * 32
 
 
 def passes(
@@ -479,12 +502,204 @@ def identity_vectors() -> list[Vector]:
     return key_vectors() + decode_vectors() + login_vectors() + bundle_vectors()
 
 
-def main() -> None:
-    vectors = identity_vectors()
-    text = json.dumps({"schema": SCHEMA, "vectors": vectors}, indent=2) + "\n"
+def bundle_of(fields: Fields) -> Bundle:
+    one_time_prekey = None
+    if "one_time_prekey_id" in fields:
+        one_time_prekey = OneTimePrekey(
+            id=int(fields["one_time_prekey_id"]),
+            key=bytes.fromhex(str(fields["one_time_prekey_key"])),
+        )
 
-    (VECTORS / "identity.json").write_text(text, encoding="utf-8")
-    print(f"identity.json: {len(vectors)} vectors")
+    return Bundle(
+        identity=bytes.fromhex(str(fields["identity"])),
+        identity_dh_key=bytes.fromhex(str(fields["identity_dh_key"])),
+        identity_dh_signature=bytes.fromhex(str(fields["identity_dh_signature"])),
+        signed_prekey=SignedPrekey(
+            id=int(fields["signed_prekey_id"]),
+            key=bytes.fromhex(str(fields["signed_prekey_key"])),
+            signature=bytes.fromhex(str(fields["signed_prekey_signature"])),
+        ),
+        one_time_prekey=one_time_prekey,
+    )
+
+
+def with_inverse_u(public_key: bytes) -> bytes:
+    """The key plus the point of order 2: the u-coordinate 1/u, the same X25519 output."""
+    u = int.from_bytes(public_key, "little")
+    return pow(u, -1, X25519_PRIME).to_bytes(32, "little")
+
+
+def key_schedule(dh_outputs: list[bytes]) -> Fields:
+    recorded: Fields = {
+        f"dh{number}": output.hex() for number, output in enumerate(dh_outputs, 1)
+    }
+    recorded["input_key_material"] = (KEY_MATERIAL_PREFIX + b"".join(dh_outputs)).hex()
+    return recorded
+
+
+def outputs_of(agreement: KeyAgreement) -> Fields:
+    return {
+        "sk": agreement.shared_secret.hex(),
+        "session_associated_data": agreement.associated_data.hex(),
+    }
+
+
+def initiate_vector(
+    case: str,
+    bundle: Fields,
+    ephemeral_private_key: bytes = EPHEMERAL_PRIVATE_KEY,
+    contact: bytes = ALICE,
+    *,
+    error: str | None = None,
+) -> Vector:
+    name = f"x3dh-initiate-{case}"
+    inputs: Fields = {
+        "identity_key": BOB.hex(),
+        "identity_dh_private_key": BOB_IDENTITY_DH_PRIVATE_KEY.hex(),
+        "ephemeral_private_key": ephemeral_private_key.hex(),
+        "contact_id": contact.hex(),
+    }
+    inputs |= bundle
+
+    fetched = bundle_of(bundle)
+    intermediates: Fields = {
+        "identity_dh_string": identity_dh_string(
+            identity_key=fetched.identity, identity_dh_key=fetched.identity_dh_key
+        ).hex(),
+        "signed_prekey_string": signed_prekey_string(
+            identity_key=fetched.identity, signed_prekey=fetched.signed_prekey.key
+        ).hex(),
+    }
+    if error is not None:
+        return fails(name, "x3dh-initiate", inputs, error, intermediates=intermediates)
+
+    dh_outputs = [
+        dh(BOB_IDENTITY_DH_PRIVATE_KEY, fetched.signed_prekey.key),
+        dh(ephemeral_private_key, fetched.identity_dh_key),
+        dh(ephemeral_private_key, fetched.signed_prekey.key),
+    ]
+    if fetched.one_time_prekey is not None:
+        dh_outputs.append(dh(ephemeral_private_key, fetched.one_time_prekey.key))
+    agreement = initiate(
+        fetched,
+        identity_key=BOB,
+        identity_dh_private_key=BOB_IDENTITY_DH_PRIVATE_KEY,
+        ephemeral_private_key=ephemeral_private_key,
+        contact_identity_key=contact,
+        pinned_identity_dh_key=None,
+    )
+    intermediates |= key_schedule(dh_outputs)
+    return passes(
+        name, "x3dh-initiate", inputs, outputs_of(agreement), intermediates=intermediates
+    )
+
+
+def respond_vector(
+    case: str,
+    ephemeral_key: bytes,
+    one_time_prekey_private_key: bytes | None = ALICE_ONE_TIME_PREKEY_PRIVATE_KEY,
+    *,
+    error: str | None = None,
+) -> Vector:
+    name = f"x3dh-respond-{case}"
+    signature = sign_identity_dh_key(BOB_SEED, identity_dh_key=BOB_IDENTITY_DH)
+    inputs: Fields = {
+        "identity_key": ALICE.hex(),
+        "identity_dh_private_key": ALICE_IDENTITY_DH_PRIVATE_KEY.hex(),
+        "signed_prekey_private_key": ALICE_SIGNED_PREKEY_PRIVATE_KEY.hex(),
+    }
+    if one_time_prekey_private_key is not None:
+        inputs["one_time_prekey_private_key"] = one_time_prekey_private_key.hex()
+    inputs |= {
+        "sender": BOB.hex(),
+        "identity_dh_key": BOB_IDENTITY_DH.hex(),
+        "identity_dh_signature": signature.hex(),
+        "ephemeral_key": ephemeral_key.hex(),
+        "signed_prekey_id": 7,
+    }
+    if one_time_prekey_private_key is not None:
+        inputs["one_time_prekey_id"] = 41
+
+    intermediates: Fields = {
+        "identity_dh_string": identity_dh_string(
+            identity_key=BOB, identity_dh_key=BOB_IDENTITY_DH
+        ).hex(),
+    }
+    if error is not None:
+        return fails(name, "x3dh-respond", inputs, error, intermediates=intermediates)
+
+    dh_outputs = [
+        dh(ALICE_SIGNED_PREKEY_PRIVATE_KEY, BOB_IDENTITY_DH),
+        dh(ALICE_IDENTITY_DH_PRIVATE_KEY, ephemeral_key),
+        dh(ALICE_SIGNED_PREKEY_PRIVATE_KEY, ephemeral_key),
+    ]
+    if one_time_prekey_private_key is not None:
+        dh_outputs.append(dh(one_time_prekey_private_key, ephemeral_key))
+    agreement = respond(
+        identity_key=ALICE,
+        identity_dh_private_key=ALICE_IDENTITY_DH_PRIVATE_KEY,
+        signed_prekey_private_key=ALICE_SIGNED_PREKEY_PRIVATE_KEY,
+        one_time_prekey_private_key=one_time_prekey_private_key,
+        sender_identity_key=BOB,
+        sender_identity_dh_key=BOB_IDENTITY_DH,
+        sender_identity_dh_signature=signature,
+        ephemeral_key=ephemeral_key,
+        pinned_identity_dh_key=None,
+    )
+    intermediates |= key_schedule(dh_outputs)
+    return passes(
+        name, "x3dh-respond", inputs, outputs_of(agreement), intermediates=intermediates
+    )
+
+
+def x3dh_vectors() -> list[Vector]:
+    good = valid_bundle(ALICE_SEED)
+    without_one_time_prekey = dict(good)
+    del without_one_time_prekey["one_time_prekey_id"]
+    del without_one_time_prekey["one_time_prekey_key"]
+    replaced = good | {"one_time_prekey_key": ALICE_OTHER_ONE_TIME_PREKEY.hex()}
+    under_the_signature_of_mallory = valid_bundle(MALLORY_SEED)
+    of_small_order = good | {"one_time_prekey_key": X25519_ORDER_2.hex()}
+
+    ephemeral_key = derive_x25519_public_key(EPHEMERAL_PRIVATE_KEY)
+    after_a_replacement = derive_x25519_public_key(EPHEMERAL_PRIVATE_KEY_AFTER_A_REPLACEMENT)
+    for_mallory = derive_x25519_public_key(EPHEMERAL_PRIVATE_KEY_FOR_MALLORY)
+
+    return [
+        initiate_vector("with-a-one-time-prekey", good),
+        respond_vector("with-a-one-time-prekey", ephemeral_key),
+        initiate_vector("without-a-one-time-prekey", without_one_time_prekey),
+        respond_vector("without-a-one-time-prekey", ephemeral_key, None),
+        initiate_vector(
+            "replaced-one-time-prekey", replaced, EPHEMERAL_PRIVATE_KEY_AFTER_A_REPLACEMENT
+        ),
+        respond_vector("replaced-one-time-prekey", after_a_replacement),
+        initiate_vector(
+            "unknown-key-share",
+            under_the_signature_of_mallory,
+            EPHEMERAL_PRIVATE_KEY_FOR_MALLORY,
+            contact=MALLORY,
+        ),
+        respond_vector("unknown-key-share", for_mallory),
+        respond_vector(
+            "ephemeral-key-top-bit-set", bytes.fromhex(with_top_bit(ephemeral_key.hex()))
+        ),
+        respond_vector("ephemeral-key-inverse", with_inverse_u(ephemeral_key)),
+        initiate_vector("one-time-prekey-of-small-order", of_small_order, error="ZERO_DH"),
+        respond_vector("ephemeral-key-of-small-order", X25519_ORDER_8, error="ZERO_DH"),
+    ]
+
+
+FILES = {"identity.json": identity_vectors, "x3dh.json": x3dh_vectors}
+
+
+def main() -> None:
+    for file_name, make_vectors in FILES.items():
+        vectors = make_vectors()
+        text = json.dumps({"schema": SCHEMA, "vectors": vectors}, indent=2) + "\n"
+
+        (VECTORS / file_name).write_text(text, encoding="utf-8")
+        print(f"{file_name}: {len(vectors)} vectors")
 
 
 if __name__ == "__main__":

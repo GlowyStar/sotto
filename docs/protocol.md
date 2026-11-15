@@ -384,8 +384,10 @@ The id of a signed prekey is not part of the string (section 5.2).
 | OPK   | X25519 public key  | 32     | Handed out once, then deleted (section 9.3).   |
 
 An X25519 public key is the 32-byte string of RFC 7748 section 5. The rules for using
-these keys are in section 16 [pending: task 10]; those for rotating the signed prekey and
-for choosing prekey ids are in section 21 [pending: task 13].
+these keys are in section 16
+[test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data];
+those for rotating the signed prekey and for choosing prekey ids are in section 21
+[pending: task 13].
 
 ### 5.2 The fields of a bundle
 
@@ -409,7 +411,9 @@ start a session with it while it is offline.
 - The two prekey ids and the one-time prekey are not signed. The relay, or whoever sits
   between a client and the relay, can change them. The result is a session that does not
   start or a session without a one-time prekey, not a session with someone else
-  (section 16.9) [pending: task 10] [pending: task 12].
+  (section 16.9)
+  [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
+  [pending: task 12].
 
 ### 5.3 The X25519 identity key is written once
 
@@ -1134,7 +1138,8 @@ at most once [pending: task 5].
 
 A fetch never fails for lack of a one-time prekey: a registered identity always gets a
 Bundle [pending: task 5]. A bundle without a one-time prekey still starts a session
-(section 16.6) [pending: task 10].
+(section 16.6)
+[test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data].
 
 ### 9.4 The count of one-time prekeys
 
@@ -1537,11 +1542,14 @@ The implementations share test vectors: files `vectors/*.json` in this repositor
 by a generator that is run by hand from fixed seeds. An implementation that replays every
 vector and gets the stated results agrees with the others on every byte the vectors cover
 [test: tests/crypto/test_identity_vectors.py::test_positive_vectors_replay_byte_for_byte]
-[test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
+[test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error]
+[test: tests/crypto/test_x3dh_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_x3dh_vectors.py::test_negative_vectors_raise_their_named_error].
 The first file is `vectors/identity.json`; section 15.5 names its operations and the keys
 of their objects
 [test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
-Section 24.3 says what the vectors of the key agreement and of the ratchet record.
+The second is `vectors/x3dh.json`, whose operations section 15.6 names. Section 24.3 says
+what the vectors of the key agreement and of the ratchet record.
 
 ### 15.2 The schema of a vector file
 
@@ -1632,6 +1640,65 @@ prekey ids are numbers, and every other value is a hex string.
   accept under such a key for every string; these vectors are refused before any signature
   is verified.
 
+### 15.6 The operations of `vectors/x3dh.json`
+
+The file covers the key agreement of section 16 and records what section 24.3 lists
+[test: tests/crypto/test_x3dh_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
+It is written by `scripts/generate_vectors.py`. `contact_id` is text, the two prekey ids
+are numbers, and every other value is a hex string.
+
+| Operation | Rule | `inputs` | `intermediates` | `outputs` | `error` |
+|-----------|------|----------|-----------------|-----------|---------|
+| `x3dh-initiate` | 5.4, 16.6, steps 1 to 6 | `identity_key`, `identity_dh_private_key`, `ephemeral_private_key`, `contact_id`, `identity`, `identity_dh_key`, `identity_dh_signature`, `signed_prekey_id`, `signed_prekey_key`, `signed_prekey_signature`, `one_time_prekey_id`, `one_time_prekey_key` | `identity_dh_string`, `signed_prekey_string`, `dh1`, `dh2`, `dh3`, `dh4`, `input_key_material` | `sk`, `session_associated_data` | ZERO_DH |
+| `x3dh-respond` | 16.8, steps 1, 2 and 5 to 7 | `identity_key`, `identity_dh_private_key`, `signed_prekey_private_key`, `one_time_prekey_private_key`, `sender`, `identity_dh_key`, `identity_dh_signature`, `ephemeral_key`, `signed_prekey_id`, `one_time_prekey_id` | `identity_dh_string`, `dh1`, `dh2`, `dh3`, `dh4`, `input_key_material` | `sk`, `session_associated_data` | ZERO_DH |
+
+- In both operations `identity_key` is the identity key of the side that runs the
+  operation and `identity_dh_private_key` the private key of its X25519 identity key. A
+  private key is the 32 bytes of section 16.2. No vector holds a pinned X25519 identity
+  key: check 3 of section 5.4 and step 2 of section 16.8 pass without one.
+- `x3dh-initiate`: `contact_id` and the eight fields of the Bundle are those of
+  `check-bundle` (section 15.5), and the operation starts as `check-bundle` does. Then it
+  runs steps 3 to 6 of section 16.6 with `ephemeral_private_key` as the private key of
+  EK_A, in the place of the random bytes of step 2.
+- `x3dh-respond`: the key agreement for an initial message that matches no record.
+  `sender` is the `sender` of the Deliver. `identity_dh_key`, `identity_dh_signature`,
+  `ephemeral_key`, `signed_prekey_id` and `one_time_prekey_id` are the fields of the
+  initial header (section 16.7). `signed_prekey_private_key` and
+  `one_time_prekey_private_key` are the private keys that the responder holds under the
+  two ids; `one_time_prekey_private_key` is absent exactly when `one_time_prekey_id` is.
+  Steps 3 and 4 of section 16.8 are not part of the operation: the vector gives the keys
+  that the ids name, and the ids are recorded as fields of the header that nothing reads.
+- `identity_dh_string` and `signed_prekey_string` are the strings of sections 4.3 and 4.4
+  that the operation verifies. `dh1` to `dh4` are DH1 to DH4, each the 32 bytes of the
+  output; `dh4` is absent when the key agreement has no one-time prekey.
+  `input_key_material` is the input of the key derivation of section 16.4, 160 or 128
+  bytes. `sk` is SK, and `session_associated_data` is the 161 bytes of section 16.5.
+- A vector with the `error` ZERO_DH records the signed strings and no other intermediate:
+  the operation ends in step 4 of section 16.6 or in step 5 of section 16.8. In
+  `x3dh-initiate-one-time-prekey-of-small-order` the one-time prekey of the Bundle is the
+  u-coordinate 0, and DH4 is zero. In `x3dh-respond-ephemeral-key-of-small-order`
+  `ephemeral_key` is a point of order 8, and DH2, DH3 and DH4 are zero.
+- A vector of `x3dh-initiate` and the vector of `x3dh-respond` with the same name after
+  the operation are the two sides of one key agreement: `ephemeral_key` of the responder
+  is the public key of `ephemeral_private_key` of the initiator
+  [test: tests/crypto/test_x3dh_vectors.py::test_vectors_of_one_name_are_the_two_sides_of_one_key_agreement].
+  The pairs `with-a-one-time-prekey` and `without-a-one-time-prekey` have equal outputs.
+  The Bundle of the first is the one of `check-bundle-first-fetch`.
+- `replaced-one-time-prekey`: the Bundle reached the initiator with another
+  `one_time_prekey_key` under the same id. The responder computes DH4 with the private key
+  it holds under that id: the two vectors have the same session associated data and
+  another `sk`.
+- `unknown-key-share`: the contact of the initiator is a third identity, whose Bundle
+  carries the X25519 keys of the responder under its own signatures. The two vectors have
+  the same `sk`. Bytes 65 to 96 of the session associated data are the identity key of the
+  contact at the initiator and the responder's own at the responder.
+- `x3dh-respond-ephemeral-key-top-bit-set` and `x3dh-respond-ephemeral-key-inverse` are
+  `x3dh-respond-with-a-one-time-prekey` with other bytes in `ephemeral_key`: the most
+  significant bit of the last byte set, and the u-coordinate replaced by its inverse
+  modulo 2^255 - 19. Both have the intermediates and the `sk` of that vector. Bytes 129
+  to 160 of their session associated data are the bytes received
+  [test: tests/crypto/test_x3dh_vectors.py::test_outputs_of_the_two_sides_differ_as_section_24_3_states].
+
 ## 16. Key agreement
 
 ### 16.1 What it is
@@ -1675,10 +1742,12 @@ Terms of part 2:
   `private_bytes_raw` and `public_key().public_bytes_raw()` in the Python package
   cryptography; `Curve25519.KeyAgreement.PrivateKey(rawRepresentation:)`,
   `rawRepresentation` and `publicKey.rawRepresentation` in CryptoKit. A test vector
-  carries a private key as these 32 bytes [pending: task 10].
+  carries a private key as these 32 bytes
+  [test: tests/crypto/test_x3dh_recompute.py::test_every_recorded_value_recomputes_without_the_core].
 - A public key is stored, compared and put into a byte layout as the 32 bytes that were
   generated or received. No implementation decodes a public key and encodes it again
-  [pending: task 10] [pending: task 11].
+  [test: tests/crypto/test_x3dh.py::test_public_keys_enter_the_associated_data_as_the_bytes_received]
+  [pending: task 11].
 - An identity makes the key pair of IKdh together with its Ed25519 key pair and signs the
   string of section 4.3 for it. Any signature that verifies serves: the initial header and
   the bundle of one identity can carry different signature bytes (section 4.1, rule 5).
@@ -1691,7 +1760,9 @@ package cryptography and `sharedSecretFromKeyAgreement(with:)` in CryptoKit, who
 is read as its raw bytes.
 
 An output of 32 zero bytes is refused: the operation that computed it ends with the result
-ZERO_DH and uses the output for nothing [pending: task 10].
+ZERO_DH and uses the output for nothing
+[test: tests/crypto/test_x3dh.py::test_dh_refuses_exactly_the_keys_of_small_order]
+[test: tests/crypto/test_x3dh.py::test_zero_output_the_library_returns_is_refused].
 
 - This is a rule of this text because the two libraries differ. The Python package
   cryptography raises an error for such an output. CryptoKit returns it, by a comment in
@@ -1705,7 +1776,8 @@ ZERO_DH and uses the output for nothing [pending: task 10].
 
 ### 16.4 The key derivation
 
-SK is one call of HKDF (RFC 5869) [pending: task 10]:
+SK is one call of HKDF (RFC 5869)
+[test: tests/crypto/test_x3dh_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Parameter          | Value                                                                    |
 |--------------------|--------------------------------------------------------------------------|
@@ -1723,7 +1795,8 @@ object of the Python package serves one call.
 
 ### 16.5 The session associated data
 
-Both sides build the same 161 bytes, the keys of the initiator first [pending: task 10]:
+Both sides build the same 161 bytes, the keys of the initiator first
+[test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data]:
 
 | Offset | Length | Field   | Value                                                  |
 |--------|--------|---------|--------------------------------------------------------|
@@ -1744,7 +1817,8 @@ else. With both Ed25519 keys in the associated data, a message decrypts only whe
 sides mean the same two identities. This is the case of an unknown key share: C publishes
 the X25519 keys of B under its own signature, A starts a session with C, and the message
 that reaches B does not decrypt there, because A put IKsig_C where B puts IKsig_B
-[pending: task 10] [pending: task 13].
+[test: tests/crypto/test_x3dh.py::test_unknown_key_share_gives_the_same_secret_under_other_associated_data]
+[pending: task 13].
 
 The ephemeral key stands in the associated data as bytes, because the Diffie-Hellman
 values do not fix its bytes. The X25519 function gives one output for more than one
@@ -1752,14 +1826,19 @@ values do not fix its bytes. The X25519 function gives one output for more than 
 section 5), and for a clamped private key a point and its sum with a point of small
 order, which is another public key, give one output. Other bytes of either kind in
 `ephemeral_key` therefore give the responder the same SK. They give another session
-associated data, so no message decrypts under it [pending: task 10] [pending: task 13].
+associated data, so no message decrypts under it
+[test: tests/crypto/test_x3dh.py::test_other_ephemeral_key_bytes_give_the_same_secret_under_other_associated_data]
+[pending: task 13].
 The record of an accepted initial message is found by these bytes and rests on that
 (section 20.4).
 
 ### 16.6 The initiator
 
 The initiator runs these steps in this order, for a contact and with a Bundle that it
-fetched for this key agreement [pending: task 10]. One Bundle starts at most one session.
+fetched for this key agreement
+[test: tests/crypto/test_x3dh.py::test_bundle_that_fails_a_check_reaches_no_diffie_hellman_computation]
+[test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data].
+One Bundle starts at most one session.
 
 1. It runs the four checks of section 5.4 on the Bundle and stops at the first that
    fails. No later step runs for a bundle that failed a check.
@@ -1782,11 +1861,14 @@ fetched for this key agreement [pending: task 10]. One Bundle starts at most one
 6. It builds the session associated data (section 16.5) from its own two identity keys,
    from `identity` and `identity_dh_key` of the Bundle and from the public key of EK_A.
 7. It deletes the private key of EK_A, the outputs DH1 to DH4 and the input of the key
-   derivation.
+   derivation: the key agreement of the core hands back SK and the session associated data
+   and nothing else
+   [test: tests/crypto/test_x3dh.py::test_key_agreement_hands_back_the_secret_and_the_associated_data_only].
 8. It initialises the ratchet as initiator with SK, SPK_B and 32 random bytes
    (section 17.3) and deletes SK. In one transaction it stores the session with its
    initial header (section 16.7) and, when the contact has no pinned X25519 identity
-   key, `identity_dh_key` of the Bundle as its pin.
+   key, `identity_dh_key` of the Bundle as its pin
+   [pending: task 11] [pending: task 12].
 
 A key agreement that ends in a failure stores nothing, a pin included, and the client
 reports the result (section 20.3). A session without a one-time prekey is a session like
@@ -1884,7 +1966,11 @@ all of them. The table is about a Bundle and about the initial header of a messa
 matches no record (section 20.4). Each change ends in one of three ways: the session
 starts as it does without the change, the session does not start, or the session starts
 without a one-time prekey. None ends in a session with someone else, and none in a
-message that decrypts to another plaintext [pending: task 10] [pending: task 12]:
+message that decrypts to another plaintext
+[test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
+[test: tests/crypto/test_x3dh.py::test_one_time_prekey_id_taken_out_or_put_in_gives_another_secret]
+[test: tests/crypto/test_x3dh.py::test_other_ephemeral_key_bytes_give_the_same_secret_under_other_associated_data]
+[pending: task 12]:
 
 | Change                                                              | What follows                                                                                   |
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
@@ -2918,7 +3004,9 @@ Section 15 holds the schema, and every rule of it applies: every private key, ep
 key, nonce and message id is an input, and replaying a vector draws no random byte. The
 names of the operations and the keys of their objects enter section 15 with the files.
 
-A vector of the key agreement records [pending: task 10]:
+A vector of the key agreement records
+[test: tests/crypto/test_x3dh_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_x3dh_recompute.py::test_every_recorded_value_recomputes_without_the_core]:
 
 | Object          | Values                                                                                   |
 |-----------------|------------------------------------------------------------------------------------------|
