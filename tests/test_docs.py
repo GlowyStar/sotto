@@ -16,11 +16,12 @@ CITING_DOCUMENTS = [*DOCS, ROOT / "README.md"]
 
 OPEN_POINT = re.compile(r"(?<!`)OPEN:")
 TEST_CITATION = re.compile(r"\[test: (tests/(?:\w+/)*\w+\.py)::(test_\w+)\]")
-PENDING_CITATION = re.compile(r"\[pending: task 1[2-4]\]")
+PENDING_CITATION = re.compile(r"\[pending: task 1[34]\]")
 CITATION_PART = re.compile(r"\[\w+:|\btests/|::|\bpending\b", re.IGNORECASE)
 
 PROTOCOL = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
 SCHEMA = ROOT / "proto" / "sotto.proto"
+PEER_PREAMBLE = 'syntax = "proto3";\n\npackage sotto;\n\n'
 SCHEMA_LISTING = re.compile(r"^```proto\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 CLOSE_CODE_ROW = re.compile(r"^\| (\d{4}) \| (\w+) +\|", re.MULTILINE)
 LIMITS_TABLE = re.compile(r"^### 12\.1 The table\n(.*?)^### ", re.DOTALL | re.MULTILINE)
@@ -110,10 +111,12 @@ def compile_schema(source: str, folder: Path) -> FileDescriptorProto:
 
 
 def test_schema_file_is_a_part_of_the_listing_in_the_spec(tmp_path: Path) -> None:
-    listing = SCHEMA_LISTING.search(PROTOCOL)
-    assert listing is not None
-    listed = compile_schema(listing.group(1), tmp_path / "listed")
+    frames_listing, peer_listing = SCHEMA_LISTING.findall(PROTOCOL)
+    listed = compile_schema(frames_listing, tmp_path / "listed")
+    peer_listed = compile_schema(PEER_PREAMBLE + peer_listing, tmp_path / "peer_listed")
     in_file = compile_schema(SCHEMA.read_text(encoding="utf-8"), tmp_path / "in_file")
+    peer_messages = {message.name: message for message in peer_listed.message_type}
+    assert peer_messages.keys() <= {message.name for message in in_file.message_type}
 
     assert (in_file.syntax, in_file.package) == (listed.syntax, listed.package)
     listed_enums = {enum.name: enum for enum in listed.enum_type}
@@ -121,6 +124,9 @@ def test_schema_file_is_a_part_of_the_listing_in_the_spec(tmp_path: Path) -> Non
         assert enum == listed_enums[enum.name]
     listed_messages = {message.name: message for message in listed.message_type}
     for message in in_file.message_type:
+        if message.name in peer_messages:
+            assert message == peer_messages[message.name]
+            continue
         listed_message = listed_messages[message.name]
         # Only an envelope grows: a frame enters its oneof with the handler of the frame.
         if message.oneof_decl:

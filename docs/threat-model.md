@@ -194,7 +194,8 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   reaches the responder starts and the other does not. When the relay takes the one-time
   prekey away, the result is a session without one (protocol, section 16.9)
   [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
-  [pending: task 12].
+  [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+  [test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session].
 - Report a wrong count of stored one-time prekeys, so that a client uploads none when it
   has to, or more than it has to. Whatever the count says, a client holds at most 1000
   private keys of one-time prekeys (protocol, section 21.3) [pending: task 13].
@@ -216,7 +217,8 @@ What it cannot do:
   or accept another X25519 identity key for a contact whose key the client pinned, in a
   bundle
   [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one]
-  or in an initial header (protocol, section 16.8) [pending: task 12].
+  or in an initial header (protocol, section 16.8)
+  [test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing].
 - Turn a login into a prekey statement or the reverse: the three signed strings have
   distinct prefixes
   [test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
@@ -346,7 +348,8 @@ its id.
   leaves messages that fail and sessions that only a reset repairs (protocol,
   section 20.6). The user sees the failures; the protocol does not say why they happen.
 - An identity that is not a contact is no peer. Its messages are dropped before a byte of
-  them is parsed, shown nowhere and acked (protocol, section 20.3) [pending: task 12].
+  them is parsed, shown nowhere and acked (protocol, section 20.3)
+  [test: tests/client/test_session.py::test_stranger_is_acked_before_a_byte_is_parsed].
   Whoever knows an id can still fill the queue of that id at the relay ("Not
   protected").
 
@@ -360,7 +363,8 @@ or a program that runs as the user.
   private key, the state of every session and the text of every message that was sent
   and received (protocol, section 22.1). Whoever can read it has all of that.
 - The file modes are the whole protection: the directory is 0700, the file 0600, and the
-  client of this repository refuses to start on wider modes [pending: task 12]. That
+  client of this repository refuses to start on wider modes
+  [test: tests/client/test_client_store.py::test_start_is_refused_when_a_mode_gives_a_right_to_the_group_or_others]. That
   stops another account of the same machine. It does not stop the administrator of the
   machine, a program that runs as the user, a backup, or anyone with the disk.
 - A copy of the data directory clones the identity. Whoever holds the copy is the user
@@ -532,7 +536,8 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
 - The nonce of every message.
 - The length of a text, as a bucket: the plaintext is padded to a multiple of 256 bytes
   before it is sealed (protocol, section 19.6), so the relay learns the number of
-  256-byte blocks and nothing finer [pending: task 12]. A message with an initial header
+  256-byte blocks and nothing finer
+  [test: tests/client/test_envelope.py::test_padding_adds_the_mark_and_zero_bytes_up_to_the_next_block]. A message with an initial header
   is longer by that header.
 
 The header is not encrypted, and hiding it is not part of this protocol (protocol,
@@ -551,7 +556,8 @@ section 5.2).
   the relay read a message, because the secret of a session also rests on the signed
   keys (protocol, section 16.9)
   [test: tests/crypto/test_x3dh.py::test_replaced_one_time_prekey_gives_the_responder_another_secret]
-  [pending: task 12]. A session that
+  [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
+  [test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session]. A session that
   does not start can also be without the protection of its one-time prekey: the relay
   holds the private key of a key of its own, and a real key keeps its private key in the
   responder's store for as long as no initial message that names it is accepted
