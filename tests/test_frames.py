@@ -1,25 +1,41 @@
 import os
+from collections.abc import Callable
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from relay_harness import build_upload
 
-from sotto.proto.sotto_pb2 import ClientFrame, Login
-from sotto.relay.frames import MalformedFrameError, parse_client_frame
+from sotto.proto.sotto_pb2 import (
+    ClientFrame,
+    FetchBundle,
+    Login,
+    OneTimePrekey,
+    SignedPrekey,
+    UploadBundle,
+)
+from sotto.relay.frames import MalformedFrameError, ParsedFrame, parse_client_frame
 
 UNKNOWN_FIELD = b"\x7a\x03new"
 
-fields = st.binary(max_size=80)
-logins = st.builds(Login, identity_key=fields, client_nonce=fields, signature=fields)
-complete_logins = st.builds(
-    Login,
-    identity_key=st.binary(min_size=32, max_size=32),
-    client_nonce=st.binary(min_size=32, max_size=32),
-    signature=st.binary(min_size=64, max_size=64),
+fields = st.one_of(st.binary(max_size=80), st.binary(min_size=32, max_size=32))
+signatures = st.one_of(st.binary(max_size=80), st.binary(min_size=64, max_size=64))
+ids = st.integers(0, 2**32 - 1)
+logins = st.builds(Login, identity_key=fields, client_nonce=fields, signature=signatures)
+uploads = st.builds(
+    UploadBundle,
+    identity_dh_key=fields,
+    identity_dh_signature=signatures,
+    signed_prekey=st.none()
+    | st.builds(SignedPrekey, id=ids, key=fields, signature=signatures),
+    one_time_prekeys=st.lists(st.builds(OneTimePrekey, id=ids, key=fields), max_size=3),
 )
-serialized_frames = st.one_of(logins, complete_logins).map(
-    lambda login: ClientFrame(login=login).SerializeToString()
-)
+fetches = st.builds(FetchBundle, identity=fields)
+serialized_frames = st.one_of(
+    logins.map(lambda login: ClientFrame(login=login)),
+    uploads.map(lambda upload: ClientFrame(upload_bundle=upload)),
+    fetches.map(lambda fetch: ClientFrame(fetch_bundle=fetch)),
+).map(lambda frame: frame.SerializeToString())
 damaged_frames = st.tuples(serialized_frames, st.binary(max_size=8), st.integers(0, 200)).map(
     lambda parts: parts[0][: parts[2]] + parts[1] + parts[0][parts[2] :]
 )
@@ -32,12 +48,54 @@ def complete_login() -> Login:
     )
 
 
+def lengths_of(frame: ParsedFrame) -> list[int]:
+    """Returns the length of every field that a frame table gives a length."""
+    match frame:
+        case Login():
+            return [len(frame.identity_key), len(frame.client_nonce), len(frame.signature)]
+        case UploadBundle():
+            signed_prekey = frame.signed_prekey
+            return [
+                len(frame.identity_dh_key),
+                len(frame.identity_dh_signature),
+                len(signed_prekey.key),
+                len(signed_prekey.signature),
+                *(len(prekey.key) for prekey in frame.one_time_prekeys),
+            ]
+        case FetchBundle():
+            return [len(frame.identity)]
+
+
 def test_complete_login_is_returned_with_its_fields() -> None:
     login = complete_login()
 
     parsed = parse_client_frame(ClientFrame(login=login).SerializeToString())
 
     assert parsed == login
+
+
+def test_complete_upload_is_returned_with_its_fields() -> None:
+    upload = build_upload(os.urandom(32), [0, 2**32 - 1])
+
+    parsed = parse_client_frame(ClientFrame(upload_bundle=upload).SerializeToString())
+
+    assert parsed == upload
+
+
+def test_upload_without_one_time_prekeys_is_complete() -> None:
+    upload = build_upload(os.urandom(32))
+
+    parsed = parse_client_frame(ClientFrame(upload_bundle=upload).SerializeToString())
+
+    assert parsed == upload
+
+
+def test_complete_fetch_is_returned_with_its_field() -> None:
+    fetch = FetchBundle(identity=os.urandom(32))
+
+    parsed = parse_client_frame(ClientFrame(fetch_bundle=fetch).SerializeToString())
+
+    assert parsed == fetch
 
 
 @pytest.mark.parametrize(
@@ -62,14 +120,87 @@ def test_login_with_a_field_of_another_length_is_malformed(field: str, length: i
         parse_client_frame(ClientFrame(login=login).SerializeToString())
 
 
+def the_upload(upload: UploadBundle) -> object:
+    return upload
+
+
+def the_signed_prekey(upload: UploadBundle) -> object:
+    return upload.signed_prekey
+
+
+def the_first_one_time_prekey(upload: UploadBundle) -> object:
+    return upload.one_time_prekeys[0]
+
+
+def the_last_one_time_prekey(upload: UploadBundle) -> object:
+    return upload.one_time_prekeys[-1]
+
+
+@pytest.mark.parametrize(
+    ("holder_of", "field", "length"),
+    [
+        (the_upload, "identity_dh_key", 0),
+        (the_upload, "identity_dh_key", 31),
+        (the_upload, "identity_dh_key", 33),
+        (the_upload, "identity_dh_signature", 0),
+        (the_upload, "identity_dh_signature", 63),
+        (the_upload, "identity_dh_signature", 65),
+        (the_signed_prekey, "key", 0),
+        (the_signed_prekey, "key", 31),
+        (the_signed_prekey, "key", 33),
+        (the_signed_prekey, "signature", 0),
+        (the_signed_prekey, "signature", 63),
+        (the_signed_prekey, "signature", 65),
+        (the_first_one_time_prekey, "key", 31),
+        (the_last_one_time_prekey, "key", 0),
+        (the_last_one_time_prekey, "key", 33),
+    ],
+)
+def test_upload_with_a_field_of_another_length_is_malformed(
+    holder_of: Callable[[UploadBundle], object], field: str, length: int
+) -> None:
+    upload = build_upload(os.urandom(32), [1, 2, 3])
+    setattr(holder_of(upload), field, os.urandom(length))
+
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(ClientFrame(upload_bundle=upload).SerializeToString())
+
+
+def test_upload_without_a_signed_prekey_is_malformed() -> None:
+    upload = build_upload(os.urandom(32))
+    upload.ClearField("signed_prekey")
+
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(ClientFrame(upload_bundle=upload).SerializeToString())
+
+
+@pytest.mark.parametrize("length", [0, 31, 33])
+def test_fetch_with_an_identity_of_another_length_is_malformed(length: int) -> None:
+    fetch = FetchBundle(identity=os.urandom(length))
+
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(ClientFrame(fetch_bundle=fetch).SerializeToString())
+
+
 @pytest.mark.parametrize(
     "message",
-    [b"", b"\xff", b"\x0a\x00", b"\x08\x05", b"\x12\x00", b"\x0a\x22\x0a\x20"],
+    [
+        b"",
+        b"\xff",
+        b"\x0a\x00",
+        b"\x08\x05",
+        b"\x12\x00",
+        b"\x1a\x00",
+        b"\x22\x00",
+        b"\x0a\x22\x0a\x20",
+    ],
     ids=[
         "empty",
         "no-protobuf",
         "login-without-fields",
         "login-as-a-number",
+        "upload-without-fields",
+        "fetch-without-fields",
         "member-of-a-later-schema",
         "cut-off",
     ],
@@ -87,6 +218,7 @@ def test_field_that_the_schema_does_not_have_is_ignored() -> None:
 
     parsed = parse_client_frame(frame.SerializeToString())
 
+    assert isinstance(parsed, Login)
     assert parsed.identity_key == login.identity_key
     assert parsed.client_nonce == login.client_nonce
     assert parsed.signature == login.signature
@@ -95,9 +227,12 @@ def test_field_that_the_schema_does_not_have_is_ignored() -> None:
 @given(messages)
 def test_any_bytes_give_a_complete_frame_or_the_protocol_error(message: bytes) -> None:
     try:
-        login = parse_client_frame(message)
+        frame = parse_client_frame(message)
     except MalformedFrameError:
         return
 
-    lengths = (len(login.identity_key), len(login.client_nonce), len(login.signature))
-    assert lengths == (32, 32, 64)
+    expected = {Login: [32, 32, 64], FetchBundle: [32]}.get(type(frame))
+    if isinstance(frame, UploadBundle):
+        assert frame.HasField("signed_prekey")
+        expected = [32, 64, 32, 64, *[32] * len(frame.one_time_prekeys)]
+    assert lengths_of(frame) == expected

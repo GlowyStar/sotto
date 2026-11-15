@@ -2,19 +2,23 @@ import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import AsyncExitStack
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from hypothesis import settings
+from hypothesis import settings as hypothesis_settings
 from relay_harness import OpenClient, RawClient, Wire, find_leaks, receive_frame, running_relay
 from websockets.asyncio.client import connect
 
 from sotto.relay.settings import Settings
+from sotto.relay.storage import Storage
 
 # The profile that hypothesis picks by itself in CI is derandomized, so every run there
 # would replay the same examples.
-settings.register_profile("sotto", derandomize=False, print_blob=True, deadline=None)
-settings.load_profile("sotto")
+hypothesis_settings.register_profile(
+    "sotto", derandomize=False, print_blob=True, deadline=None
+)
+hypothesis_settings.load_profile("sotto")
 
 
 @pytest.fixture(autouse=True)
@@ -36,13 +40,27 @@ def wire(caplog: pytest.LogCaptureFixture) -> Iterator[Wire]:
 
 
 @pytest.fixture
-async def relay_url() -> AsyncIterator[str]:
+def settings(tmp_path: Path) -> Settings:
+    """The settings of a relay in the process: a free port and a database of the test."""
+    return Settings(database=tmp_path / "relay.db", port=0)
+
+
+@pytest.fixture
+def storage(settings: Settings) -> Iterator[Storage]:
+    """The storage of a test that calls it or a handler without a relay."""
+    storage = Storage(settings.database, max_pages=settings.max_pages)
+    yield storage
+    storage.close()
+
+
+@pytest.fixture
+async def relay_url(settings: Settings) -> AsyncIterator[str]:
     stand_url = os.environ.get("RELAY_URL")
     if stand_url is not None:
         yield stand_url
         return
 
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         yield url
 
 

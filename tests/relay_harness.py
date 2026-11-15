@@ -5,7 +5,7 @@ import base64
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 
@@ -13,8 +13,25 @@ from google.protobuf import text_encoding
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 
-from sotto.crypto.identity import NONCE_LENGTH, derive_identity_key, sign_login
-from sotto.proto.sotto_pb2 import ClientFrame, Hello, Login, ServerFrame
+from sotto.crypto.identity import (
+    KEY_LENGTH,
+    NONCE_LENGTH,
+    derive_identity_key,
+    derive_x25519_public_key,
+    sign_identity_dh_key,
+    sign_login,
+    sign_signed_prekey,
+)
+from sotto.proto.sotto_pb2 import (
+    ClientFrame,
+    FetchBundle,
+    Hello,
+    Login,
+    OneTimePrekey,
+    ServerFrame,
+    SignedPrekey,
+    UploadBundle,
+)
 from sotto.relay.logs import JsonFormatter
 from sotto.relay.server import serve_relay
 from sotto.relay.settings import Settings
@@ -29,6 +46,29 @@ async def running_relay(settings: Settings) -> AsyncIterator[str]:
     async with serve_relay(settings) as server:
         port = server.sockets[0].getsockname()[1]
         yield f"ws://127.0.0.1:{port}"
+
+
+def make_public_key() -> bytes:
+    return derive_x25519_public_key(os.urandom(KEY_LENGTH))
+
+
+def build_upload(seed: bytes, one_time_prekey_ids: Sequence[int] = ()) -> UploadBundle:
+    """Builds a bundle of new keys that the identity of `seed` signed; a test spoils it."""
+    identity_dh_key = make_public_key()
+    signed_prekey = make_public_key()
+    return UploadBundle(
+        identity_dh_key=identity_dh_key,
+        identity_dh_signature=sign_identity_dh_key(seed, identity_dh_key=identity_dh_key),
+        signed_prekey=SignedPrekey(
+            id=int.from_bytes(os.urandom(4)),
+            key=signed_prekey,
+            signature=sign_signed_prekey(seed, signed_prekey=signed_prekey),
+        ),
+        one_time_prekeys=[
+            OneTimePrekey(id=prekey_id, key=make_public_key())
+            for prekey_id in one_time_prekey_ids
+        ],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +128,14 @@ class RawClient:
 
     async def log_in(self, seed: bytes) -> ServerFrame:
         await self.send(self.login(seed))
+        return await self.receive()
+
+    async def ask(self, frame: UploadBundle | FetchBundle) -> ServerFrame:
+        """Sends a frame that has an answer and returns the next frame of the relay."""
+        if isinstance(frame, UploadBundle):
+            await self.send(ClientFrame(upload_bundle=frame))
+        else:
+            await self.send(ClientFrame(fetch_bundle=frame))
         return await self.receive()
 
     async def frames_until_close(self) -> tuple[list[ServerFrame], int | None]:

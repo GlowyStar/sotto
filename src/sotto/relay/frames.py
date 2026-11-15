@@ -3,16 +3,18 @@
 from google.protobuf.message import DecodeError
 
 from sotto.crypto.identity import KEY_LENGTH, NONCE_LENGTH, SIGNATURE_LENGTH
-from sotto.proto.sotto_pb2 import ClientFrame, Login
+from sotto.proto.sotto_pb2 import ClientFrame, FetchBundle, Login, UploadBundle
 
 MAX_FRAME_BYTES = 65536
+
+type ParsedFrame = Login | UploadBundle | FetchBundle
 
 
 class MalformedFrameError(Exception):
     """A binary message is a malformed frame by section 7.3."""
 
 
-def parse_client_frame(message: bytes) -> Login:
+def parse_client_frame(message: bytes) -> ParsedFrame:
     """Returns the frame that a binary message holds, complete by the table of the frame.
 
     Raises:
@@ -24,14 +26,37 @@ def parse_client_frame(message: bytes) -> Login:
     except DecodeError as error:
         raise MalformedFrameError("the message is not a ClientFrame") from error
 
-    if envelope.WhichOneof("frame") != "login":
-        raise MalformedFrameError("no frame of the schema is set")
+    match envelope.WhichOneof("frame"):
+        case "login":
+            _check_login(envelope.login)
+            return envelope.login
+        case "upload_bundle":
+            _check_upload_bundle(envelope.upload_bundle)
+            return envelope.upload_bundle
+        case "fetch_bundle":
+            _require_length("identity", envelope.fetch_bundle.identity, KEY_LENGTH)
+            return envelope.fetch_bundle
+        case _:
+            raise MalformedFrameError("no frame of the schema is set")
 
-    login = envelope.login
+
+def _check_login(login: Login) -> None:
     _require_length("identity_key", login.identity_key, KEY_LENGTH)
     _require_length("client_nonce", login.client_nonce, NONCE_LENGTH)
     _require_length("signature", login.signature, SIGNATURE_LENGTH)
-    return login
+
+
+def _check_upload_bundle(upload: UploadBundle) -> None:
+    _require_length("identity_dh_key", upload.identity_dh_key, KEY_LENGTH)
+    _require_length("identity_dh_signature", upload.identity_dh_signature, SIGNATURE_LENGTH)
+
+    # An absent signed prekey reads as one with empty fields.
+    signed_prekey = upload.signed_prekey
+    _require_length("signed_prekey.key", signed_prekey.key, KEY_LENGTH)
+    _require_length("signed_prekey.signature", signed_prekey.signature, SIGNATURE_LENGTH)
+
+    for prekey in upload.one_time_prekeys:
+        _require_length("one_time_prekeys[].key", prekey.key, KEY_LENGTH)
 
 
 def _require_length(field: str, value: bytes, length: int) -> None:

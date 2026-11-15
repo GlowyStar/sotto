@@ -5,37 +5,43 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import cast
 from urllib.parse import urlsplit
 
 import pytest
-from relay_harness import OpenClient, Wire, running_relay
+from relay_harness import OpenClient, Wire, build_upload, running_relay
 from websockets.asyncio.server import ServerConnection
 
+from sotto.crypto.identity import derive_identity_key
+from sotto.proto.sotto_pb2 import ClientFrame, Error, ErrorCode, FetchBundle, ServerFrame
 from sotto.relay import server
 from sotto.relay.logs import JsonFormatter
 from sotto.relay.server import CloseCode, Relay
 from sotto.relay.settings import Settings
+from sotto.relay.storage import Storage
 
 # Sent by the WebSocket library when the handler of a connection raises.
 INTERNAL_ERROR = 1011
 
 
-async def test_silence_after_the_hello_closes_with_3008(open_client: OpenClient) -> None:
-    async with running_relay(Settings(port=0, login_deadline_seconds=0.2)) as url:
+async def test_silence_after_the_hello_closes_with_3008(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    async with running_relay(replace(settings, login_deadline_seconds=0.2)) as url:
         client = await open_client(url)
 
         assert await client.frames_until_close() == ([], CloseCode.LOGIN_TIMEOUT)
 
 
 async def test_half_a_message_leaves_the_login_deadline_running(
-    open_client: OpenClient,
+    settings: Settings, open_client: OpenClient
 ) -> None:
     async def first_fragment_of_many() -> AsyncIterator[bytes]:
         yield os.urandom(16)
         await asyncio.Event().wait()
 
-    async with running_relay(Settings(port=0, login_deadline_seconds=0.2)) as url:
+    async with running_relay(replace(settings, login_deadline_seconds=0.2)) as url:
         client = await open_client(url)
         sending = asyncio.create_task(client.websocket.send(first_fragment_of_many()))
         try:
@@ -45,9 +51,9 @@ async def test_half_a_message_leaves_the_login_deadline_running(
 
 
 async def test_login_is_verified_under_the_name_in_the_settings(
-    open_client: OpenClient,
+    settings: Settings, open_client: OpenClient
 ) -> None:
-    async with running_relay(Settings(port=0, name="relay.example.org")) as url:
+    async with running_relay(replace(settings, name="relay.example.org")) as url:
         signed_for_the_address = await open_client(url)
         await signed_for_the_address.send(signed_for_the_address.login(os.urandom(32)))
         refusal = await signed_for_the_address.frames_until_close()
@@ -60,8 +66,10 @@ async def test_login_is_verified_under_the_name_in_the_settings(
     assert answer.WhichOneof("frame") == "logged_in"
 
 
-async def test_shutdown_closes_every_connection_with_1001(open_client: OpenClient) -> None:
-    async with running_relay(Settings(port=0)) as url:
+async def test_shutdown_closes_every_connection_with_1001(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    async with running_relay(settings) as url:
         before_login = await open_client(url)
         after_login = await open_client(url)
         await after_login.log_in(os.urandom(32))
@@ -71,11 +79,11 @@ async def test_shutdown_closes_every_connection_with_1001(open_client: OpenClien
 
 
 async def test_frame_of_a_replaced_connection_is_not_handled(
-    open_client: OpenClient, caplog: pytest.LogCaptureFixture
+    settings: Settings, open_client: OpenClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     seed = os.urandom(32)
 
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         older = await open_client(url)
         await older.log_in(seed)
         # The close stays unread in the socket, so the client can still send a frame.
@@ -92,8 +100,33 @@ async def test_frame_of_a_replaced_connection_is_not_handled(
     assert "closing with 1003 TEXT_FRAME" not in caplog.messages
 
 
-async def test_handler_of_a_replaced_connection_reads_on_until_the_close() -> None:
-    relay = Relay(Settings())
+async def test_upload_of_a_replaced_connection_stores_nothing(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    seed = os.urandom(32)
+    identity = derive_identity_key(seed)
+
+    async with running_relay(settings) as url:
+        older = await open_client(url)
+        await older.log_in(seed)
+        # The close stays unread in the socket, so the client can still send a frame.
+        older.websocket.transport.pause_reading()
+        newer = await open_client(url)
+        await newer.log_in(seed)
+
+        await older.send(ClientFrame(upload_bundle=build_upload(seed, [1])))
+        older.websocket.transport.resume_reading()
+        closing = await older.frames_until_close()
+        lookup = await newer.ask(FetchBundle(identity=identity))
+
+    assert closing == ([], CloseCode.REPLACED)
+    assert lookup == ServerFrame(error=Error(code=ErrorCode.NOT_FOUND, identity=identity))
+
+
+async def test_handler_of_a_replaced_connection_reads_on_until_the_close(
+    settings: Settings, storage: Storage
+) -> None:
+    relay = Relay(settings, storage)
     identity_key = os.urandom(32)
     newer = cast(ServerConnection, object())
     frames_read = []
@@ -119,11 +152,11 @@ async def test_handler_of_a_replaced_connection_reads_on_until_the_close() -> No
 
 
 async def test_closed_connection_is_no_longer_the_live_one_of_its_identity(
-    open_client: OpenClient, caplog: pytest.LogCaptureFixture
+    settings: Settings, open_client: OpenClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     seed = os.urandom(32)
 
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         first = await open_client(url)
         await first.log_in(seed)
         await first.websocket.close()
@@ -135,9 +168,9 @@ async def test_closed_connection_is_no_longer_the_live_one_of_its_identity(
 
 
 async def test_client_that_leaves_is_no_failure_of_the_handler(
-    open_client: OpenClient, caplog: pytest.LogCaptureFixture
+    settings: Settings, open_client: OpenClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         leaving_before_login = await open_client(url)
         await leaving_before_login.websocket.close()
         leaving_after_login = await open_client(url)
@@ -150,14 +183,17 @@ async def test_client_that_leaves_is_no_failure_of_the_handler(
 
 
 async def test_failed_handler_closes_with_1011_and_logs_no_text_of_the_exception(
-    open_client: OpenClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    settings: Settings,
+    open_client: OpenClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     def fail_with_the_login_in_the_text(identity_key: bytes, **fields: bytes | str) -> None:
         raise KeyError(identity_key, fields)
 
     monkeypatch.setattr(server, "verify_login", fail_with_the_login_in_the_text)
 
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         client = await open_client(url)
         await client.send(client.login(os.urandom(32)))
         closing = await client.frames_until_close()
@@ -175,9 +211,9 @@ async def test_failed_handler_closes_with_1011_and_logs_no_text_of_the_exception
 
 
 async def test_log_lines_of_a_connection_carry_its_id(
-    open_client: OpenClient, caplog: pytest.LogCaptureFixture
+    settings: Settings, open_client: OpenClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         logged_in = await open_client(url)
         await logged_in.log_in(os.urandom(32))
         closed = await open_client(url)
@@ -196,11 +232,13 @@ async def test_log_lines_of_a_connection_carry_its_id(
     assert all(re.fullmatch(r"[0-9a-f]{32}", connection_id) for connection_id in ids)
 
 
-async def test_bytes_behind_a_plain_request_reach_no_log(wire: Wire) -> None:
+async def test_bytes_behind_a_plain_request_reach_no_log(
+    settings: Settings, wire: Wire
+) -> None:
     surplus = os.urandom(64)
     wire.messages.append(surplus)
 
-    async with running_relay(Settings(port=0)) as url:
+    async with running_relay(settings) as url:
         address = urlsplit(url)
         reader, writer = await asyncio.open_connection(address.hostname, address.port)
         writer.write(b"GET /healthz HTTP/1.1\r\nHost: relay\r\n\r\n" + surplus)
