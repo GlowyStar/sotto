@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 8 or 12 to 14, of the task of the project plan that brings it.
+  gives the number, 8, 13 or 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -1257,7 +1257,8 @@ ended (section 11.1).
 - When the relay does not hold the message, because the recipient acked it or it expired,
   the relay cannot know the repeat. It stores the message again and delivers it again
   [test: tests/test_messages.py::test_send_repeated_after_the_ack_is_a_new_message]. The recipient's client discards the second copy by the pair (sender,
-  message id) and acks it (section 20.2) [pending: task 12].
+  message id) and acks it (section 20.2)
+  [test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks].
 
 This is the case of a Send repeated after a lost Stored.
 
@@ -1297,7 +1298,8 @@ way when the recipient of the first message acked it (threat model, "Not protect
 
 Delivery is at least once. A client receives a message more than once after a lost Ack, a
 replaced connection or a repeated Send, and discards the copies by the pair (sender,
-message id) (section 20.2) [pending: task 12].
+message id) (section 20.2)
+[test: tests/client/test_session.py::test_envelope_delivered_twice_gives_one_text_and_two_acks].
 
 ### 10.5 Ack
 
@@ -1445,7 +1447,11 @@ A check that ends in one of these names hands back nothing else: the decoder ret
 bytes
 [test: tests/crypto/test_identity_vectors.py::test_negative_vectors_raise_their_named_error].
 A client that gets one of the first three reports it and uses neither the id nor the
-bundle [pending: task 12]. Section 24.2 names the local results of the end-to-end protocol.
+bundle
+[test: tests/client/test_session.py::test_invalid_id_adds_no_contact]
+[test: tests/client/test_session.py::test_bundle_of_another_identity_is_refused_before_any_diffie_hellman]
+[test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]
+[pending: task 14]. Section 24.2 names the local results of the end-to-end protocol.
 
 ## 12. Limits
 
@@ -2535,7 +2541,7 @@ The payload of a Send and of a Deliver (sections 7.12 and 7.14) is one serialize
 proto3 syntax, in the schema file of the relay protocol, `proto/sotto.proto`, package
 `sotto`: one file holds every message of this protocol, and the macOS client takes one
 file. They enter the file with the pull request that implements the session
-[test: tests/client/test_peer_schema.py::test_peer_messages_of_the_schema_file_are_those_of_section_19_1].
+[test: tests/test_docs.py::test_schema_file_is_a_part_of_the_listing_in_the_spec].
 
 ```proto
 // The payload of a Send and of a Deliver: one PeerMessage.

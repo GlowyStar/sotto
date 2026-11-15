@@ -13,6 +13,7 @@ from sotto.crypto import x3dh
 from sotto.crypto.identity import (
     BadBundleError,
     IdentityKeyMismatchError,
+    InvalidIdError,
     OneTimePrekey,
     SignedPrekey,
     derive_x25519_public_key,
@@ -232,6 +233,14 @@ def test_text_to_a_stranger_is_refused(alice: Client, clients: Clients) -> None:
     carol = clients.open("carol")
     with pytest.raises(session.NotAContactError):
         alice.send_text(carol.identity_key, "hello")
+
+
+def test_invalid_id_adds_no_contact(alice: Client) -> None:
+    store_before = rows(alice.store)
+
+    with pytest.raises(InvalidIdError):
+        alice.add_contact("0" * 63)
+    assert rows(alice.store) == store_before
 
 
 def test_own_id_is_never_a_contact(alice: Client) -> None:
