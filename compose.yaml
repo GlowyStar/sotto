@@ -1,0 +1,11 @@
+services:
+  relay:
+    build: .
+    ports:
+      - "127.0.0.1:${RELAY_PORT:-8765}:8765"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
