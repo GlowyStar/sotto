@@ -90,3 +90,26 @@ message Error {
   bytes message_id = 2;
   bytes identity = 3;
 }
+
+// The payload of a Send and of a Deliver: one PeerMessage.
+message PeerMessage {
+  uint32 version = 1;
+  InitialHeader initial_header = 2;
+  bytes header = 3;
+  bytes ciphertext = 4;
+}
+
+message InitialHeader {
+  bytes identity_dh_key = 1;
+  bytes identity_dh_signature = 2;
+  bytes ephemeral_key = 3;
+  uint32 signed_prekey_id = 4;
+  optional uint32 one_time_prekey_id = 5;
+}
+
+// The plaintext of a message before padding.
+message Content {
+  oneof body {
+    string text = 1;
+  }
+}
