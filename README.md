@@ -8,11 +8,11 @@ opens one.
 
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
-- Nothing is encrypted so far. The repository holds the scaffold of the relay: a process
-  that answers a health check and accepts WebSocket connections on one path. It also
-  holds the identity core, which the relay does not use yet: user ids, the three signed
-  strings and the checks of a prekey bundle, with the shared test vectors in
-  `vectors/identity.json`.
+- Nothing is encrypted so far. The relay answers a health check and logs a connection in
+  by a signature over its own challenge; it stores and forwards nothing yet. The frames
+  are protobuf messages, whose schema is `proto/sotto.proto`. The identity core holds the
+  user ids, the three signed strings and the checks of a prekey bundle, with the shared
+  test vectors in `vectors/identity.json`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
   holds both parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
@@ -47,6 +47,11 @@ uv run sotto-relay
 The relay listens on `127.0.0.1:8765`; `RELAY_HOST` and `RELAY_PORT` change that. It speaks
 plain WebSocket, so TLS belongs to a reverse proxy in front of it.
 
+A client signs its login for the host it dialed, so `RELAY_NAME` has to be that host, in
+lowercase and without the port. The default is `127.0.0.1`: a client that dials
+`localhost` is refused. `RELAY_LOGIN_DEADLINE_SECONDS`, 10 by default, is the time a
+client has to log in.
+
 | Path          | Answer            |
 |---------------|-------------------|
 | `/ws`         | WebSocket upgrade |
@@ -66,6 +71,11 @@ uv run ruff format --check
 uv run mypy
 uv run pytest
 ```
+
+The Python module of the frames in `src/sotto/proto` is generated from
+`proto/sotto.proto` and committed. After a change of the schema run
+`scripts/generate_proto.sh` and commit what it wrote; CI runs the script and fails when
+the committed files differ.
 
 `scripts/stand.sh <project>` builds the image, starts the relay with Docker Compose under
 that project name and runs the tests marked `stand` against it. It then checks that the
