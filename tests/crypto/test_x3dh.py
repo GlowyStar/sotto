@@ -170,7 +170,7 @@ initiators = st.builds(
     Initiator,
     seed=keys,
     identity_dh_private_key=keys,
-    ephemeral_private_key=keys,  # gitleaks:allow
+    ephemeral_private_key=keys,
 )
 responders_with_a_one_time_prekey = st.builds(
     Responder,
