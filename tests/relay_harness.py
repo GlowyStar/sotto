@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from sotto.proto.sotto_pb2 import (
     Hello,
     Login,
     OneTimePrekey,
+    Send,
     ServerFrame,
     SignedPrekey,
     UploadBundle,
@@ -42,8 +44,10 @@ BASE64_WINDOW_BYTES = 9
 
 
 @asynccontextmanager
-async def running_relay(settings: Settings) -> AsyncIterator[str]:
-    async with serve_relay(settings) as server:
+async def running_relay(
+    settings: Settings, *, clock: Callable[[], float] = time.time
+) -> AsyncIterator[str]:
+    async with serve_relay(settings, clock=clock) as server:
         port = server.sockets[0].getsockname()[1]
         yield f"ws://127.0.0.1:{port}"
 
@@ -130,12 +134,15 @@ class RawClient:
         await self.send(self.login(seed))
         return await self.receive()
 
-    async def ask(self, frame: UploadBundle | FetchBundle) -> ServerFrame:
+    async def ask(self, frame: UploadBundle | FetchBundle | Send) -> ServerFrame:
         """Sends a frame that has an answer and returns the next frame of the relay."""
-        if isinstance(frame, UploadBundle):
-            await self.send(ClientFrame(upload_bundle=frame))
-        else:
-            await self.send(ClientFrame(fetch_bundle=frame))
+        match frame:
+            case UploadBundle():
+                await self.send(ClientFrame(upload_bundle=frame))
+            case FetchBundle():
+                await self.send(ClientFrame(fetch_bundle=frame))
+            case Send():
+                await self.send(ClientFrame(send=frame))
         return await self.receive()
 
     async def frames_until_close(self) -> tuple[list[ServerFrame], int | None]:

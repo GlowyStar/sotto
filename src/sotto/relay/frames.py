@@ -3,11 +3,14 @@
 from google.protobuf.message import DecodeError
 
 from sotto.crypto.identity import KEY_LENGTH, NONCE_LENGTH, SIGNATURE_LENGTH
-from sotto.proto.sotto_pb2 import ClientFrame, FetchBundle, Login, UploadBundle
+from sotto.proto.sotto_pb2 import Ack, ClientFrame, FetchBundle, Login, Send, UploadBundle
 
 MAX_FRAME_BYTES = 65536
+MESSAGE_ID_LENGTH = 16
+# What the envelope and the other fields of a Send or a Deliver add is at most 64 bytes.
+MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES - 64
 
-type ParsedFrame = Login | UploadBundle | FetchBundle
+type ParsedFrame = Login | UploadBundle | FetchBundle | Send | Ack
 
 
 class MalformedFrameError(Exception):
@@ -36,6 +39,12 @@ def parse_client_frame(message: bytes) -> ParsedFrame:
         case "fetch_bundle":
             _require_length("identity", envelope.fetch_bundle.identity, KEY_LENGTH)
             return envelope.fetch_bundle
+        case "send":
+            _check_send(envelope.send)
+            return envelope.send
+        case "ack":
+            _check_ack(envelope.ack)
+            return envelope.ack
         case _:
             raise MalformedFrameError("no frame of the schema is set")
 
@@ -57,6 +66,23 @@ def _check_upload_bundle(upload: UploadBundle) -> None:
 
     for prekey in upload.one_time_prekeys:
         _require_length("one_time_prekeys[].key", prekey.key, KEY_LENGTH)
+
+
+def _check_send(send: Send) -> None:
+    _require_length("message_id", send.message_id, MESSAGE_ID_LENGTH)
+    _require_length("recipient", send.recipient, KEY_LENGTH)
+    if not 1 <= len(send.payload) <= MAX_PAYLOAD_BYTES:
+        raise MalformedFrameError(
+            f"payload is {len(send.payload)} bytes long, not 1 to {MAX_PAYLOAD_BYTES}"
+        )
+
+
+def _check_ack(ack: Ack) -> None:
+    if not ack.messages:
+        raise MalformedFrameError("the ack names no message")
+    for message in ack.messages:
+        _require_length("messages[].message_id", message.message_id, MESSAGE_ID_LENGTH)
+        _require_length("messages[].sender", message.sender, KEY_LENGTH)
 
 
 def _require_length(field: str, value: bytes, length: int) -> None:
