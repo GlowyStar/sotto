@@ -389,7 +389,8 @@ An X25519 public key is the 32-byte string of RFC 7748 section 5. The rules for 
 these keys are in section 16
 [test: tests/crypto/test_x3dh.py::test_both_sides_derive_the_same_secret_and_associated_data];
 those for rotating the signed prekey and for choosing prekey ids are in section 21
-[pending: task 13].
+[test: tests/client/test_lifecycle.py::test_rotation_follows_the_age_of_the_newest_signed_prekey]
+[test: tests/client/test_lifecycle.py::test_prekey_ids_are_never_reused_and_stop_at_the_last_id].
 
 ### 5.2 The fields of a bundle
 
@@ -1977,7 +1978,7 @@ sides mean the same two identities. This is the case of an unknown key share: C 
 the X25519 keys of B under its own signature, A starts a session with C, and the message
 that reaches B does not decrypt there, because A put IKsig_C where B puts IKsig_B
 [test: tests/crypto/test_x3dh.py::test_unknown_key_share_gives_the_same_secret_under_other_associated_data]
-[pending: task 13].
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 
 The ephemeral key stands in the associated data as bytes, because the Diffie-Hellman
 values do not fix its bytes. The X25519 function gives one output for more than one
@@ -1987,7 +1988,7 @@ order, which is another public key, give one output. Other bytes of either kind 
 `ephemeral_key` therefore give the responder the same SK. They give another session
 associated data, so no message decrypts under it
 [test: tests/crypto/test_x3dh.py::test_other_ephemeral_key_bytes_give_the_same_secret_under_other_associated_data]
-[pending: task 13].
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 The record of an accepted initial message is found by these bytes and rests on that
 (section 20.4).
 
@@ -2145,7 +2146,8 @@ message that decrypts to another plaintext
 [test: tests/client/test_session.py::test_one_time_prekey_handed_to_two_initiators_starts_one_session]
 [test: tests/client/test_session.py::test_unknown_signed_prekey_id_is_refused]
 [test: tests/client/test_session.py::test_initial_header_that_fails_step_1_or_2_changes_nothing]
-[pending: task 13]:
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
+[test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period]:
 
 | Change                                                              | What follows                                                                                   |
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
@@ -2162,7 +2164,9 @@ message that decrypts to another plaintext
 
 A message that matches a record belongs to a session that the responder made before
 (section 20.4). Other rules hold for what the relay changes in the envelope of such a
-message [test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header] [pending: task 13]:
+message [test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header]
+[test: tests/client/test_hostile_relay.py::test_changed_prekey_ids_of_a_message_with_a_record_change_nothing]
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]:
 
 - Steps 1 and 2 of section 16.8 read `identity_dh_key` and its signature, and the
   record is found by `ephemeral_key`. The two prekey ids are not read: a change to them
@@ -2506,7 +2510,8 @@ Total length: 217 bytes
   length is written in front of a part.
 - The message id is the key by which a receiver discards copies (section 20.4). In the
   associated data it is authentic: a message whose id was changed on the way does not
-  decrypt [pending: task 13].
+  decrypt
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - The caller of the ratchet passes the first 177 bytes with every call, and the ratchet
   adds the header
   [test: tests/crypto/test_ratchet_vectors.py::test_associated_data_is_the_session_data_the_message_id_and_the_header]
@@ -2727,7 +2732,8 @@ For every contact:
 A session enters the list at its head, whether the client made it as initiator or as
 responder. A session on which a message decrypts moves to the head. When the list has more
 than 3 sessions, the last one is deleted: the oldest, that is, the session whose last move
-to the head lies furthest back [pending: task 13].
+to the head lies furthest back
+[test: tests/client/test_sessions.py::test_fourth_session_drops_the_oldest_and_reports_its_missing_messages].
 
 For all contacts together:
 
@@ -2755,7 +2761,9 @@ that state. The client does what the table says
 [test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header]
 [test: tests/client/test_session.py::test_message_without_initial_header_from_a_contact_without_session_is_no_session]
 [test: tests/client/test_session.py::test_arbitrary_payload_ends_in_a_named_result_and_an_unchanged_store]
-[pending: task 13].
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
+[test: tests/client/test_hostile_relay.py::test_arbitrary_bytes_from_any_sender_end_in_a_named_result]
+[test: tests/client/test_sessions.py::test_fourth_session_drops_the_oldest_and_reports_its_missing_messages].
 
 | Event                                                                                              | N        | C0                                             | C1                                             |
 |----------------------------------------------------------------------------------------------------|----------|------------------------------------------------|------------------------------------------------|
@@ -2776,7 +2784,8 @@ that state. The client does what the table says
 How the conditions are decided
 [test: tests/client/test_session.py::test_later_message_finds_its_session_with_and_without_the_initial_header]
 [test: tests/client/test_session.py::test_two_clients_exchange_texts_in_both_directions]
-[pending: task 13]:
+[test: tests/client/test_sessions.py::test_both_sides_starting_at_once_send_and_receive_in_both_directions]
+[test: tests/client/test_hostile_relay.py::test_reordered_messages_give_each_text_once]:
 
 - I4 to I8: a record is found by the `sender` and the bytes of `ephemeral_key`
   (section 20.4).
@@ -2807,7 +2816,8 @@ Rules that hold for every row
 [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey]
 [test: tests/client/test_session.py::test_message_without_a_text_saves_its_state_and_seen_id_and_logs_nothing]
 [test: tests/client/test_session.py::test_replayed_initial_message_gives_no_second_text]
-[pending: task 13]:
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
+[test: tests/client/test_hostile_relay.py::test_arbitrary_bytes_from_any_sender_end_in_a_named_result]:
 
 - Every Deliver is acked, whatever its action. A message that could not be read is gone
   for good: the relay deletes it on the Ack, and this protocol has no frame that asks a
@@ -2845,12 +2855,15 @@ Seen ids
   DECRYPT_FAILED.
 - A seen id is kept for SEEN_ID_SECONDS, 3196800 seconds: MESSAGE_TTL_SECONDS and one
   week, 37 days. The client deletes it at the first login after that time, and until it
-  is deleted it counts as seen [pending: task 13].
+  is deleted it counts as seen
+  [test: tests/client/test_lifecycle.py::test_seen_id_counts_until_it_is_forgotten_after_its_time].
 - A copy that arrives after the deletion is no duplicate for the table. The ratchet
   refuses it, because its message key is used: the copy is shown as a message that could
   not be read and is never read a second time.
 
-Records of accepted initial messages [pending: task 13]:
+Records of accepted initial messages
+[test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart]
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]:
 
 - ACCEPT-NEW saves a record: the pair (IKsig_A, EK_A), each as the 32 bytes received,
   the session it made, and the id of the signed prekey that the key agreement used.
@@ -2886,7 +2899,8 @@ sessions for the peer: the one it made as initiator and the one it made as respo
 The rule of section 20.1 settles which one is used, without a comparison of keys or
 clocks: a client sends on the session on which it last decrypted a message. This is the
 session rule of Sesame in its smallest form. Every message decrypts, because both
-sessions stay in the list [pending: task 13]. While messages of the two clients cross on
+sessions stay in the list
+[test: tests/client/test_sessions.py::test_both_sides_starting_at_once_send_and_receive_in_both_directions]. While messages of the two clients cross on
 the way, the two can send on different sessions. By the rule of section 20.1, once one
 client sends a message while none of the other is on the way, and the other receives it
 before it sends one, both send on the session of that message.
@@ -2903,24 +2917,29 @@ I8 or I10).
 - A reset (L2) is the way out of a session that does not decrypt on one side: the client
   makes a new session as initiator. The older sessions stay in the list behind it, so
   that messages on the way still decrypt. The next text goes out on the new session with
-  its initial header. Only a user starts a reset [pending: task 13].
+  its initial header. Only a user starts a reset
+  [test: tests/client/test_sessions.py::test_reset_keeps_the_older_sessions_and_sends_on_the_new_one]
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 - A gap (L3) is the one notice of a lost message. A skipped key stands for a message
   whose number the peer used and which did not arrive. When the cap or the purge of
   section 17.8 removes such a key, or a session that holds some is deleted from the
   list, the message can never be read, and the client reports the number
-  [pending: task 13]. Messages that were lost at the end of a conversation, with no later
+  [test: tests/client/test_sessions.py::test_purged_skipped_keys_are_reported_as_missing]
+  [test: tests/client/test_sessions.py::test_fourth_session_drops_the_oldest_and_reports_its_missing_messages]. Messages that were lost at the end of a conversation, with no later
   message behind them, leave no skipped key and no notice.
 - A client that removes a contact deletes the sessions of that contact. It keeps the
   seen ids and the records until their own rules delete them: an initial message that
   was accepted before the removal would otherwise be accepted again once the id is a
-  contact again [pending: task 13].
+  contact again
+  [test: tests/client/test_lifecycle.py::test_removed_contact_added_again_gets_no_replayed_initial_message].
 
 ## 21. The prekey lifecycle
 
 ### 21.1 The clock and the prekey ids
 
 - A client reads the time from one clock, in whole seconds. An implementation takes the
-  clock as an argument, so that a test can set it [pending: task 13].
+  clock as an argument, so that a test can set it
+  [test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period].
 - A client that does not run does nothing. The rules of this section take effect after
   a LoggedIn; the deletion of step 1 of section 21.2 also takes effect when the client
   starts.
@@ -2928,16 +2947,19 @@ I8 or I10).
   for one-time prekeys. The first key of a kind gets the id 1, every later key the id of
   the key before it plus 1. The counter is saved in the transaction that saves the key.
   An id is so never used for two keys of one kind, after a crash and after the deletion
-  of a key included [pending: task 13].
+  of a key included
+  [test: tests/client/test_lifecycle.py::test_prekey_ids_are_never_reused_and_stop_at_the_last_id].
 - An identity whose counter reached 2^32 - 1 makes no further key of that kind
-  [pending: task 13].
+  [test: tests/client/test_lifecycle.py::test_prekey_ids_are_never_reused_and_stop_at_the_last_id].
 - These are rules for the owner of the keys. A receiver accepts any id from 0 to
   2^32 - 1 (section 5.2).
 
 ### 21.2 The signed prekey
 
 The newest signed prekey of a client is the one it made last. After every LoggedIn the
-client does this, in this order [pending: task 13]:
+client does this, in this order
+[test: tests/client/test_lifecycle.py::test_rotation_follows_the_age_of_the_newest_signed_prekey]
+[test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period]:
 
 1. Deletion. For every signed prekey whose grace period is over, it deletes the private
    key and, in the same transaction, every record of section 20.4 that names its id and
@@ -2956,7 +2978,8 @@ dials the relay [pending: task 14]. A client that stays on one connection SHOULD
 three steps again when the newest signed prekey reaches the age of step 2 or a grace
 period ends.
 
-The grace period [pending: task 13]:
+The grace period
+[test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period]:
 
 - A signed prekey is replaced at the moment the client saves a newer one (step 2). The
   moment does not wait for the upload of the newer one or for its BundleStored.
@@ -2998,7 +3021,8 @@ The grace period [pending: task 13]:
   [test: tests/client/test_session.py::test_substituted_one_time_prekey_ends_in_a_decrypt_failure_and_keeps_the_prekey].
 - A client holds at most ONE_TIME_PREKEY_HELD_MAX, 1000, private keys of one-time
   prekeys. Before it makes a batch that would go over, it deletes the ones with the
-  lowest ids until the batch fits [pending: task 13]. The count is the word of the
+  lowest ids until the batch fits
+  [test: tests/client/test_lifecycle.py::test_held_one_time_prekeys_are_bounded_by_deleting_the_lowest_ids]. The count is the word of the
   relay, and fetches by anyone lower it (section 9.3): without this bound a client would
   make keys without end. An initial message that names a key deleted in this way gets
   UNKNOWN_ONE_TIME_PREKEY.
@@ -3012,21 +3036,23 @@ The grace period [pending: task 13]:
   21.2 and 21.3, before any Send of that login (section 23.3) [pending: task 14]. A
   rotation or a refill during the connection (sections 21.2 and 21.3) is a further
   UploadBundle.
-- A one-time prekey is uploaded once (section 9.1). The client marks the one-time
-  prekeys of an UploadBundle as uploaded in its store before the frame leaves, and never
-  puts a marked key into another frame. The keys of an UploadBundle that got no answer
-  stay marked [pending: task 13].
+- A one-time prekey is uploaded once (section 9.1). The client saves the one-time
+  prekeys of an UploadBundle in its store before the frame leaves and puts each of them
+  into that frame only: a later UploadBundle carries new keys. The keys of an
+  UploadBundle that got no answer are kept and go into no later frame
+  [test: tests/client/test_lifecycle.py::test_unanswered_upload_keeps_its_keys_and_a_refused_one_deletes_them].
 - An UploadBundle that the relay refused with an Error whose action is Back off is sent
   again unchanged on the same connection (section 11.1): the same frame, not a new one
   with the same keys in it.
 - An UploadBundle that waits in Back off, or that has no answer, when the connection
   ends is not sent again, and after the next LoggedIn the steps of sections 21.2 and
   21.3 build the UploadBundle of that login [pending: task 14]. The one-time prekeys of
-  a frame that has no answer stay marked: the relay can hold them. The relay holds none
+  a frame that has no answer are kept: the relay can hold them. The relay holds none
   of a frame that waits in Back off, because it refused the frame each time it was sent
   (section 11.2): the client deletes the private keys of the one-time prekeys of that
-  frame [pending: task 13]. Kept, they would count toward the bound of section 21.3,
-  and while the relay refuses every upload a client would in the end delete the keys
+  frame
+  [test: tests/client/test_lifecycle.py::test_unanswered_upload_keeps_its_keys_and_a_refused_one_deletes_them].
+  Kept, they would count toward the bound of section 21.3, and while the relay refuses every upload a client would in the end delete the keys
   that the relay still hands out.
 - The X25519 identity key and its signature are the same in every upload
   (section 5.3).
@@ -3040,7 +3066,9 @@ A client keeps, for one identity
 
 - the seed of the identity and the private key of its X25519 identity key;
 - the private keys of its signed prekeys and of its one-time prekeys with their ids, the
-  two counters of section 21.1 and the times that section 21.2 needs [pending: task 13];
+  two counters of section 21.1 and the times that section 21.2 needs
+  [test: tests/client/test_lifecycle.py::test_rotation_follows_the_age_of_the_newest_signed_prekey]
+  [test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart];
 - its contacts with their pinned X25519 identity keys;
 - the sessions of every contact, in their order (sections 17.2 and 20.1);
 - the seen ids and the records of accepted initial messages (section 20.4);
@@ -3086,7 +3114,9 @@ On send
 ### 22.3 Deletion
 
 A key or a state that this text calls deleted is, after the commit of the transaction
-that deletes it, in none of the files of the store [pending: task 13]. What lies below the
+that deletes it, in none of the files of the store
+[test: tests/client/test_lifecycle.py::test_replaced_chain_keys_are_in_no_file_of_the_store]
+[test: tests/client/test_lifecycle.py::test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_grace_period]. What lies below the
 files, the blocks that a filesystem keeps of an overwritten or removed file, is out of
 scope, as it is for the relay (section 13.3).
 

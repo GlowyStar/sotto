@@ -1,11 +1,13 @@
-"""The session rules of docs/protocol.md: sections 16.6 to 16.8, 20 and 22.2, no network.
+"""The session rules of docs/protocol.md: sections 16.6 to 16.8, 20, 21 and 22.2, no network.
 
 `Client.receive` turns a delivered message into what to show and an ack, and
 `Client.send_text` turns a text into the bytes of a Send. Both commit what they change
-before they answer.
+before they answer. The prekey lifecycle of section 21 is a set of methods that the network
+client calls at a start and after a LoggedIn; every one reads the time from one clock.
 """
 
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -18,7 +20,7 @@ from sotto.client.envelope import (
     encode_text,
     parse_envelope,
 )
-from sotto.client.store import Identity, OutboxRow, Store, StoredSession
+from sotto.client.store import Identity, OutboxRow, Store, StoredSession, StoredSignedPrekey
 from sotto.crypto import ratchet, x3dh
 from sotto.crypto.identity import (
     KEY_LENGTH,
@@ -40,8 +42,15 @@ from sotto.crypto.x3dh import BadInitialHeaderError
 from sotto.proto.sotto_pb2 import InitialHeader, PeerMessage
 
 MESSAGE_ID_LENGTH = 16
+SEEN_ID_SECONDS = 3196800
+SIGNED_PREKEY_ROTATION_SECONDS = 604800
+SIGNED_PREKEY_GRACE_SECONDS = 3196800
+ONE_TIME_PREKEY_REFILL_BELOW = 50
+ONE_TIME_PREKEY_CAP = 100
+ONE_TIME_PREKEY_HELD_MAX = 1000
 
 type RandomBytes = Callable[[int], bytes]
+type Clock = Callable[[], float]
 
 
 class NotAContactError(CryptoError):
@@ -83,11 +92,16 @@ class Delivered:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Received:
-    """What a Deliver gives: a text to show, or the named result of section 24.2."""
+    """What a Deliver gives: a text to show, or the named result of section 24.2.
+
+    `missing` is the GAP of section 20.3: the messages of the sender that can never be read,
+    counted by the skipped keys that this message removed without use.
+    """
 
     ack: bool
     text: str | None
     result: str | None
+    missing: int = 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -115,11 +129,19 @@ class Client:
     Args:
         store: The store of the identity; an empty one gets a new identity.
         random_bytes: The one source of random bytes, called with the number it needs.
+        clock: The one clock, read in whole seconds (section 21.1).
     """
 
-    def __init__(self, store: Store, *, random_bytes: RandomBytes = secrets.token_bytes):
+    def __init__(
+        self,
+        store: Store,
+        *,
+        random_bytes: RandomBytes = secrets.token_bytes,
+        clock: Clock = time.time,
+    ):
         self.store = store
         self.random_bytes = random_bytes
+        self.clock = clock
         identity = store.identity()
         if identity is None:
             identity = Identity(
@@ -131,33 +153,71 @@ class Client:
         self.identity_key = derive_identity_key(identity.seed)
         self.identity_dh_key = derive_x25519_public_key(identity.identity_dh_private_key)
 
-    def make_prekeys(self, one_time_count: int) -> PrekeyUpload:
-        """Makes a signed prekey and `one_time_count` one-time prekeys and saves them."""
-        signed_private_key = self.random_bytes(KEY_LENGTH)
-        one_time_private_keys = [self.random_bytes(KEY_LENGTH) for _ in range(one_time_count)]
-        with self.store.transaction():
-            signed_id = self.store.add_signed_prekey(signed_private_key)
-            one_time_ids = [
-                self.store.add_one_time_prekey(private_key)
-                for private_key in one_time_private_keys
-            ]
+    def now(self) -> int:
+        return int(self.clock())
 
-        signed_key = derive_x25519_public_key(signed_private_key)
-        signed_prekey = SignedPrekey(
-            id=signed_id,
-            key=signed_key,
-            signature=sign_signed_prekey(self._identity.seed, signed_prekey=signed_key),
-        )
-        one_time_prekeys = tuple(
-            OneTimePrekey(id=prekey_id, key=derive_x25519_public_key(private_key))
-            for prekey_id, private_key in zip(one_time_ids, one_time_private_keys, strict=True)
-        )
-        return PrekeyUpload(
-            identity_dh_key=self.identity_dh_key,
-            identity_dh_signature=self._identity_dh_signature(),
-            signed_prekey=signed_prekey,
-            one_time_prekeys=one_time_prekeys,
-        )
+    def make_prekeys(self, one_time_count: int) -> PrekeyUpload:
+        """Makes a new signed prekey and `one_time_count` one-time prekeys and saves them."""
+        now = self.now()
+        with self.store.transaction():
+            self.store.add_signed_prekey(self.random_bytes(KEY_LENGTH), made_at=now)
+            one_time_prekeys = self._add_one_time_prekeys(one_time_count)
+        return self._upload(self._newest_signed_prekey(), one_time_prekeys)
+
+    def delete_expired_prekeys(self) -> None:
+        """Step 1 of section 21.2, after every LoggedIn and at every start before a dial."""
+        replaced_at_or_before = self.now() - SIGNED_PREKEY_GRACE_SECONDS
+        with self.store.transaction():
+            self.store.delete_signed_prekeys(replaced_at_or_before=replaced_at_or_before)
+
+    def prepare_upload(self, one_time_prekey_count: int) -> PrekeyUpload | None:
+        """Steps 1 and 2 of section 21.2 and the refill of section 21.3, after a LoggedIn.
+
+        Args:
+            one_time_prekey_count: The count of the LoggedIn, the word of the relay.
+
+        Returns:
+            The one UploadBundle of the login, every key of it saved first, or None when
+            the relay confirmed the newest signed prekey and no one-time prekey was made.
+            A one-time prekey is made for one frame and put into no other (section 21.4).
+        """
+        self.delete_expired_prekeys()
+        now = self.now()
+        refill = 0
+        if one_time_prekey_count < ONE_TIME_PREKEY_REFILL_BELOW:
+            refill = ONE_TIME_PREKEY_CAP - one_time_prekey_count
+
+        with self.store.transaction():
+            newest = self.store.newest_signed_prekey()
+            if newest is None or now - newest.made_at >= SIGNED_PREKEY_ROTATION_SECONDS:
+                self.store.add_signed_prekey(self.random_bytes(KEY_LENGTH), made_at=now)
+            one_time_prekeys = self._add_one_time_prekeys(refill)
+
+        newest = self._newest_signed_prekey()
+        relay_holds_the_newest = newest.confirmed
+        made_no_one_time_prekey = not one_time_prekeys
+        if relay_holds_the_newest and made_no_one_time_prekey:
+            return None
+        return self._upload(newest, one_time_prekeys)
+
+    def confirm_upload(self, upload: PrekeyUpload) -> None:
+        """Records the BundleStored of an UploadBundle: the relay holds its signed prekey."""
+        with self.store.transaction():
+            self.store.confirm_signed_prekey(upload.signed_prekey.id)
+
+    def drop_refused_upload(self, upload: PrekeyUpload) -> None:
+        """Deletes the one-time prekeys of an UploadBundle that waited in Back off when its
+        connection ended: the relay holds none of them (section 21.4). An UploadBundle
+        without an answer needs no call, as the relay can hold its keys."""
+        with self.store.transaction():
+            for one_time_prekey in upload.one_time_prekeys:
+                self.store.delete_one_time_prekey(one_time_prekey.id)
+
+    def forget_seen_ids(self) -> None:
+        """Deletes the seen ids older than SEEN_ID_SECONDS, at a login (section 20.4)."""
+        seen_at_or_before = self.now() - SEEN_ID_SECONDS
+        with self.store.transaction():
+            self.store.delete_seen_ids(seen_at_or_before=seen_at_or_before)
 
     def add_contact(self, user_id: str) -> bytes:
         """Adds the identity of a user id and returns its identity key.
@@ -173,11 +233,22 @@ class Client:
             self.store.add_contact(contact)
         return contact
 
+    def remove_contact(self, contact: bytes) -> None:
+        """Deletes a contact with its sessions; its seen ids and records stay (20.6)."""
+        with self.store.transaction():
+            self.store.remove_contact(contact)
+
     def has_session(self, contact: bytes) -> bool:
         return bool(self.store.sessions(contact))
 
-    def start_session(self, contact: bytes, bundle: Bundle) -> None:
+    def start_session(self, contact: bytes, bundle: Bundle) -> int:
         """START of section 20.3: section 16.6 with a bundle fetched for the contact.
+
+        It serves L1 without a session and L2, the reset: the new session enters the list
+        at its head and the older ones stay behind it (section 20.6).
+
+        Returns:
+            The GAP of section 20.3: the skipped keys of a session that left the list.
 
         Raises:
             NotAContactError: The identity is not a contact.
@@ -219,8 +290,10 @@ class Client:
                 state=state,
                 initial_header=initial_header.SerializeToString(),
             )
+            missing = self.store.drop_sessions_behind(contact)
             if pin is None:
                 self.store.set_pin(contact, bundle.identity_dh_key)
+        return missing
 
     def send_text(
         self, contact: bytes, text: str, *, bundle: Bundle | None = None
@@ -338,7 +411,9 @@ class Client:
         """Steps 3 to 9 of section 16.8 and ACCEPT-NEW of section 20.3."""
         initial_header = envelope.initial_header
         signed_prekey_id = initial_header.signed_prekey_id
-        signed_prekey_private_key = self.store.signed_prekey(signed_prekey_id)
+        signed_prekey_private_key = self.store.signed_prekey(
+            signed_prekey_id, replaced_after=self.now() - SIGNED_PREKEY_GRACE_SECONDS
+        )
         if signed_prekey_private_key is None:
             raise UnknownSignedPrekeyError("no signed prekey has the id of the initial header")
 
@@ -383,12 +458,13 @@ class Client:
                 session_id=session_id,
                 signed_prekey_id=signed_prekey_id,
             )
+            dropped = self.store.drop_sessions_behind(delivered.sender)
             if one_time_prekey_id is not None:
                 self.store.delete_one_time_prekey(one_time_prekey_id)
             if pin is None:
                 self.store.set_pin(delivered.sender, initial_header.identity_dh_key)
             self._save_received(delivered, text)
-        return Received(ack=True, text=text, result=result)
+        return Received(ack=True, text=text, result=result, missing=decrypted.purged + dropped)
 
     def _accept(
         self, delivered: Delivered, session: StoredSession, decrypted: ratchet.Decrypted
@@ -398,10 +474,10 @@ class Client:
         with self.store.transaction():
             self.store.accept_on_session(session.session_id, decrypted.state)
             self._save_received(delivered, text)
-        return Received(ack=True, text=text, result=result)
+        return Received(ack=True, text=text, result=result, missing=decrypted.purged)
 
     def _save_received(self, delivered: Delivered, text: str | None) -> None:
-        self.store.add_seen_id(delivered.sender, delivered.message_id)
+        self.store.add_seen_id(delivered.sender, delivered.message_id, seen_at=self.now())
         if text is not None:
             self.store.log_message(
                 delivered.sender, direction="in", message_id=delivered.message_id, text=text
@@ -430,6 +506,47 @@ class Client:
             )
         except CryptoError as error:
             raise DecryptFailedError("the message does not decrypt") from error
+
+    def _add_one_time_prekeys(self, count: int) -> tuple[OneTimePrekey, ...]:
+        """Makes `count` one-time prekeys, first deleting those with the lowest ids that a
+        batch would push past ONE_TIME_PREKEY_HELD_MAX (section 21.3)."""
+        count = min(count, ONE_TIME_PREKEY_HELD_MAX, self.store.one_time_prekey_ids_left())
+        over_the_bound = self.store.one_time_prekey_count() + count - ONE_TIME_PREKEY_HELD_MAX
+        if over_the_bound > 0:
+            self.store.delete_lowest_one_time_prekeys(over_the_bound)
+
+        one_time_prekeys = []
+        for _ in range(count):
+            private_key = self.random_bytes(KEY_LENGTH)
+            prekey_id = self.store.add_one_time_prekey(private_key)
+            if prekey_id is None:
+                break
+            key = derive_x25519_public_key(private_key)
+            one_time_prekeys.append(OneTimePrekey(id=prekey_id, key=key))
+        return tuple(one_time_prekeys)
+
+    def _upload(
+        self, newest: StoredSignedPrekey, one_time_prekeys: tuple[OneTimePrekey, ...]
+    ) -> PrekeyUpload:
+        """An UploadBundle of section 21.4 with the newest signed prekey."""
+        signed_key = derive_x25519_public_key(newest.private_key)
+        signed_prekey = SignedPrekey(
+            id=newest.prekey_id,
+            key=signed_key,
+            signature=sign_signed_prekey(self._identity.seed, signed_prekey=signed_key),
+        )
+        return PrekeyUpload(
+            identity_dh_key=self.identity_dh_key,
+            identity_dh_signature=self._identity_dh_signature(),
+            signed_prekey=signed_prekey,
+            one_time_prekeys=one_time_prekeys,
+        )
+
+    def _newest_signed_prekey(self) -> StoredSignedPrekey:
+        newest = self.store.newest_signed_prekey()
+        if newest is None:
+            raise RuntimeError("the identity holds no signed prekey")
+        return newest
 
     def _identity_dh_signature(self) -> bytes:
         return sign_identity_dh_key(self._identity.seed, identity_dh_key=self.identity_dh_key)

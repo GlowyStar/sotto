@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 
 from sotto.client import envelope, session
 from sotto.client.session import Client, Delivered, OwnIdentityError
+from sotto.client.store import MAX_SESSIONS
 from sotto.crypto import x3dh
 from sotto.crypto.identity import (
     BadBundleError,
@@ -136,10 +137,10 @@ def test_replayed_initial_message_gives_no_second_text(
         bob.store.connection.execute("DELETE FROM seen_ids")
     assert bob.receive(initial).result == "DECRYPT_FAILED"
 
-    relay.publish(bob, one_time_count=one_time_count)
-    with alice.store.transaction():
-        alice.store.connection.execute("DELETE FROM sessions")
-    assert bob.receive(send(relay, alice, bob, "on a new session")).text == "on a new session"
+    for number in range(MAX_SESSIONS):
+        relay.publish(bob, one_time_count=one_time_count)
+        alice.start_session(bob.identity_key, relay.fetch(bob.identity_key))
+        assert bob.receive(send(relay, alice, bob, f"new {number}")).text == f"new {number}"
     store_before = rows(bob.store)
 
     assert bob.receive(initial).result == "REPLAYED_INITIAL"
@@ -373,7 +374,7 @@ def test_crash_between_decryption_and_commit_changes_nothing_and_the_message_dec
     delivered = send(relay, alice, bob, "survives the crash")
     store_before = rows(bob.store)
 
-    def crash(sender: bytes, message_id: bytes) -> None:
+    def crash(sender: bytes, message_id: bytes, *, seen_at: int) -> None:
         raise RuntimeError("the client stopped")
 
     with monkeypatch.context() as patch:
@@ -481,7 +482,9 @@ def test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey
     header = initial_header_of(delivered)
     assert header is not None
     bob_identity = bob.store.identity()
-    signed_prekey_private_key = bob.store.signed_prekey(header.signed_prekey_id)
+    signed_prekey_private_key = bob.store.signed_prekey(
+        header.signed_prekey_id, replaced_after=0
+    )
     one_time_prekey_private_key = bob.store.one_time_prekey(header.one_time_prekey_id)
     assert bob_identity is not None
     assert signed_prekey_private_key is not None

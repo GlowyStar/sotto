@@ -28,16 +28,31 @@ class Randomness:
 
 
 @dataclass
+class Clock:
+    """The one clock of every client of a test; the test moves it by hand."""
+
+    now: int = 1_800_000_000
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: int) -> None:
+        self.now += seconds
+
+
+@dataclass
 class Clients:
     """Makes clients under one folder and closes their stores at the end of a test."""
 
     folder: Path
     stores: list[Store] = field(default_factory=list)
+    clock: Clock = field(default_factory=Clock)
 
     def open(self, name: str) -> Client:
+        """Opens the client of a name; a second call is a restart on the same store."""
         store = Store(self.folder / name / "store.db")
         self.stores.append(store)
-        return Client(store, random_bytes=Randomness(name))
+        return Client(store, random_bytes=Randomness(name), clock=self.clock)
 
     def close(self) -> None:
         for store in self.stores:
@@ -105,6 +120,22 @@ def rows(store: Store) -> dict[str, list[tuple[Any, ...]]]:
         name: store.connection.execute(f'SELECT * FROM "{name}"').fetchall()  # noqa: S608
         for (name,) in tables
     }
+
+
+def files_holding(folder: Path, value: bytes) -> list[str]:
+    """The files of a client folder that hold the value, as bytes or as hex text."""
+    holding = []
+    for path in folder.iterdir():
+        content = path.read_bytes()
+        holds_the_bytes = value in content
+        holds_the_hex = value.hex().encode() in content
+        if holds_the_bytes or holds_the_hex:
+            holding.append(path.name)
+    return sorted(holding)
+
+
+def texts(received: list[Received]) -> list[str | None]:
+    return [one.text for one in received]
 
 
 def edit_envelope(delivered: Delivered, edit: Callable[[PeerMessage], None]) -> Delivered:

@@ -15,7 +15,8 @@ from sotto.crypto.ratchet import RatchetState, SkippedKey
 DIRECTORY_MODE = 0o700
 FILE_MODE = 0o600
 WIDER_THAN_OWNER = 0o077
-SESSIONS_KEPT = 1
+MAX_SESSIONS = 3
+LAST_PREKEY_ID = 2**32 - 1
 
 TABLES = (
     """
@@ -30,7 +31,10 @@ TABLES = (
     """
     CREATE TABLE IF NOT EXISTS signed_prekeys (
         prekey_id INTEGER PRIMARY KEY,
-        private_key BLOB NOT NULL
+        private_key BLOB NOT NULL,
+        made_at INTEGER NOT NULL,
+        replaced_at INTEGER,
+        confirmed INTEGER NOT NULL
     ) STRICT
     """,
     """
@@ -70,6 +74,7 @@ TABLES = (
     CREATE TABLE IF NOT EXISTS seen_ids (
         sender BLOB NOT NULL,
         message_id BLOB NOT NULL,
+        seen_at INTEGER NOT NULL,
         PRIMARY KEY (sender, message_id)
     ) STRICT, WITHOUT ROWID
     """,
@@ -97,10 +102,23 @@ ADD_SESSION = """
     VALUES (?, (SELECT coalesce(max(position), 0) + 1 FROM sessions), ?, ?, ?)
     RETURNING session_id
 """
+COUNT_SKIPPED_KEYS_BEHIND = """
+    SELECT coalesce(sum(json_array_length(state, '$.mkskipped')), 0) FROM sessions
+    WHERE contact = ? AND session_id NOT IN (
+        SELECT session_id FROM sessions WHERE contact = ? ORDER BY position DESC LIMIT ?
+    )
+"""
 DROP_SESSIONS_BEHIND = """
     DELETE FROM sessions WHERE contact = ? AND session_id NOT IN (
         SELECT session_id FROM sessions WHERE contact = ? ORDER BY position DESC LIMIT ?
     )
+"""
+# A record outlives its session until the private key of its signed prekey is deleted
+# (section 20.4).
+DELETE_ORPHAN_RECORDS = """
+    DELETE FROM records
+    WHERE session_id NOT IN (SELECT session_id FROM sessions)
+        AND signed_prekey_id NOT IN (SELECT prekey_id FROM signed_prekeys)
 """
 ACCEPT_ON_SESSION = """
     UPDATE sessions SET
@@ -117,15 +135,27 @@ READ_SESSION = """
     SELECT session_id, contact, associated_data, state, initial_header FROM sessions
     WHERE session_id = ?
 """
-READ_SIGNED_PREKEY = "SELECT private_key FROM signed_prekeys WHERE prekey_id = ?"
+READ_SIGNED_PREKEY = """
+    SELECT private_key FROM signed_prekeys
+    WHERE prekey_id = ? AND (replaced_at IS NULL OR replaced_at > ?)
+"""
+READ_NEWEST_SIGNED_PREKEY = """
+    SELECT prekey_id, private_key, made_at, confirmed FROM signed_prekeys
+    WHERE replaced_at IS NULL
+"""
 READ_ONE_TIME_PREKEY = "SELECT private_key FROM one_time_prekeys WHERE prekey_id = ?"
 COUNT_SIGNED_PREKEY = """
     UPDATE identity SET last_signed_prekey_id = last_signed_prekey_id + 1
-    RETURNING last_signed_prekey_id
+    WHERE last_signed_prekey_id < ? RETURNING last_signed_prekey_id
 """
 COUNT_ONE_TIME_PREKEY = """
     UPDATE identity SET last_one_time_prekey_id = last_one_time_prekey_id + 1
-    RETURNING last_one_time_prekey_id
+    WHERE last_one_time_prekey_id < ? RETURNING last_one_time_prekey_id
+"""
+DELETE_LOWEST_ONE_TIME_PREKEYS = """
+    DELETE FROM one_time_prekeys WHERE prekey_id IN (
+        SELECT prekey_id FROM one_time_prekeys ORDER BY prekey_id LIMIT ?
+    )
 """
 
 
@@ -137,6 +167,14 @@ class StoreModeError(Exception):
 class Identity:
     seed: bytes = field(repr=False)
     identity_dh_private_key: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredSignedPrekey:
+    prekey_id: int
+    private_key: bytes = field(repr=False)
+    made_at: int
+    confirmed: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -217,9 +255,38 @@ class Store:
         pinned: bytes | None = row[0]
         return pinned
 
-    def signed_prekey(self, prekey_id: int) -> bytes | None:
-        row = self.connection.execute(READ_SIGNED_PREKEY, (prekey_id,)).fetchone()
+    def signed_prekey(self, prekey_id: int, *, replaced_after: int) -> bytes | None:
+        """The private key of a signed prekey that is the newest or was replaced after the
+        given time; any other counts as not held (section 21.2)."""
+        row = self.connection.execute(
+            READ_SIGNED_PREKEY, (prekey_id, replaced_after)
+        ).fetchone()
         return None if row is None else bytes(row[0])
+
+    def newest_signed_prekey(self) -> StoredSignedPrekey | None:
+        row = self.connection.execute(READ_NEWEST_SIGNED_PREKEY).fetchone()
+        if row is None:
+            return None
+        prekey_id, private_key, made_at, confirmed = row
+        return StoredSignedPrekey(
+            prekey_id=prekey_id,
+            private_key=private_key,
+            made_at=made_at,
+            confirmed=confirmed == 1,
+        )
+
+    def one_time_prekey_ids_left(self) -> int:
+        """The ids that the counter of one-time prekeys can still give (section 21.1)."""
+        last_id: int = self.connection.execute(
+            "SELECT last_one_time_prekey_id FROM identity"
+        ).fetchone()[0]
+        return LAST_PREKEY_ID - last_id
+
+    def one_time_prekey_count(self) -> int:
+        count: int = self.connection.execute(
+            "SELECT count(*) FROM one_time_prekeys"
+        ).fetchone()[0]
+        return count
 
     def one_time_prekey(self, prekey_id: int) -> bytes | None:
         row = self.connection.execute(READ_ONE_TIME_PREKEY, (prekey_id,)).fetchone()
@@ -260,25 +327,62 @@ class Store:
             (identity.seed, identity.identity_dh_private_key),
         )
 
-    def add_signed_prekey(self, private_key: bytes) -> int:
-        """Saves a signed prekey under the next id of its counter (section 21.1)."""
-        prekey_id: int = self._change(COUNT_SIGNED_PREKEY, ()).fetchone()[0]
-        self._change("INSERT INTO signed_prekeys VALUES (?, ?)", (prekey_id, private_key))
+    def add_signed_prekey(self, private_key: bytes, *, made_at: int) -> int | None:
+        """Saves the newest signed prekey under the next id of its counter (section 21.1)
+        and marks the one it replaces; None, and nothing saved, once the counter is at
+        LAST_PREKEY_ID."""
+        counted = self._change(COUNT_SIGNED_PREKEY, (LAST_PREKEY_ID,)).fetchone()
+        if counted is None:
+            return None
+        prekey_id: int = counted[0]
+        self._change(
+            "UPDATE signed_prekeys SET replaced_at = ? WHERE replaced_at IS NULL", (made_at,)
+        )
+        self._change(
+            "INSERT INTO signed_prekeys VALUES (?, ?, ?, NULL, 0)",
+            (prekey_id, private_key, made_at),
+        )
         return prekey_id
 
-    def add_one_time_prekey(self, private_key: bytes) -> int:
-        """Saves a one-time prekey under the next id of its counter (section 21.1)."""
-        prekey_id: int = self._change(COUNT_ONE_TIME_PREKEY, ()).fetchone()[0]
+    def confirm_signed_prekey(self, prekey_id: int) -> None:
+        self._change(
+            "UPDATE signed_prekeys SET confirmed = 1 WHERE prekey_id = ?", (prekey_id,)
+        )
+
+    def delete_signed_prekeys(self, *, replaced_at_or_before: int) -> None:
+        """Deletes the signed prekeys replaced at or before the time, with the records that
+        name them and whose session is gone (section 21.2, step 1)."""
+        self._change(
+            "DELETE FROM signed_prekeys WHERE replaced_at <= ?", (replaced_at_or_before,)
+        )
+        self._change(DELETE_ORPHAN_RECORDS, ())
+
+    def add_one_time_prekey(self, private_key: bytes) -> int | None:
+        """Saves a one-time prekey under the next id of its counter (section 21.1); None,
+        and nothing saved, once the counter is at LAST_PREKEY_ID."""
+        counted = self._change(COUNT_ONE_TIME_PREKEY, (LAST_PREKEY_ID,)).fetchone()
+        if counted is None:
+            return None
+        prekey_id: int = counted[0]
         self._change("INSERT INTO one_time_prekeys VALUES (?, ?)", (prekey_id, private_key))
         return prekey_id
 
     def delete_one_time_prekey(self, prekey_id: int) -> None:
         self._change("DELETE FROM one_time_prekeys WHERE prekey_id = ?", (prekey_id,))
 
+    def delete_lowest_one_time_prekeys(self, count: int) -> None:
+        self._change(DELETE_LOWEST_ONE_TIME_PREKEYS, (count,))
+
     def add_contact(self, identity_key: bytes) -> None:
         self._change(
             "INSERT INTO contacts VALUES (?, NULL) ON CONFLICT DO NOTHING", (identity_key,)
         )
+
+    def remove_contact(self, contact: bytes) -> None:
+        """Deletes the contact and its sessions; its seen ids and records stay (20.6)."""
+        self._change("DELETE FROM sessions WHERE contact = ?", (contact,))
+        self._change("DELETE FROM contacts WHERE identity_key = ?", (contact,))
+        self._change(DELETE_ORPHAN_RECORDS, ())
 
     def set_pin(self, contact: bytes, identity_dh_key: bytes) -> None:
         self._change(
@@ -294,13 +398,21 @@ class Store:
         state: RatchetState,
         initial_header: bytes | None,
     ) -> int:
-        """Puts a new session at the head of the list and deletes those past the end."""
+        """Puts a new session at the head of the list."""
         added = self._change(
             ADD_SESSION, (contact, associated_data, _encode_state(state), initial_header)
         )
         session_id: int = added.fetchone()[0]
-        self._change(DROP_SESSIONS_BEHIND, (contact, contact, SESSIONS_KEPT))
         return session_id
+
+    def drop_sessions_behind(self, contact: bytes) -> int:
+        """Deletes the sessions past MAX_SESSIONS and the records that go with them
+        (sections 20.1 and 20.4); returns the skipped keys that left with them."""
+        behind = (contact, contact, MAX_SESSIONS)
+        skipped: int = self.connection.execute(COUNT_SKIPPED_KEYS_BEHIND, behind).fetchone()[0]
+        self._change(DROP_SESSIONS_BEHIND, behind)
+        self._change(DELETE_ORPHAN_RECORDS, ())
+        return skipped
 
     def accept_on_session(self, session_id: int, state: RatchetState) -> None:
         """Saves the state after a decryption: the session drops its initial header and
@@ -322,8 +434,11 @@ class Store:
             (sender, ephemeral_key, session_id, signed_prekey_id),
         )
 
-    def add_seen_id(self, sender: bytes, message_id: bytes) -> None:
-        self._change("INSERT INTO seen_ids VALUES (?, ?)", (sender, message_id))
+    def add_seen_id(self, sender: bytes, message_id: bytes, *, seen_at: int) -> None:
+        self._change("INSERT INTO seen_ids VALUES (?, ?, ?)", (sender, message_id, seen_at))
+
+    def delete_seen_ids(self, *, seen_at_or_before: int) -> None:
+        self._change("DELETE FROM seen_ids WHERE seen_at <= ?", (seen_at_or_before,))
 
     def add_to_outbox(self, row: OutboxRow) -> None:
         self._change(
