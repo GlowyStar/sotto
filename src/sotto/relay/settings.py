@@ -17,6 +17,8 @@ class Settings:
     login_deadline_seconds: float = 10
     one_time_prekey_cap: int = 100
     max_pages: int = 262144
+    message_ttl_seconds: int = 2592000
+    sweep_interval_seconds: float = 60
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> Self:
@@ -50,6 +52,12 @@ class Settings:
             ),
             max_pages=_read_whole_number_above_0(
                 environ, "RELAY_MAX_PAGES", defaults.max_pages
+            ),
+            message_ttl_seconds=_read_whole_number_above_0(
+                environ, "RELAY_MESSAGE_TTL_SECONDS", defaults.message_ttl_seconds
+            ),
+            sweep_interval_seconds=_read_whole_number_above_0(
+                environ, "RELAY_SWEEP_INTERVAL_SECONDS", defaults.sweep_interval_seconds
             ),
         )
 

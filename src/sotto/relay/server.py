@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from enum import IntEnum
 from http import HTTPStatus
@@ -43,6 +44,8 @@ from sotto.relay.frames import (
 from sotto.relay.logs import ConnectionLogger
 from sotto.relay.settings import Settings
 from sotto.relay.storage import Storage, StorageFullError, UnknownRecipientError
+
+logger = logging.getLogger(__name__)
 
 WEBSOCKET_PATH = "/ws"
 HEALTH_PATH = "/healthz"
@@ -280,10 +283,31 @@ class Relay:
         return ServerFrame(bundle=bundle)
 
 
+async def sweep_periodically(storage: Storage, settings: Settings) -> None:
+    """Sweeps the database every sweep interval until it is cancelled (section 13.2)."""
+    while True:
+        await asyncio.sleep(settings.sweep_interval_seconds)
+        try:
+            expired = storage.sweep(ttl_seconds=settings.message_ttl_seconds)
+        except Exception:
+            # The next sweep can succeed, and a relay that stopped sweeping would keep
+            # deleted messages in its files without a sign.
+            logger.exception("the sweep failed")
+            continue
+        if expired:
+            logger.info("the sweep deleted %d expired messages", expired)
+
+
 @asynccontextmanager
-async def serve_relay(settings: Settings) -> AsyncIterator[Server]:
-    """Serves until the block ends, then closes the database once every handler returned."""
-    storage = Storage(settings.database, max_pages=settings.max_pages)
+async def serve_relay(
+    settings: Settings, *, clock: Callable[[], float] = time.time
+) -> AsyncIterator[Server]:
+    """Serves until the block ends, then closes the database once every handler returned.
+
+    The sweep runs from the start and stops before the database closes.
+    """
+    storage = Storage(settings.database, max_pages=settings.max_pages, clock=clock)
+    sweeping = asyncio.create_task(sweep_periodically(storage, settings))
     try:
         relay = Relay(settings, storage)
         async with serve(
@@ -298,4 +322,6 @@ async def serve_relay(settings: Settings) -> AsyncIterator[Server]:
         ) as server:
             yield server
     finally:
+        # The task waits only in its sleep, so once cancelled it touches the database no more.
+        sweeping.cancel()
         storage.close()

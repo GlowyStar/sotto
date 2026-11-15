@@ -148,7 +148,7 @@ of each:
   holds the statement: the path of the test file from the root of the repository, two
   colons, the name of the function. A parametrized test is cited by its function name.
 - `[pending: task 14]` says that what the statement rests on is not in this revision and
-  gives the number, 7, 8 or 11 to 14, of the task of the project plan that brings it.
+  gives the number, 8 or 12 to 14, of the task of the project plan that brings it.
   The pull request of that task replaces the citation with the first form. No citation
   names task 9: that task is part 2 of this text and brings no test. A statement of
   part 1 that rests on a rule of part 2 names the section of that rule and carries the
@@ -1071,7 +1071,8 @@ first login plus a bundle upload.
   nothing, because a Send to it is refused with UNKNOWN_RECIPIENT (section 10.2) and a
   FetchBundle for it with NOT_FOUND (section 9.2).
 - The relay keeps a registered identity and its bundle without an expiry, and no frame
-  removes either [pending: task 7].
+  removes either
+  [test: tests/test_storage.py::test_sweep_deletes_a_message_once_its_ttl_has_passed].
 
 ### 8.7 What the login does not do
 
@@ -1331,7 +1332,9 @@ The last row is the case of a lost Ack.
 
 The relay deletes a message MESSAGE_TTL_SECONDS after it stored it, at the first sweep
 after that moment (section 13), whether the message was delivered or not. The sender gets
-no notice [pending: task 7].
+no notice
+[test: tests/test_storage.py::test_sweep_deletes_a_message_once_its_ttl_has_passed]
+[test: tests/test_storage.py::test_expired_message_is_deleted_by_the_sweep_and_never_delivered].
 
 ## 11. Errors and close codes
 
@@ -1527,7 +1530,7 @@ The relay deletes a message in two cases:
   sweep.
 
 The relay delivers no message that it deleted [test: tests/test_messages.py::test_ack_deletes_the_message_and_is_safe_to_repeat]
-[pending: task 7]. A Send
+[test: tests/test_storage.py::test_expired_message_is_deleted_by_the_sweep_and_never_delivered]. A Send
 that is repeated after the deletion is a new message for the relay (section 10.3).
 
 ### 13.2 What "deleted" means
@@ -1535,17 +1538,25 @@ that is repeated after the deletion is a new message for the relay (section 10.3
 "Deleted after the ack" means: after the first sweep that follows the deletion, the
 payload of the message and its message id are in none of the files of the database: the
 database file, its write-ahead log and the index of that log, the files that end in `-wal`
-and `-shm` [pending: task 7].
+and `-shm`
+[test: tests/test_storage.py::test_acked_message_is_in_no_file_of_the_database_after_the_sweep]
+[test: tests/test_storage.py::test_expired_message_is_in_no_file_of_the_database_after_the_sweep].
 
-How the relay gets there [pending: task 7]:
+How the relay gets there:
 
 - The database runs with `secure_delete` on, so the deletion overwrites the bytes of the
-  row with zeros instead of leaving them in a free page.
+  row with zeros instead of leaving them in a free page
+  [test: tests/test_storage.py::test_every_open_sets_the_pragmas_of_the_relay].
 - The database runs in write-ahead mode, so until a checkpoint the old pages of the row
   remain in the write-ahead log file. A sweep ends with a checkpoint that moves the log
-  into the database file and truncates the log to zero length.
-- A sweep runs every SWEEP_INTERVAL_SECONDS while the relay runs. Between the deletion
-  and the next sweep the bytes can be read from the log file.
+  into the database file and truncates the log to zero length
+  [test: tests/test_storage.py::test_acked_message_is_in_no_file_of_the_database_after_the_sweep].
+- A sweep runs every SWEEP_INTERVAL_SECONDS while the relay runs, from one interval after
+  the start. A sweep that fails is logged, and the next one runs at its time
+  [test: tests/test_storage.py::test_expired_message_is_deleted_by_the_sweep_and_never_delivered]
+  [test: tests/test_storage.py::test_failed_sweep_is_logged_and_the_next_sweep_runs].
+  Between the deletion and the next sweep the bytes can be read from the log file
+  [test: tests/test_storage.py::test_acked_message_is_in_no_file_of_the_database_after_the_sweep].
 - On an orderly shutdown the relay closes the database, which runs a last checkpoint and
   removes the log file
   [test: tests/test_storage.py::test_relay_restarted_on_the_same_file_serves_the_bundle]

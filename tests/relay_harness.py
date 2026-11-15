@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -43,8 +44,10 @@ BASE64_WINDOW_BYTES = 9
 
 
 @asynccontextmanager
-async def running_relay(settings: Settings) -> AsyncIterator[str]:
-    async with serve_relay(settings) as server:
+async def running_relay(
+    settings: Settings, *, clock: Callable[[], float] = time.time
+) -> AsyncIterator[str]:
+    async with serve_relay(settings, clock=clock) as server:
         port = server.sockets[0].getsockname()[1]
         yield f"ws://127.0.0.1:{port}"
 
