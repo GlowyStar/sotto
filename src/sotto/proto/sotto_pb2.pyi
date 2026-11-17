@@ -295,14 +295,26 @@ class InitialHeader(_message.Message):
     def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ...) -> None: ...
 
 class Content(_message.Message):
-    __slots__ = ("text", "attachment", "profile")
+    __slots__ = ("text", "attachment", "profile", "edit", "deletion", "receipt", "timer", "quote", "expires_after")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     ATTACHMENT_FIELD_NUMBER: _ClassVar[int]
     PROFILE_FIELD_NUMBER: _ClassVar[int]
+    EDIT_FIELD_NUMBER: _ClassVar[int]
+    DELETION_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_FIELD_NUMBER: _ClassVar[int]
+    TIMER_FIELD_NUMBER: _ClassVar[int]
+    QUOTE_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AFTER_FIELD_NUMBER: _ClassVar[int]
     text: str
     attachment: Attachment
     profile: Profile
-    def __init__(self, text: _Optional[str] = ..., attachment: _Optional[_Union[Attachment, _Mapping]] = ..., profile: _Optional[_Union[Profile, _Mapping]] = ...) -> None: ...
+    edit: Edit
+    deletion: Deletion
+    receipt: Receipt
+    timer: Timer
+    quote: Quote
+    expires_after: int
+    def __init__(self, text: _Optional[str] = ..., attachment: _Optional[_Union[Attachment, _Mapping]] = ..., profile: _Optional[_Union[Profile, _Mapping]] = ..., edit: _Optional[_Union[Edit, _Mapping]] = ..., deletion: _Optional[_Union[Deletion, _Mapping]] = ..., receipt: _Optional[_Union[Receipt, _Mapping]] = ..., timer: _Optional[_Union[Timer, _Mapping]] = ..., quote: _Optional[_Union[Quote, _Mapping]] = ..., expires_after: _Optional[int] = ...) -> None: ...
 
 class Attachment(_message.Message):
     __slots__ = ("blob_id", "key", "size", "digest", "media_type", "file_name", "width", "height", "thumbnail", "caption")
@@ -335,3 +347,41 @@ class Profile(_message.Message):
     name: str
     avatar: Attachment
     def __init__(self, name: _Optional[str] = ..., avatar: _Optional[_Union[Attachment, _Mapping]] = ...) -> None: ...
+
+class Quote(_message.Message):
+    __slots__ = ("message_id", "own", "text")
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    OWN_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    own: bool
+    text: str
+    def __init__(self, message_id: _Optional[bytes] = ..., own: _Optional[bool] = ..., text: _Optional[str] = ...) -> None: ...
+
+class Edit(_message.Message):
+    __slots__ = ("message_id", "text")
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    text: str
+    def __init__(self, message_id: _Optional[bytes] = ..., text: _Optional[str] = ...) -> None: ...
+
+class Deletion(_message.Message):
+    __slots__ = ("message_id",)
+    MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    message_id: bytes
+    def __init__(self, message_id: _Optional[bytes] = ...) -> None: ...
+
+class Receipt(_message.Message):
+    __slots__ = ("read", "message_ids")
+    READ_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_IDS_FIELD_NUMBER: _ClassVar[int]
+    read: bool
+    message_ids: _containers.RepeatedScalarFieldContainer[bytes]
+    def __init__(self, read: _Optional[bool] = ..., message_ids: _Optional[_Iterable[bytes]] = ...) -> None: ...
+
+class Timer(_message.Message):
+    __slots__ = ("seconds",)
+    SECONDS_FIELD_NUMBER: _ClassVar[int]
+    seconds: int
+    def __init__(self, seconds: _Optional[int] = ...) -> None: ...

@@ -4,9 +4,10 @@ import json
 import os
 import sqlite3
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,51 @@ TABLES = (
         blob_id BLOB UNIQUE
     ) STRICT, WITHOUT ROWID
     """,
+    # What part 5 keeps of a message of the log, by the id its sender chose. A row without
+    # its message is a trace: a change that came first, or a message that is gone.
+    # `receipt` is what the peer reported of an own message, `owed` the receipt to send.
+    """
+    CREATE TABLE IF NOT EXISTS message_states (
+        contact BLOB NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        message_id BLOB NOT NULL,
+        written_at INTEGER NOT NULL,
+        quote_direction TEXT CHECK (quote_direction IN ('in', 'out')),
+        quote_id BLOB,
+        quote_text TEXT,
+        edits INTEGER NOT NULL DEFAULT 0,
+        early_text TEXT,
+        gone INTEGER NOT NULL DEFAULT 0,
+        receipt TEXT CHECK (receipt IN ('delivered', 'read')),
+        owed TEXT CHECK (owed IN ('delivered', 'read')),
+        read_at INTEGER,
+        expires_after INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER,
+        PRIMARY KEY (contact, direction, message_id)
+    ) STRICT, WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS messages_by_id ON messages (contact, direction, message_id)",
+    "CREATE INDEX IF NOT EXISTS message_states_by_expiry ON message_states (expires_at)",
+    # The highest number a message of the log ever had, so that a number of a message
+    # that is gone is never given to another one (section 39.8).
+    """
+    CREATE TABLE IF NOT EXISTS message_numbers (
+        only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+        last_number INTEGER NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS timers (
+        contact BLOB PRIMARY KEY,
+        seconds INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+        only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+        read_receipts INTEGER NOT NULL
+    ) STRICT
+    """,
 )
 
 ADD_SESSION = """
@@ -245,6 +291,83 @@ SET_OWN_PROFILE = """
     ON CONFLICT DO UPDATE SET
         name = excluded.name, avatar = excluded.avatar, media_type = excluded.media_type
 """
+LOG_MESSAGE = """
+    INSERT INTO messages (position, contact, direction, message_id, text)
+    VALUES (
+        max(
+            coalesce((SELECT max(position) FROM messages), 0),
+            coalesce((SELECT last_number FROM message_numbers), 0)
+        ) + 1,
+        ?, ?, ?, ?
+    )
+    RETURNING position
+"""
+COUNT_MESSAGE_NUMBER = """
+    INSERT INTO message_numbers VALUES (1, ?)
+    ON CONFLICT DO UPDATE SET last_number = excluded.last_number
+"""
+READ_MESSAGES = """
+    SELECT m.position, m.contact, m.direction, m.message_id, m.text, s.written_at,
+        coalesce(s.edits, 0), coalesce(s.expires_after, 0), s.expires_at, s.read_at,
+        s.receipt, s.owed
+    FROM messages m LEFT JOIN message_states s USING (contact, direction, message_id)
+"""
+READ_TRACE = """
+    SELECT gone, early_text, edits FROM message_states
+    WHERE contact = ? AND direction = ? AND message_id = ?
+"""
+SAVE_STATE = """
+    INSERT INTO message_states (contact, direction, message_id, written_at,
+        quote_direction, quote_id, quote_text, expires_after, expires_at, owed)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+        written_at = excluded.written_at, quote_direction = excluded.quote_direction,
+        quote_id = excluded.quote_id, quote_text = excluded.quote_text,
+        expires_after = excluded.expires_after, expires_at = excluded.expires_at,
+        owed = excluded.owed, early_text = NULL
+"""
+COUNT_EDIT = """
+    INSERT INTO message_states (contact, direction, message_id, written_at, edits,
+        early_text)
+    VALUES (?, ?, ?, ?, 1, ?)
+    ON CONFLICT DO UPDATE SET edits = edits + 1, early_text = excluded.early_text
+"""
+# A trace keeps the id of a message that is gone, nothing of its content (section 39.4).
+LEAVE_TRACE = """
+    INSERT INTO message_states (contact, direction, message_id, written_at, gone)
+    VALUES (?, ?, ?, ?, 1)
+    ON CONFLICT DO UPDATE SET
+        written_at = excluded.written_at, gone = 1, quote_direction = NULL,
+        quote_id = NULL, quote_text = NULL, early_text = NULL, receipt = NULL, owed = NULL,
+        read_at = NULL, expires_after = 0, expires_at = NULL
+"""
+FORGET_QUOTES = """
+    UPDATE message_states SET quote_text = NULL
+    WHERE contact = ? AND quote_direction = ? AND quote_id = ?
+"""
+SET_RECEIPT = """
+    UPDATE message_states SET receipt = ?
+    WHERE contact = ? AND direction = ? AND message_id = ?
+"""
+SET_READ = """
+    INSERT INTO message_states (contact, direction, message_id, written_at, read_at,
+        expires_at, owed)
+    VALUES (?, 'in', ?, ?, ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+        read_at = excluded.read_at, expires_at = excluded.expires_at, owed = excluded.owed
+"""
+# A trace is forgotten with the seen ids of its time (section 39.7).
+FORGET_TRACES = """
+    DELETE FROM message_states WHERE written_at <= ? AND NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.contact = message_states.contact
+            AND m.direction = message_states.direction
+            AND m.message_id = message_states.message_id
+    )
+"""
+FILES_OF_MESSAGE = """
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as, 0
+    FROM files WHERE contact = ? AND direction = ? AND message_id = ?
+"""
 SET_PROFILE = """
     INSERT INTO profiles VALUES (?, ?, ?, NULL)
     ON CONFLICT DO UPDATE SET
@@ -314,6 +437,63 @@ class FileRow:
     held: int
     saved_as: str | None
     avatar: bool = False
+
+
+class ReceiptKind(StrEnum):
+    """What a receipt says of a message (section 39.5), as the store keeps it."""
+
+    DELIVERED = "delivered"
+    READ = "read"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LoggedMessage:
+    """A message of the log, a text or an attachment with its caption as `text`, and
+    what part 5 keeps of it; `written_at` is None for a message logged before part 5."""
+
+    number: int
+    contact: bytes
+    incoming: bool
+    message_id: bytes
+    text: str
+    written_at: int | None
+    edits: int
+    expires_after: int
+    expires_at: int | None
+    read_at: int | None
+    receipt: ReceiptKind | None
+    owed: ReceiptKind | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredQuote:
+    """The message a reply quotes, by its direction in this store and its id, and the text
+    of the quote, None once that message is gone."""
+
+    incoming: bool
+    message_id: bytes
+    text: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NewState:
+    """What part 5 keeps of a message when it enters the log."""
+
+    written_at: int
+    expires_after: int = 0
+    expires_at: int | None = None
+    quote: StoredQuote | None = None
+    owed: ReceiptKind | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Trace:
+    """The part 5 state of a message that is not in the log: gone, or edited before it
+    arrived."""
+
+    gone: bool
+    early_text: str | None
+    edits: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -530,6 +710,7 @@ class Store:
             self.delete_file(profile.avatar_file)
         self._change("DELETE FROM profiles WHERE contact = ?", (contact,))
         self._change("DELETE FROM profile_sends WHERE contact = ?", (contact,))
+        self._change("DELETE FROM timers WHERE contact = ?", (contact,))
         self._change("DELETE FROM sessions WHERE contact = ?", (contact,))
         self._change("DELETE FROM contacts WHERE identity_key = ?", (contact,))
         self._change(DELETE_ORPHAN_RECORDS, ())
@@ -601,10 +782,197 @@ class Store:
 
     def log_message(
         self, contact: bytes, *, direction: str, message_id: bytes, text: str
+    ) -> int:
+        """Adds a message to the log and returns its number, its position, which is above
+        every number that a message of the log ever had."""
+        added = self._change(LOG_MESSAGE, (contact, direction, message_id, text))
+        number: int = added.fetchone()[0]
+        self._change(COUNT_MESSAGE_NUMBER, (number,))
+        return number
+
+    def message(self, number: int) -> LoggedMessage | None:
+        row = self.connection.execute(
+            READ_MESSAGES + " WHERE m.position = ?", (number,)
+        ).fetchone()
+        return None if row is None else _message(row)
+
+    def message_by_id(
+        self, contact: bytes, *, incoming: bool, message_id: bytes
+    ) -> LoggedMessage | None:
+        """The latest message of the log that has this author and id."""
+        row = self.connection.execute(
+            READ_MESSAGES + " WHERE m.contact = ? AND m.direction = ? AND m.message_id = ? "
+            "ORDER BY m.position DESC",
+            (contact, _direction(incoming), message_id),
+        ).fetchone()
+        return None if row is None else _message(row)
+
+    def expired_messages(self, now: int) -> list[LoggedMessage]:
+        rows = self.connection.execute(
+            READ_MESSAGES + " WHERE s.expires_at <= ? ORDER BY m.position", (now,)
+        ).fetchall()
+        return [_message(row) for row in rows]
+
+    def trace(self, contact: bytes, *, incoming: bool, message_id: bytes) -> Trace | None:
+        row = self.connection.execute(
+            READ_TRACE, (contact, _direction(incoming), message_id)
+        ).fetchone()
+        if row is None:
+            return None
+        gone, early_text, edits = row
+        return Trace(gone=gone == 1, early_text=early_text, edits=edits)
+
+    def save_state(
+        self,
+        contact: bytes,
+        *,
+        incoming: bool,
+        message_id: bytes,
+        state: NewState,
+    ) -> None:
+        """Saves what part 5 keeps of a message just logged; the text of an edit that came
+        before it is dropped, its count of edits stays."""
+        quote = state.quote
+        quote_direction = None if quote is None else _direction(quote.incoming)
+        self._change(
+            SAVE_STATE,
+            (
+                contact,
+                _direction(incoming),
+                message_id,
+                state.written_at,
+                quote_direction,
+                None if quote is None else quote.message_id,
+                None if quote is None else quote.text,
+                state.expires_after,
+                state.expires_at,
+                state.owed,
+            ),
+        )
+
+    def count_edit(
+        self, contact: bytes, message_id: bytes, *, at: int, early_text: str | None
+    ) -> None:
+        """Counts an edit of an incoming message; `early_text` keeps the text of an edit
+        whose message has not arrived."""
+        self._change(COUNT_EDIT, (contact, "in", message_id, at, early_text))
+
+    def edit_message(self, message: LoggedMessage, text: str, *, at: int) -> None:
+        """Replaces the text of a logged message, an attachment's caption included, and
+        counts the edit."""
+        self._change("UPDATE messages SET text = ? WHERE position = ?", (text, message.number))
+        for file in self.files_of(message):
+            attachment = file.attachment
+            attachment.caption = text
+            self._change(
+                "UPDATE files SET attachment = ? WHERE position = ?",
+                (attachment.SerializeToString(), file.position),
+            )
+        self._change(COUNT_EDIT, (*_key(message), at, None))
+
+    def files_of(self, message: LoggedMessage) -> list[FileRow]:
+        rows = self.connection.execute(FILES_OF_MESSAGE, _key(message)).fetchall()
+        return [_file(row) for row in rows]
+
+    def remove_message(self, message: LoggedMessage, *, at: int) -> None:
+        """Deletes a message with its files and downloaded bytes, leaves its trace and
+        forgets the text of every quote of it (sections 39.4 and 39.6)."""
+        key = _key(message)
+        self._change("DELETE FROM messages WHERE position = ?", (message.number,))
+        self._change(
+            "DELETE FROM downloads WHERE position IN (SELECT position FROM files "
+            "WHERE contact = ? AND direction = ? AND message_id = ?)",
+            key,
+        )
+        self._change(
+            "DELETE FROM files WHERE contact = ? AND direction = ? AND message_id = ?", key
+        )
+        self.leave_trace(
+            message.contact, incoming=message.incoming, message_id=message.message_id, at=at
+        )
+
+    def leave_trace(
+        self, contact: bytes, *, incoming: bool, message_id: bytes, at: int
+    ) -> None:
+        """Marks a message as gone, whether it is in the log or not yet, and forgets the
+        text of every quote of it."""
+        direction = _direction(incoming)
+        self._change(LEAVE_TRACE, (contact, direction, message_id, at))
+        self._change(FORGET_QUOTES, (contact, direction, message_id))
+
+    def set_receipt(self, message: LoggedMessage, receipt: ReceiptKind) -> None:
+        self._change(SET_RECEIPT, (receipt, *_key(message)))
+
+    def set_read(
+        self,
+        message: LoggedMessage,
+        *,
+        read_at: int,
+        expires_at: int | None,
+        owed: ReceiptKind | None,
     ) -> None:
         self._change(
-            "INSERT INTO messages (contact, direction, message_id, text) VALUES (?, ?, ?, ?)",
-            (contact, direction, message_id, text),
+            SET_READ, (message.contact, message.message_id, read_at, read_at, expires_at, owed)
+        )
+
+    def owed_receipts(self) -> list[tuple[bytes, bytes, ReceiptKind]]:
+        """The receipts to send, as (contact, message id, kind)."""
+        rows = self.connection.execute(
+            "SELECT s.contact, s.message_id, s.owed FROM message_states s "
+            "JOIN messages m USING (contact, direction, message_id) "
+            "WHERE s.direction = 'in' AND s.owed IS NOT NULL ORDER BY m.position"
+        ).fetchall()
+        return [(contact, message_id, ReceiptKind(owed)) for contact, message_id, owed in rows]
+
+    def clear_owed(self, contact: bytes, message_ids: Iterable[bytes]) -> None:
+        for message_id in message_ids:
+            self._change(
+                "UPDATE message_states SET owed = NULL "
+                "WHERE contact = ? AND direction = 'in' AND message_id = ?",
+                (contact, message_id),
+            )
+
+    def owe_delivery_for_read(self) -> None:
+        """Turns the read receipts still owed into delivery receipts (section 39.5)."""
+        self._change(
+            "UPDATE message_states SET owed = ? WHERE owed = ?",
+            (ReceiptKind.DELIVERED, ReceiptKind.READ),
+        )
+
+    def own_message_without_receipt(self, message_id: bytes) -> int | None:
+        """The number of an own message of the log that no receipt has reached yet."""
+        row = self.connection.execute(
+            "SELECT m.position FROM messages m "
+            "LEFT JOIN message_states s USING (contact, direction, message_id) "
+            "WHERE m.direction = 'out' AND m.message_id = ? AND s.receipt IS NULL",
+            (message_id,),
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def forget_traces(self, *, written_at_or_before: int) -> None:
+        self._change(FORGET_TRACES, (written_at_or_before,))
+
+    def timer(self, contact: bytes) -> int:
+        """The disappearing timer of the chat with a contact in seconds, 0 when off."""
+        row = self.connection.execute(
+            "SELECT seconds FROM timers WHERE contact = ?", (contact,)
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def set_timer(self, contact: bytes, seconds: int) -> None:
+        self._change(
+            "INSERT INTO timers VALUES (?, ?) ON CONFLICT DO UPDATE SET seconds = ?",
+            (contact, seconds, seconds),
+        )
+
+    def read_receipts(self) -> bool:
+        row = self.connection.execute("SELECT read_receipts FROM settings").fetchone()
+        return row is None or row[0] == 1
+
+    def set_read_receipts(self, *, on: bool) -> None:
+        self._change(
+            "INSERT INTO settings VALUES (1, ?) ON CONFLICT DO UPDATE SET read_receipts = ?",
+            (int(on), int(on)),
         )
 
     def uploads(self) -> list[UploadRow]:
@@ -841,6 +1209,45 @@ def _session(row: tuple[Any, ...]) -> StoredSession:
         state=_decode_state(state),
         initial_header=initial_header,
     )
+
+
+def _message(row: tuple[Any, ...]) -> LoggedMessage:
+    (
+        number,
+        contact,
+        direction,
+        message_id,
+        text,
+        written_at,
+        edits,
+        expires_after,
+        expires_at,
+        read_at,
+        receipt,
+        owed,
+    ) = row
+    return LoggedMessage(
+        number=number,
+        contact=contact,
+        incoming=direction == "in",
+        message_id=message_id,
+        text=text,
+        written_at=written_at,
+        edits=edits,
+        expires_after=expires_after,
+        expires_at=expires_at,
+        read_at=read_at,
+        receipt=None if receipt is None else ReceiptKind(receipt),
+        owed=None if owed is None else ReceiptKind(owed),
+    )
+
+
+def _direction(incoming: bool) -> str:
+    return "in" if incoming else "out"
+
+
+def _key(message: LoggedMessage) -> tuple[bytes, str, bytes]:
+    return message.contact, _direction(message.incoming), message.message_id
 
 
 def _file(row: tuple[Any, ...]) -> FileRow:

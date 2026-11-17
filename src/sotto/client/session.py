@@ -4,40 +4,59 @@
 `Client.send_text` turns a text into the bytes of a Send. Both commit what they change
 before they answer. The prekey lifecycle of section 21 is a set of methods that the network
 client calls at a start and after a LoggedIn; every one reads the time from one clock.
+The changes of part 5 (section 39) name a logged message by its number, its position in
+the log.
 """
 
+import itertools
 import secrets
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Callable, Iterable
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
 from sotto.client.envelope import (
     BLOB_ID_LENGTH,
     MAX_AVATAR_BYTES,
+    MAX_CAPTION_BYTES,
+    MAX_QUOTE_BYTES,
+    MAX_RECEIPT_IDS,
+    MESSAGE_ID_LENGTH,
     VERSION,
     AvatarTooLargeError,
     BadContentError,
     BadPaddingError,
     BadProfileNameError,
     NotAnImageError,
+    TextTooLongError,
     UnknownContentError,
     avatar_media_type,
-    decode_content,
+    cut_to,
     encode_attachment,
+    encode_deletion,
+    encode_edit,
     encode_profile,
+    encode_receipt,
     encode_text,
+    encode_timer,
     is_profile_name,
+    open_content,
     parse_envelope,
 )
 from sotto.client.files import save_file
 from sotto.client.store import (
     FileRow,
     Identity,
+    LoggedMessage,
+    NewState,
     OutboxRow,
     OwnProfile,
+    ReceiptKind,
     Store,
+    StoredQuote,
     StoredSession,
     StoredSignedPrekey,
     UploadRow,
@@ -72,9 +91,19 @@ from sotto.crypto.identity import (
 )
 from sotto.crypto.ratchet import MESSAGE_NONCE_LENGTH, DecryptFailedError, RatchetState
 from sotto.crypto.x3dh import BadInitialHeaderError
-from sotto.proto.sotto_pb2 import Attachment, InitialHeader, Login, PeerMessage, Profile
+from sotto.proto.sotto_pb2 import (
+    Attachment,
+    Content,
+    Deletion,
+    Edit,
+    InitialHeader,
+    Login,
+    PeerMessage,
+    Profile,
+    Quote,
+    Receipt,
+)
 
-MESSAGE_ID_LENGTH = 16
 SEEN_ID_SECONDS = 3196800
 SIGNED_PREKEY_ROTATION_SECONDS = 604800
 SIGNED_PREKEY_GRACE_SECONDS = 3196800
@@ -83,9 +112,10 @@ ONE_TIME_PREKEY_CAP = 100
 ONE_TIME_PREKEY_HELD_MAX = 1000
 BLOB_GONE = "BLOB_GONE"
 DELETED_ON_FAILURE = frozenset({BadBlobError.result, NotAnImageError.result})
+MAX_EDITS = 10
+EDIT_SECONDS = 86400
 
 type RandomBytes = Callable[[int], bytes]
-type Body = str | Attachment | Profile
 type Clock = Callable[[], float]
 
 
@@ -121,6 +151,22 @@ class FileTooLargeError(CryptoError):
     result = "FILE_TOO_LARGE"
 
 
+class NoSuchMessageError(CryptoError):
+    result = "NO_SUCH_MESSAGE"
+
+
+class NotOwnMessageError(CryptoError):
+    result = "NOT_OWN_MESSAGE"
+
+
+class EditTooLateError(CryptoError):
+    result = "EDIT_TOO_LATE"
+
+
+class TooManyEditsError(CryptoError):
+    result = "TOO_MANY_EDITS"
+
+
 class FileState(StrEnum):
     """The states of a file of section 33.5, as the store keeps them."""
 
@@ -148,12 +194,24 @@ class Delivered:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Quoted:
+    """The message a reply quotes as the client shows it: the number and the text of its
+    own copy when it has one, else the text of the quote; no text once it is gone."""
+
+    number: int | None
+    text: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Received:
     """What a Deliver gives: a text or an attachment to show, a profile that replaced the
-    sender's earlier one, or the named result of section 24.2.
+    sender's earlier one, a change of part 5, or the named result of section 24.2.
 
     `missing` is the GAP of section 20.3: the messages of the sender that can never be read,
-    counted by the skipped keys that this message removed without use.
+    counted by the skipped keys that this message removed without use. `number` is the
+    message of the log that the Deliver added, or the one that an edit (`edited`, the new
+    text in `text`) or a deletion (`deleted`) changed. `marked` are the own messages that a
+    receipt reached, delivered or `read`; `timer` is a new timer of the chat.
     """
 
     ack: bool
@@ -162,15 +220,31 @@ class Received:
     missing: int = 0
     attachment: Attachment | None = None
     profile: Profile | None = None
+    number: int | None = None
+    quote: Quoted | None = None
+    expires_after: int = 0
+    edited: bool = False
+    deleted: bool = False
+    marked: tuple[int, ...] = ()
+    read: bool = False
+    timer: int | None = None
+
+    @property
+    def is_a_new_message(self) -> bool:
+        """A message of the chat that entered the log: a text or an attachment."""
+        is_a_change = self.edited or self.deleted
+        return self.number is not None and not is_a_change
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Outgoing:
-    """The fields of a Send; a repeated Send carries them unchanged (section 22.2)."""
+    """The fields of a Send; a repeated Send carries them unchanged (section 22.2).
+    `number` is the message of the log that the Send carries, when it carries one."""
 
     message_id: bytes
     recipient: bytes
     payload: bytes
+    number: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -221,6 +295,7 @@ class Client:
         self._identity = identity
         self.identity_key = derive_identity_key(identity.seed)
         self.identity_dh_key = derive_x25519_public_key(identity.identity_dh_private_key)
+        self.expire_messages()
 
     def now(self) -> int:
         return int(self.clock())
@@ -296,10 +371,12 @@ class Client:
                 self.store.delete_one_time_prekey(one_time_prekey.id)
 
     def forget_seen_ids(self) -> None:
-        """Deletes the seen ids older than SEEN_ID_SECONDS, at a login (section 20.4)."""
+        """Deletes the seen ids and the traces of part 5 older than SEEN_ID_SECONDS, at a
+        login (sections 20.4 and 39.7)."""
         seen_at_or_before = self.now() - SEEN_ID_SECONDS
         with self.store.transaction():
             self.store.delete_seen_ids(seen_at_or_before=seen_at_or_before)
+            self.store.forget_traces(written_at_or_before=seen_at_or_before)
 
     def add_contact(self, user_id: str, *, name: str | None = None) -> bytes:
         """Adds the identity of a user id, under a local name if given, and returns its
@@ -380,27 +457,171 @@ class Client:
         return missing
 
     def send_text(
-        self, contact: bytes, text: str, *, bundle: Bundle | None = None
+        self,
+        contact: bytes,
+        text: str,
+        *,
+        bundle: Bundle | None = None,
+        reply_to: int | None = None,
     ) -> Outgoing:
-        """L1 of section 20.2: the bytes of a Send, committed to the outbox first.
+        """L1 of section 20.2: the bytes of a Send, committed to the outbox first, with the
+        number of the logged message. The text carries the timer of the chat and, with
+        `reply_to`, a quote of that message of the chat (section 39.2).
 
         Args:
             contact: The identity key of the contact.
             text: The text to send.
             bundle: A bundle fetched for the contact; needed when it has no session.
+            reply_to: The number of the message of the chat that the text answers.
 
         Raises:
-            TextTooLongError: The text is longer than MAX_TEXT_BYTES; nothing else ran.
+            TextTooLongError: The text is longer than MAX_TEXT_BYTES, or with its quote
+                longer than MAX_CONTENT_BYTES; nothing else ran.
+            NoSuchMessageError: `reply_to` names no message of the chat with the contact.
             NotAContactError: The identity is not a contact.
             CryptoError: START failed with the result that it names.
             ValueError: The contact has no session and no bundle was given.
         """
-        sealed = self._seal(contact, encode_text(text), bundle)
-        message_id = sealed.outgoing.message_id
+        quote = None if reply_to is None else self._quote(contact, reply_to)
+        expires_after = self.store.timer(contact)
+        plaintext = encode_text(text, quote=quote, expires_after=expires_after)
+        sealed = self._seal(contact, plaintext, bundle)
         with self.store.transaction():
             self._commit_sealed(sealed)
-            self.store.log_message(contact, direction="out", message_id=message_id, text=text)
+            number = self._log_own(sealed.outgoing, text, quote, expires_after)
+        return replace(sealed.outgoing, number=number)
+
+    def edit(
+        self, contact: bytes, number: int, text: str, *, bundle: Bundle | None = None
+    ) -> Outgoing:
+        """Sends an edit of an own message of the chat and replaces its text, the caption of
+        an attachment (section 39.3).
+
+        Raises:
+            NoSuchMessageError, NotOwnMessageError: The number names no own message of the
+                chat with the contact.
+            TooManyEditsError: The message was edited MAX_EDITS times.
+            EditTooLateError: The message was logged more than EDIT_SECONDS ago.
+            TextTooLongError: The text does not fit an edit, or a caption is longer than
+                MAX_CAPTION_BYTES.
+        """
+        message = self._own_message(contact, number)
+        now = self.now()
+        if message.edits >= MAX_EDITS:
+            raise TooManyEditsError(f"the message was edited {MAX_EDITS} times")
+        if message.written_at is None or now - message.written_at > EDIT_SECONDS:
+            raise EditTooLateError(f"an edit comes within {EDIT_SECONDS} seconds")
+        is_a_file = bool(self.store.files_of(message))
+        caption_is_too_long = is_a_file and len(text.encode()) > MAX_CAPTION_BYTES
+        if caption_is_too_long:
+            raise TextTooLongError(f"a caption is at most {MAX_CAPTION_BYTES} bytes")
+
+        sealed = self._seal(contact, encode_edit(message.message_id, text), bundle)
+        with self.store.transaction():
+            self._commit_sealed(sealed)
+            self.store.edit_message(message, text, at=now)
         return sealed.outgoing
+
+    def delete(self, contact: bytes, number: int, *, bundle: Bundle | None = None) -> Outgoing:
+        """Sends the request that both sides delete an own message of the chat, deletes it
+        here and saves the DeleteBlob of the blob of an attachment (section 39.4).
+
+        Raises:
+            NoSuchMessageError, NotOwnMessageError: The number names no own message of the
+                chat with the contact.
+        """
+        message = self._own_message(contact, number)
+        sealed = self._seal(contact, encode_deletion(message.message_id), bundle)
+        with self.store.transaction():
+            self._commit_sealed(sealed)
+            files = self._remove(message)
+            for file in files:
+                self.store.add_blob_deletion(self.identity_key, file.attachment.blob_id)
+        _delete_saved_files(files)
+        return sealed.outgoing
+
+    def timer(self, contact: bytes) -> int:
+        return self.store.timer(contact)
+
+    def set_timer(
+        self, contact: bytes, seconds: int, *, bundle: Bundle | None = None
+    ) -> Outgoing:
+        """Sends a new timer of the chat, 0 for none, and keeps it (section 39.6).
+
+        Raises:
+            BadTimerError: The seconds are above MAX_TIMER_SECONDS.
+            NotAContactError: The identity is not a contact.
+        """
+        sealed = self._seal(contact, encode_timer(seconds), bundle)
+        with self.store.transaction():
+            self._commit_sealed(sealed)
+            self.store.set_timer(contact, seconds)
+        return sealed.outgoing
+
+    def read_receipts(self) -> bool:
+        return self.store.read_receipts()
+
+    def set_read_receipts(self, *, on: bool) -> None:
+        """Turns read receipts on or off; off, the read receipts still owed go out as
+        delivery receipts (section 39.5)."""
+        with self.store.transaction():
+            self.store.set_read_receipts(on=on)
+            if not on:
+                self.store.owe_delivery_for_read()
+
+    def mark_read(self, contact: bytes, numbers: Iterable[int]) -> None:
+        """The user has seen these messages of the chat: their timer starts, and a read
+        receipt is owed unless read receipts are off (sections 39.5 and 39.6)."""
+        now = self.now()
+        sends_read_receipts = self.store.read_receipts()
+        with self.store.transaction():
+            for number in numbers:
+                message = self.store.message(number)
+                if message is None or message.contact != contact:
+                    continue
+                is_own_or_seen = not message.incoming or message.read_at is not None
+                if is_own_or_seen:
+                    continue
+                expires_at = now + message.expires_after if message.expires_after else None
+                owed = ReceiptKind.READ if sends_read_receipts else message.owed
+                self.store.set_read(message, read_at=now, expires_at=expires_at, owed=owed)
+
+    def send_owed_receipts(self) -> list[Outgoing]:
+        """Seals the receipts owed to contacts with a session, one message per contact and
+        kind for up to MAX_RECEIPT_IDS messages, each committed with its debt cleared."""
+        owed: defaultdict[tuple[bytes, bool], list[bytes]] = defaultdict(list)
+        for contact, message_id, kind in self.store.owed_receipts():
+            owed[contact, kind is ReceiptKind.READ].append(message_id)
+
+        outgoing = []
+        for (contact, read), message_ids in owed.items():
+            if not self.has_session(contact):
+                continue
+            for batch in itertools.batched(message_ids, MAX_RECEIPT_IDS, strict=False):
+                sealed = self._seal(contact, encode_receipt(batch, read=read), None)
+                with self.store.transaction():
+                    self._commit_sealed(sealed)
+                    self.store.clear_owed(contact, batch)
+                outgoing.append(sealed.outgoing)
+        return outgoing
+
+    def expire_messages(self) -> list[int]:
+        """Removes the messages whose timer ran out, their files included, and returns their
+        numbers (section 39.6)."""
+        expired = self.store.expired_messages(self.now())
+        if not expired:
+            return []
+        files = []
+        with self.store.transaction():
+            for message in expired:
+                files += self._remove(message)
+        _delete_saved_files(files)
+        return [message.number for message in expired]
+
+    def sent_number(self, message_id: bytes) -> int | None:
+        """The number of the own message of the log with this id, while no receipt has
+        reached it."""
+        return self.store.own_message_without_receipt(message_id)
 
     def check_file(self, contact: bytes, size: int, *, blob_max_bytes: int) -> None:
         """The checks of section 33.1, in their order.
@@ -467,16 +688,19 @@ class Client:
             CryptoError: START failed with the result that it names.
             ValueError: The contact has no session and no bundle was given.
         """
+        expires_after = self.store.timer(upload.contact)
         if upload.profile:
             plaintext = encode_profile(self.store.own_profile().name, upload.attachment)
         else:
-            plaintext = encode_attachment(upload.attachment)
+            plaintext = encode_attachment(upload.attachment, expires_after=expires_after)
         sealed = self._seal(upload.contact, plaintext, bundle)
         with self.store.transaction():
             self._commit_sealed(sealed)
             self.store.delete_upload(upload.blob_id)
             if upload.profile:
                 return sealed.outgoing
+            caption = upload.attachment.caption
+            number = self._log_own(sealed.outgoing, caption, None, expires_after)
             self.store.add_file(
                 upload.contact,
                 incoming=False,
@@ -484,7 +708,7 @@ class Client:
                 attachment=upload.attachment,
                 state=FileState.SENDING,
             )
-        return sealed.outgoing
+        return replace(sealed.outgoing, number=number)
 
     def give_up_upload(self, blob_id: bytes) -> None:
         """Deletes an upload that is not sent and saves the DeleteBlob of its blob."""
@@ -749,6 +973,7 @@ class Client:
         decrypted = self._decrypt_state(state, agreement.associated_data, delivered, envelope)
         content, result = _read_content(decrypted.padded_plaintext)
 
+        files: list[FileRow] = []
         with self.store.transaction():
             session_id = self.store.add_session(
                 delivered.sender,
@@ -768,39 +993,228 @@ class Client:
             if pin is None:
                 self.store.set_pin(delivered.sender, initial_header.identity_dh_key)
             self._owe_profile_to_a_new_session(delivered.sender)
-            self._save_received(delivered, content)
-        return _received(content, result, missing=decrypted.purged + dropped)
+            received = self._save_received(delivered, content, files)
+        _delete_saved_files(files)
+        return replace(received, result=result, missing=decrypted.purged + dropped)
 
     def _accept(
         self, delivered: Delivered, session: StoredSession, decrypted: ratchet.Decrypted
     ) -> Received:
         """ACCEPT of section 20.3."""
         content, result = _read_content(decrypted.padded_plaintext)
+        files: list[FileRow] = []
         with self.store.transaction():
             self.store.accept_on_session(session.session_id, decrypted.state)
-            self._save_received(delivered, content)
-        return _received(content, result, missing=decrypted.purged)
+            received = self._save_received(delivered, content, files)
+        _delete_saved_files(files)
+        return replace(received, result=result, missing=decrypted.purged)
 
-    def _save_received(self, delivered: Delivered, content: Body | None) -> None:
-        self.store.add_seen_id(delivered.sender, delivered.message_id, seen_at=self.now())
-        match content:
-            case str():
-                self.store.log_message(
-                    delivered.sender,
-                    direction="in",
-                    message_id=delivered.message_id,
-                    text=content,
-                )
-            case Attachment():
-                self.store.add_file(
-                    delivered.sender,
-                    incoming=True,
-                    message_id=delivered.message_id,
-                    attachment=content,
-                    state=FileState.OFFERED,
-                )
-            case Profile():
-                self._save_profile(delivered, content)
+    def _save_received(
+        self, delivered: Delivered, content: Content | None, removed: list[FileRow]
+    ) -> Received:
+        """Saves what an accepted message changes, in the caller's transaction; the files of
+        a message that a deletion removed go into `removed`."""
+        sender = delivered.sender
+        self.store.add_seen_id(sender, delivered.message_id, seen_at=self.now())
+        nothing = Received(ack=True, text=None, result=None)
+        if content is None:
+            return nothing
+
+        match content.WhichOneof("body"):
+            case "text" | "attachment":
+                return self._save_message(delivered, content)
+            case "profile":
+                self._save_profile(delivered, content.profile)
+                return replace(nothing, profile=content.profile)
+            case "edit":
+                return self._apply_edit(sender, content.edit)
+            case "deletion":
+                return self._apply_deletion(sender, content.deletion, removed)
+            case "receipt":
+                return self._apply_receipt(sender, content.receipt)
+            case "timer":
+                self.store.set_timer(sender, content.timer.seconds)
+                return replace(nothing, timer=content.timer.seconds)
+            case member:
+                raise AssertionError(f"open_content passed the member {member} unchecked")
+
+    def _save_message(self, delivered: Delivered, content: Content) -> Received:
+        """A text or an attachment of the chat (section 39): logged with its quote and its
+        timer and a delivery receipt owed, unless a deletion came first; an edit that came
+        first gives its text."""
+        sender, message_id = delivered.sender, delivered.message_id
+        trace = self.store.trace(sender, incoming=True, message_id=message_id)
+        nothing = Received(ack=True, text=None, result=None)
+        if trace is not None and trace.gone:
+            return nothing
+
+        early_text = None if trace is None else trace.early_text
+        attachment = content.attachment if content.HasField("attachment") else None
+        text = content.text if attachment is None else attachment.caption
+        if early_text is not None:
+            text = early_text
+            if attachment is not None:
+                attachment.caption = early_text
+        quote = self._received_quote(sender, content) if content.HasField("quote") else None
+
+        number = self.store.log_message(
+            sender, direction="in", message_id=message_id, text=text
+        )
+        state = NewState(
+            written_at=self.now(),
+            expires_after=content.expires_after,
+            quote=quote,
+            owed=ReceiptKind.DELIVERED,
+        )
+        self.store.save_state(sender, incoming=True, message_id=message_id, state=state)
+        if attachment is not None:
+            self.store.add_file(
+                sender,
+                incoming=True,
+                message_id=message_id,
+                attachment=attachment,
+                state=FileState.OFFERED,
+            )
+        return Received(
+            ack=True,
+            text=None if attachment is not None else text,
+            result=None,
+            attachment=attachment,
+            number=number,
+            quote=None if quote is None else self._shown_quote(sender, quote),
+            expires_after=content.expires_after,
+        )
+
+    def _received_quote(self, sender: bytes, content: Content) -> StoredQuote:
+        """The quote of a received reply; `own` means the sender wrote the quoted message.
+        The text of a quote of a message that is gone here is not kept."""
+        quote = content.quote
+        quoted_incoming = quote.own
+        trace = self.store.trace(sender, incoming=quoted_incoming, message_id=quote.message_id)
+        is_gone = trace is not None and trace.gone
+        return StoredQuote(
+            incoming=quoted_incoming,
+            message_id=quote.message_id,
+            text=None if is_gone else quote.text,
+        )
+
+    def _shown_quote(self, contact: bytes, quote: StoredQuote) -> Quoted:
+        """The client's own copy of the quoted message when it has one (section 39.2)."""
+        own_copy = self.store.message_by_id(
+            contact, incoming=quote.incoming, message_id=quote.message_id
+        )
+        if own_copy is None:
+            return Quoted(number=None, text=quote.text)
+        return Quoted(number=own_copy.number, text=own_copy.text)
+
+    def _apply_edit(self, sender: bytes, edit: Edit) -> Received:
+        """An edit of a message of the sender's own (section 39.3); one that comes before
+        its message is kept for it, one for a message that is gone is dropped."""
+        nothing = Received(ack=True, text=None, result=None)
+        now = self.now()
+        message = self.store.message_by_id(sender, incoming=True, message_id=edit.message_id)
+        if message is None:
+            trace = self.store.trace(sender, incoming=True, message_id=edit.message_id)
+            edits = 0 if trace is None else trace.edits
+            is_awaited = trace is None or not trace.gone
+            has_edits_left = edits < MAX_EDITS
+            if is_awaited and has_edits_left:
+                self.store.count_edit(sender, edit.message_id, at=now, early_text=edit.text)
+            return nothing
+        if message.edits >= MAX_EDITS:
+            return nothing
+        self.store.edit_message(message, edit.text, at=now)
+        return replace(nothing, text=edit.text, number=message.number, edited=True)
+
+    def _apply_deletion(
+        self, sender: bytes, deletion: Deletion, removed: list[FileRow]
+    ) -> Received:
+        """Deletes a message of the sender's own; one that has not arrived is deleted when
+        it comes (section 39.4)."""
+        nothing = Received(ack=True, text=None, result=None)
+        message_id = deletion.message_id
+        message = self.store.message_by_id(sender, incoming=True, message_id=message_id)
+        if message is None:
+            self.store.leave_trace(sender, incoming=True, message_id=message_id, at=self.now())
+            return nothing
+        removed += self._remove(message)
+        return replace(nothing, number=message.number, deleted=True)
+
+    def _apply_receipt(self, sender: bytes, receipt: Receipt) -> Received:
+        """Moves the own messages a receipt names forward: delivered, then read; a read
+        receipt also counts as delivered, and a mark never goes back (section 39.5)."""
+        mark = ReceiptKind.READ if receipt.read else ReceiptKind.DELIVERED
+        marked = []
+        for message_id in receipt.message_ids:
+            message = self.store.message_by_id(sender, incoming=False, message_id=message_id)
+            # A message logged before part 5 takes no mark (section 39.10).
+            if message is None or message.written_at is None:
+                continue
+            moves_forward = message.receipt is None or (
+                receipt.read and message.receipt is ReceiptKind.DELIVERED
+            )
+            if moves_forward:
+                self.store.set_receipt(message, mark)
+                marked.append(message.number)
+        return Received(
+            ack=True, text=None, result=None, marked=tuple(marked), read=receipt.read
+        )
+
+    def _remove(self, message: LoggedMessage) -> list[FileRow]:
+        """Deletes a message of the log in the caller's transaction and returns its files;
+        the blob of a received file that was not downloaded is deleted at the relay."""
+        files = self.store.files_of(message)
+        for file in files:
+            not_downloaded = file.state in (FileState.OFFERED, FileState.RECEIVING)
+            if file.incoming and not_downloaded:
+                self.store.add_blob_deletion(file.contact, file.attachment.blob_id)
+        self.store.remove_message(message, at=self.now())
+        return files
+
+    def _log_own(
+        self, outgoing: Outgoing, text: str, quote: Quote | None, expires_after: int
+    ) -> int:
+        """Logs an own message of the chat in the caller's transaction; its timer runs from
+        now (section 39.6)."""
+        now = self.now()
+        number = self.store.log_message(
+            outgoing.recipient, direction="out", message_id=outgoing.message_id, text=text
+        )
+        stored_quote = None
+        if quote is not None:
+            stored_quote = StoredQuote(
+                incoming=not quote.own, message_id=quote.message_id, text=quote.text
+            )
+        state = NewState(
+            written_at=now,
+            expires_after=expires_after,
+            expires_at=now + expires_after if expires_after else None,
+            quote=stored_quote,
+        )
+        self.store.save_state(
+            outgoing.recipient, incoming=False, message_id=outgoing.message_id, state=state
+        )
+        return number
+
+    def _quote(self, contact: bytes, number: int) -> Quote:
+        quoted = self._message_of(contact, number)
+        return Quote(
+            message_id=quoted.message_id,
+            own=not quoted.incoming,
+            text=cut_to(quoted.text, MAX_QUOTE_BYTES),
+        )
+
+    def _message_of(self, contact: bytes, number: int) -> LoggedMessage:
+        message = self.store.message(number)
+        if message is None or message.contact != contact:
+            raise NoSuchMessageError(f"the chat has no message {number}")
+        return message
+
+    def _own_message(self, contact: bytes, number: int) -> LoggedMessage:
+        message = self._message_of(contact, number)
+        if message.incoming:
+            raise NotOwnMessageError(f"message {number} is the contact's")
+        return message
 
     def _save_profile(self, delivered: Delivered, profile: Profile) -> None:
         """Section 36.3: the profile replaces the earlier one of its sender whole; an
@@ -1003,20 +1417,19 @@ def _check_initial_header(
         raise IdentityKeyMismatchError("the initial header carries another X25519 key")
 
 
-def _read_content(padded_plaintext: bytes) -> tuple[Body | None, str | None]:
+def _read_content(padded_plaintext: bytes) -> tuple[Content | None, str | None]:
     """The content of a message that decrypted, or the result that it has none (20.3)."""
     try:
-        return decode_content(padded_plaintext), None
+        return open_content(padded_plaintext), None
     except (BadPaddingError, BadContentError, UnknownContentError) as error:
         return None, error.result
 
 
-def _received(content: Body | None, result: str | None, *, missing: int) -> Received:
-    return Received(
-        ack=True,
-        text=content if isinstance(content, str) else None,
-        result=result,
-        missing=missing,
-        attachment=content if isinstance(content, Attachment) else None,
-        profile=content if isinstance(content, Profile) else None,
-    )
+def _delete_saved_files(files: list[FileRow]) -> None:
+    """Removes the received files of messages that are gone, after their commit."""
+    for file in files:
+        if file.saved_as is None:
+            continue
+        # A file that cannot be removed stays where it is (section 39.4).
+        with suppress(OSError):
+            Path(file.saved_as).unlink()

@@ -3,8 +3,9 @@
 Part 1, sections 1 to 15: identity, the prekey bundle and the relay protocol. Part 2,
 sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 27 close
 both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Part 4,
-sections 35 to 37: the profile, a display name and an avatar. Appendix A follows
-section 37.
+sections 35 to 37: the profile, a display name and an avatar. Part 5, sections 38 to 40:
+replies, edits, deletion for both, receipts and the disappearing timer. Appendix A
+follows section 40.
 
 ## 1. Status and scope
 
@@ -36,11 +37,15 @@ the attachment of a message and the rules of a client around them (section 28).
 Part 4 specifies the profile that a client sends to its contacts: a display name and an
 avatar that travels as an attachment of part 3 (section 35).
 
+Part 5 specifies what a client says about the messages of a chat: a reply with a quote,
+an edit, a request to delete a message for both, delivery and read receipts and the
+disappearing timer (section 38).
+
 ### 1.2 Status
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee of parts 1 to 4 carries a citation (section 2.6), which names the
+- Every guarantee of parts 1 to 5 carries a citation (section 2.6), which names the
   test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
@@ -50,7 +55,7 @@ avatar that travels as an attachment of part 3 (section 35).
 | Version                     | Value | Covers                                                    |
 |-----------------------------|-------|-----------------------------------------------------------|
 | Relay protocol version      | 1     | Sections 6 to 13, the login string of section 4.2, and sections 30 and 31 |
-| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, sections 29, 32 and 33, and sections 35 and 36 |
+| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, sections 29, 32 and 33, sections 35 and 36, and sections 38 and 39 |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
 what a client does with a relay protocol version it does not know.
@@ -1721,8 +1726,10 @@ has no rule about it (section 7.12).
 - A change that a client of version 1 would refuse or misread is a new version: another
   layout of the header, of the associated data or of the padding, another cipher or key
   derivation. A new member of the `Content` oneof is not: a client of version 1 reports
-  such a message as UNKNOWN_CONTENT (section 19.5). `attachment` of part 3 and `profile`
-  of part 4 are of this kind.
+  such a message as UNKNOWN_CONTENT (section 19.5). `attachment` of part 3, `profile`
+  of part 4 and `edit`, `deletion`, `receipt` and `timer` of part 5 are of this kind.
+  Neither is a new field of `Content` beside the oneof, which a client of version 1
+  ignores: `quote` and `expires_after` of part 5 (section 39.9).
 - A bundle has no version field. The keys and signatures of a bundle are those of version
   1; a version that adds a key adds a field and a signed string for it.
 
@@ -1757,6 +1764,9 @@ of part 3, whose operations section 34 names
 and the fifth `vectors/profile.json` of part 4, whose operations section 37 names
 [test: tests/crypto/test_profile_vectors.py::test_positive_vectors_replay_byte_for_byte]
 [test: tests/crypto/test_profile_vectors.py::test_negative_vectors_raise_their_named_error].
+The sixth is `vectors/content.json` of part 5, whose operations section 40 names
+[test: tests/crypto/test_content_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_content_vectors.py::test_negative_vectors_raise_their_named_error].
 
 ### 15.2 The schema of a vector file
 
@@ -1776,7 +1786,7 @@ Each vector is a JSON object.
 | `inputs`        | object | always                   | Everything the operation consumes                              |
 | `intermediates` | object | always, MAY be empty     | Every value the operation computes on the way to its result    |
 | `outputs`       | object | positive case only       | The expected result, MAY be empty for a check that passes      |
-| `error`         | string | negative case only       | The expected failure: one name of section 11, 24.2, 33.6 or 36.7 |
+| `error`         | string | negative case only       | The expected failure: one name of section 11, 24.2, 33.6, 36.7 or 39.11 |
 
 Rules:
 
@@ -1789,7 +1799,7 @@ Rules:
 - `intermediates` holds each value an implementation needs to find where it went wrong,
   the signed strings of section 4 among them.
 - `error` is an Error code of section 11.2, the name of a close code of section 11.3 or a
-  local result of section 11.4, 24.2, 33.6 or 36.7, spelled as there.
+  local result of section 11.4, 24.2, 33.6, 36.7 or 39.11, spelled as there.
 - A reader refuses a file whose `schema` it does not know, and reports a vector whose
   `operation` it does not implement instead of skipping it.
 
@@ -2677,7 +2687,13 @@ message Content {
     string text = 1;
     Attachment attachment = 2;
     Profile profile = 3;
+    Edit edit = 4;
+    Deletion deletion = 5;
+    Receipt receipt = 6;
+    Timer timer = 7;
   }
+  Quote quote = 8;
+  uint32 expires_after = 9;
 }
 
 // A file that travels as a blob of the relay (section 32).
@@ -2699,6 +2715,35 @@ message Profile {
   string name = 1;
   Attachment avatar = 2;
 }
+
+// The message that a text or an attachment answers (section 38).
+message Quote {
+  bytes message_id = 1;
+  bool own = 2;
+  string text = 3;
+}
+
+// A new text for a message of the sender's own (section 38).
+message Edit {
+  bytes message_id = 1;
+  string text = 2;
+}
+
+// The sender asks that both sides delete a message of its own (section 38).
+message Deletion {
+  bytes message_id = 1;
+}
+
+// Messages of the receiver that the sender's client holds, or that its user has read.
+message Receipt {
+  bool read = 1;
+  repeated bytes message_ids = 2;
+}
+
+// The disappearing timer of the chat in seconds; 0 turns it off (section 38).
+message Timer {
+  uint32 seconds = 1;
+}
 ```
 
 The field numbers are frozen by the rule of section 7.2 and were chosen by its rules:
@@ -2710,9 +2755,12 @@ every message counts from 1 without a gap and every tag is one byte. In addition
   two fields of `UploadBundle`.
 - `one_time_prekey_id` is the one field of this protocol with the proto3 label
   `optional`: 0 is a valid prekey id, so the field needs a presence of its own.
-- `Content` is a oneof with three members: `text`, `attachment` of part 3 (section 32)
-  and `profile` of part 4 (section 35). A kind of message that is added later is a new member of the oneof with
-  the next number, and travels as a message of the ratchet like a text.
+- `Content` is a oneof with seven members: `text`, `attachment` of part 3 (section 32),
+  `profile` of part 4 (section 35), and `edit`, `deletion`, `receipt` and `timer` of
+  part 5 (section 38). A kind of message that is added later is a new member of the oneof
+  with the next number, and travels as a message of the ratchet like a text.
+- `quote` and `expires_after` of part 5 are the two fields of `Content` beside its oneof:
+  they go with a text or an attachment (section 38.2).
 
 The relay parses none of this (section 7.12).
 
@@ -2773,6 +2821,8 @@ every message that decrypts to version 1 (section 16.5).
 | `text` | 1   | string | UTF-8, 0 to MAX_TEXT_BYTES bytes when sent (section 19.7)     |
 | `attachment` | 2 | Attachment | A file of part 3, with the checks of section 32.2   |
 | `profile` | 3 | Profile | The profile of part 4, with the checks of section 35.3      |
+| `edit`, `deletion`, `receipt`, `timer` | 4 to 7 | Edit, Deletion, Receipt, Timer | The members of part 5, with the checks of section 38.3 |
+| `quote`, `expires_after` | 8, 9 | Quote, uint32 | Beside the oneof, with a text or an attachment (section 38.3) |
 
 After a message decrypted and its padding was removed (section 19.6), the client parses
 the bytes as a `Content`
@@ -2783,7 +2833,8 @@ the bytes as a `Content`
   BAD_CONTENT.
 - A `Content` in which no member that the client knows is set gives the result
   UNKNOWN_CONTENT. A client that does not implement part 3 knows one member, `text`; one
-  that does knows `attachment` as well, and one that implements part 4 knows `profile`.
+  that does knows `attachment` as well, one that implements part 4 knows `profile`, and
+  one that implements part 5 knows `edit`, `deletion`, `receipt` and `timer`.
 - The text is whatever the peer chose to send. The command-line client of this
   repository prints it with the C0, C1 and bidirectional control characters escaped
   [test: tests/client/test_cli.py::test_peer_text_is_printed_with_control_characters_escaped].
@@ -2844,7 +2895,8 @@ envelope:
 
 One more block of 256 bytes makes 65505 and does not fit. The limit is one number for
 every message, with or without an initial header, so that a text that was accepted for
-sending fits whatever the state of the session. A receiver applies no limit of its own to
+sending fits whatever the state of the session. A text with a quote or a timer of part 5
+is bound by the length of its whole `Content`, MAX_CONTENT_BYTES (section 38.4). A receiver applies no limit of its own to
 a text: the largest frame bounds it
 [test: tests/client/test_session.py::test_largest_text_fits_a_payload_with_an_initial_header]
 [test: tests/client/test_session.py::test_receiver_applies_no_limit_to_a_text].
@@ -2965,7 +3017,8 @@ Rules that hold for every row
 - An ACCEPT whose plaintext gives BAD_PADDING, BAD_CONTENT or UNKNOWN_CONTENT saves the
   state and the seen id without a text. The first two are shown as a message that could
   not be read. The third is shown as nothing: a later member of `Content` need not be a
-  message of the chat, as `profile` of part 4 is not (section 36.6)
+  message of the chat, as `profile` of part 4 and the changes and receipts of part 5 are
+  not (sections 36.6 and 39.9)
   [test: tests/client/test_cli.py::test_unknown_content_prints_nothing].
 - A bundle without a one-time prekey starts a session all the same: START never fails
   for the lack of one (section 16.6). A client that refused such a bundle could be cut
@@ -3209,7 +3262,8 @@ A client keeps, for one identity
   the message id, the recipient and the bytes of the payload;
 - the message log: the texts it sent and received.
 
-Section 33.7 adds what part 3 keeps, and section 36.1 what part 4 keeps.
+Section 33.7 adds what part 3 keeps, section 36.1 what part 4 keeps, and section 39.10
+what part 5 keeps.
 
 No frame and no payload carries the seed or a private key [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 
@@ -3422,7 +3476,8 @@ their results have names, which a negative test vector states as its `error`
 
 IDENTITY_KEY_MISMATCH is the name of section 11.4 with the same meaning: another X25519
 identity key than the pinned one, in a bundle there and in an initial header here.
-Section 33.6 names the local results of part 3, and section 36.7 those of part 4.
+Section 33.6 names the local results of part 3, section 36.7 those of part 4, and
+section 39.11 those of part 5.
 
 ### 24.3 What the test vectors record
 
@@ -3597,10 +3652,10 @@ environment, or has no user before a later stage of the project.
 - Encryption of the client store, and key storage in a keychain or in hardware.
 - Moving an identity to another device, and a backup of it.
 - Replacing or revoking an identity key.
-- Delivery receipts, read receipts and requests to send a message again.
+- Requests to send a message again, and any proof that a peer deleted a message.
 - Expiry of a session by time.
-- Kinds of content other than a text and an attachment. The oneof of section 19.1 is
-  their place.
+- Kinds of content beyond those of parts 1 to 5, such as reactions or a message
+  forwarded from another chat. The oneof of section 19.1 is their place.
 - Of files: a blob for several recipients, the forwarding of a blob to another
   recipient, playback of a file before its download ends, previews that the relay makes,
   and the reuse of a blob for the same file.
@@ -4734,6 +4789,428 @@ value is a hex string.
   [test: tests/crypto/test_profile_vectors.py::test_vectors_cover_the_cases_of_section_37].
 - `avatar-media-type`: the first bytes of a picture. The cases: a JPEG, a PNG, a GIF,
   no bytes, and the first two bytes of a JPEG.
+- A negative vector records no intermediate.
+
+## 38. Replies, edits, deletion, receipts and the timer
+
+### 38.1 What part 5 is
+
+Part 5 specifies what a client says about the messages of a chat: a reply that quotes an
+earlier message, an edit of an own message, a request that both sides delete an own
+message, the receipts that a message reached the client of the peer and that its user
+read it, and the disappearing timer of a chat. It adds four members to the `Content`
+oneof, `edit`, `deletion`, `receipt` and `timer`, and two fields beside the oneof that go
+with a text or an attachment, `quote` and `expires_after`. It adds no key, no frame and no
+rule of the relay.
+
+- Each of them travels as a message of the ratchet, sealed and padded like a text
+  (sections 17 to 19). The relay sees a message of the usual length and nothing of what
+  it says; it learns how many there are and when they travel (threat model, "What the
+  relay learns").
+- A message of the chat is a `Content` whose member is `text` or `attachment`. The other
+  members of part 5, like `profile` of part 4, are signals about the chat: none of them
+  is shown as a message of its own or counts as unread (section 39.7).
+- Delete for both and the timer are requests that the client of the peer honours when it
+  implements this part, and nothing more. Nothing makes the client of the peer honour
+  them, and nothing protects a message from the peer who received it (threat model, "A
+  peer").
+
+Part 5 changes neither version number of section 1.3. The four members are new members of
+the oneof, which a client of version 1 that does not implement part 5 reports as
+UNKNOWN_CONTENT, and the two fields are fields it does not have, which it ignores
+(sections 14.2 and 39.9).
+
+The command-line client of this repository implements part 5. Every rule of part 5
+carries a citation like the rules of parts 1 to 4 (section 1.2).
+
+### 38.2 The fields
+
+The messages of part 5 are listed in section 19.1. `Content` has two fields beside its
+oneof:
+
+| Field           | No. | Type   | Length or value                                                      |
+|-----------------|-----|--------|----------------------------------------------------------------------|
+| `quote`         | 8   | Quote  | Present or absent: the message of the chat that a text or an attachment answers |
+| `expires_after` | 9   | uint32 | 0, or 1 to MAX_TIMER_SECONDS: the timer of a text or an attachment, in seconds |
+
+`Quote`, the message that a reply answers:
+
+| Field        | No. | Type   | Length or value                                                        |
+|--------------|-----|--------|------------------------------------------------------------------------|
+| `message_id` | 1   | bytes  | 16, the id of the quoted message (section 39.1)                        |
+| `own`        | 2   | bool   | True when the sender of the reply wrote the quoted message, false when its receiver did |
+| `text`       | 3   | string | 0 to MAX_QUOTE_BYTES, 256, bytes of UTF-8 when sent: the start of the quoted text |
+
+`Edit`, a new text for an own message:
+
+| Field        | No. | Type   | Length or value                                                        |
+|--------------|-----|--------|------------------------------------------------------------------------|
+| `message_id` | 1   | bytes  | 16, the id of a message of the sender's own                            |
+| `text`       | 2   | string | UTF-8, the new text, or the new caption of an attachment               |
+
+`Deletion`, the request that both sides delete an own message:
+
+| Field        | No. | Type   | Length or value                                                        |
+|--------------|-----|--------|------------------------------------------------------------------------|
+| `message_id` | 1   | bytes  | 16, the id of a message of the sender's own                            |
+
+`Receipt`, about messages of its receiver:
+
+| Field         | No. | Type           | Length or value                                                |
+|---------------|-----|----------------|----------------------------------------------------------------|
+| `read`        | 1   | bool           | False: the client of the sender holds the messages. True: its user has seen them |
+| `message_ids` | 2   | repeated bytes | 16 each; 1 to MAX_RECEIPT_IDS, 1000, ids when sent             |
+
+`Timer`, the disappearing timer of the chat:
+
+| Field     | No. | Type   | Length or value                                                          |
+|-----------|-----|--------|--------------------------------------------------------------------------|
+| `seconds` | 1   | uint32 | 0, which turns the timer off, or 1 to MAX_TIMER_SECONDS, 2419200, four weeks |
+
+A client sends nothing beyond these limits
+[test: tests/client/test_envelope.py::test_part_5_member_beyond_a_limit_of_section_38_2_is_not_encoded]
+[test: tests/crypto/test_content_vectors.py::test_negative_vectors_raise_their_named_error]:
+
+- `quote` and `expires_after` go with a text or an attachment and with no other member.
+- The `text` of a quote is the start of the text of the quoted message, for an attachment
+  of its caption, cut at a character boundary to at most MAX_QUOTE_BYTES. It is what a
+  receiver that does not have the quoted message shows; it is not the message.
+- A timer above MAX_TIMER_SECONDS, in `expires_after` or in a `Timer`, is not sent: the
+  result is BAD_TIMER.
+- A `Content` longer than MAX_CONTENT_BYTES is not sent: the result is TEXT_TOO_LONG
+  (section 38.4).
+
+### 38.3 The receiver's checks
+
+After a message decrypted and its plaintext parsed as a `Content` (section 19.5), the
+result is BAD_CONTENT when
+[test: tests/crypto/test_content_vectors.py::test_negative_vectors_raise_their_named_error]:
+
+- the `message_id` of an `edit` or of a `deletion`, or one of the `message_ids` of a
+  `receipt`, is not 16 bytes;
+- the `seconds` of a `timer` are above MAX_TIMER_SECONDS;
+- the member is a `text` or an `attachment`, and its `quote` is present with a
+  `message_id` that is not 16 bytes, or its `expires_after` is above MAX_TIMER_SECONDS.
+
+A string that is not UTF-8 gives BAD_CONTENT, as everywhere (section 19.5). With another
+member than a text or an attachment, `quote` and `expires_after` are neither read nor
+checked, and a `Content` that sets one of them and no member is UNKNOWN_CONTENT. The text
+of an `edit` and of a `quote` has no limit of the receiver's own: the largest frame bounds
+it, as it bounds a text (section 19.7). A `receipt` without an id is valid and says
+nothing. A field that the client does not know is ignored, as everywhere in this protocol
+(section 19.4)
+[test: tests/crypto/test_content_vectors.py::test_positive_vectors_replay_byte_for_byte].
+
+### 38.4 Lengths
+
+MAX_CONTENT_BYTES is 65023, the `Content` of the longest text of section 19.7, which fits
+a message whatever the state of the session. For a text alone the limit MAX_TEXT_BYTES of
+section 19.7 is the same rule. A reply, a text with a timer and an edit are bound by the
+length of their whole `Content`
+[test: tests/client/test_envelope.py::test_longest_contents_are_those_of_section_38_4]:
+
+| Part                                                                             | Bytes |
+|----------------------------------------------------------------------------------|-------|
+| An edit: `message_id`, tag 1, length 1, 16                                       | 18    |
+| The `text` of the longest edit: tag 1, length 3, 64997                           | 65001 |
+| The `Content`: tag 1, length 3 and the `Edit`                                    | 65023 |
+| A reply: the longest `quote`, tag 1, length 2; `message_id` 18, `own` 2, `text` tag 1, length 2, 256 | 282 |
+| `expires_after` of MAX_TIMER_SECONDS: tag 1, value 4                             | 5     |
+| The `text` of the longest reply with both: tag 1, length 3, 64732                | 64736 |
+| The `Content` of that reply                                                      | 65023 |
+
+A receipt of MAX_RECEIPT_IDS ids makes a `Content` of 18006 bytes, a deletion one of 20.
+
+## 39. The client and part 5
+
+### 39.1 Naming a message
+
+A message of the chat is named by its author and the `message_id` that its author chose
+for the Send that carried it (sections 10.1 and 7.12). Both clients log that id with the
+message (section 22.1), and the ratchet authenticates it as a part of the associated data
+of the message (section 18.2).
+
+- An `edit` and a `deletion` name a message of their sender's own. A client looks for it
+  among the messages that it received from that contact and among no others, so that a
+  contact can change only what it wrote
+  [test: tests/client/test_changes.py::test_edit_replaces_the_text_at_both_sides_and_only_the_author_edits]
+  [test: tests/client/test_changes.py::test_only_the_author_deletes].
+- A `receipt` names messages that its receiver sent to its sender.
+- A `quote` names a message of either side, and `own` says whose
+  [test: tests/client/test_changes.py::test_reply_carries_a_quote_that_shows_without_the_original].
+- The id names the message whatever session carried it. A change that travels on a newer
+  session than its message, after a reset by either side, finds it all the same
+  [test: tests/client/test_changes.py::test_changes_name_messages_across_a_session_reset].
+
+The ids of a peer are its own choice and unique per sender only. When the log holds two
+messages of one author with one id, a change names the later one.
+
+### 39.2 Replies
+
+- A client sends a reply as a text or an attachment with a `quote` of a message of the
+  same chat that is in its log. A message that is not in the log of that chat is not
+  quoted: the result is NO_SUCH_MESSAGE, and nothing is sent
+  [test: tests/client/test_changes.py::test_reply_to_a_message_of_another_chat_or_to_none_is_refused].
+- A receiver shows a reply with the quoted message: its own copy with its current text
+  when it has the message, else the `text` of the quote, which is the replier's choice,
+  and no text when the quoted message is gone at the receiver (section 39.4)
+  [test: tests/client/test_changes.py::test_reply_carries_a_quote_that_shows_without_the_original]
+  [test: tests/client/test_changes.py::test_quote_of_a_message_that_is_gone_keeps_no_text].
+- A client keeps the quote of a reply: the author and the id of the quoted message and the
+  text of the quote. When the quoted message is deleted or expires, the client forgets
+  the text of every quote of it, and a reply that arrives after that keeps none
+  [test: tests/client/test_changes.py::test_quote_of_a_message_that_is_gone_keeps_no_text].
+
+### 39.3 Edits
+
+- Only the author edits a message. A client edits its own messages of the chat, texts and
+  attachments, and no others: the result is NOT_OWN_MESSAGE for a message of the contact
+  and NO_SUCH_MESSAGE for one that is not in the log of that chat
+  [test: tests/client/test_changes.py::test_edit_replaces_the_text_at_both_sides_and_only_the_author_edits].
+- The edit of an attachment replaces its caption, and its text is then a caption of at
+  most MAX_CAPTION_BYTES, else TEXT_TOO_LONG. The file and the other fields stay
+  [test: tests/client/test_changes.py::test_edit_of_an_attachment_replaces_its_caption].
+- A client sends at most MAX_EDITS, 10, edits of one message, and only within
+  EDIT_SECONDS, one day, of the moment it logged the message: otherwise the result is
+  TOO_MANY_EDITS or EDIT_TOO_LATE. A message that the client logged before it implemented
+  part 5 is not edited. A receiver cannot tell when an edit was made, so it checks the
+  count only: it applies at most MAX_EDITS edits of one message and ignores the rest
+  [test: tests/client/test_changes.py::test_edits_stop_after_max_edits_and_edit_seconds].
+- The sender of an edit and its receiver replace the text of the message, in the
+  transaction of SEND and of ACCEPT, and keep the new text and the count of the edits. The
+  text that was replaced is not kept
+  [test: tests/client/test_changes.py::test_edit_replaces_the_text_at_both_sides_and_only_the_author_edits].
+- An edit leaves the quote, the timer and the read state of the message as they are.
+
+### 39.4 Delete for both
+
+- Only the author deletes a message for both, once and at any time. A client deletes its
+  own messages of the chat, texts and attachments, with the results of an edit for any
+  other number [test: tests/client/test_changes.py::test_only_the_author_deletes].
+- The sender deletes the message in the transaction that commits the `deletion`, the
+  receiver in the transaction of ACCEPT. Each deletes its text, its quote, its attachment
+  and the downloaded bytes, removes the file that it saved, forgets the text of every
+  quote of the message and keeps a trace: the author and the id, nothing of the content.
+  The deleted text is in none of the files of the store after the commit (section 22.3)
+  [test: tests/client/test_changes.py::test_delete_for_both_removes_the_message_and_its_file_at_both_sides].
+- A file that the client saved into a folder and cannot remove stays where it is, and
+  the store does not name it.
+- The sender saves the DeleteBlob of the blob of a deleted attachment, which the recipient
+  may not have fetched yet, and a receiver saves one for an attachment whose blob it has
+  not downloaded (section 33.2)
+  [test: tests/client/test_changes.py::test_delete_for_both_removes_the_message_and_its_file_at_both_sides].
+- The deletion is a request. The client of the receiver honours it when it implements
+  part 5; the person who received the message may have read it, copied it, or kept it in
+  the scrollback of a terminal or in a backup. A client tells its user that it asked for
+  the deletion, never that the message is gone at the peer.
+
+### 39.5 Receipts
+
+- A client that accepts a message of the chat, a text or an attachment, owes its sender a
+  delivery receipt, in the transaction of ACCEPT: its client holds the message. A
+  delivery receipt is not Stored, which says that the relay holds it (section 10.2)
+  [test: tests/client/test_changes.py::test_delivery_receipt_marks_delivered_then_read_and_never_goes_back].
+- When its user has seen a message of the chat, a client owes a read receipt for it,
+  unless the user turned read receipts off. A read receipt that is owed takes the place
+  of the delivery receipt owed for the same message
+  [test: tests/client/test_changes.py::test_read_receipt_alone_counts_as_delivered]. The
+  command-line client counts a message as seen when it printed it
+  [test: tests/client/test_changes.py::test_two_network_clients_see_sent_delivered_read_and_a_message_disappear].
+- A client sends what it owes to each contact as receipts of one kind with up to
+  MAX_RECEIPT_IDS ids each, as soon as it is logged in: after the steps of section 23.3,
+  after a Deliver and when its user has seen a message. Each receipt is a SEND whose
+  transaction clears what it owed
+  [test: tests/client/test_changes.py::test_receipts_go_one_message_per_contact_and_kind_and_are_bounded].
+- No receipt is owed for an edit, a deletion, a receipt, a timer or a profile, nor for a
+  message that could not be read
+  [test: tests/client/test_changes.py::test_changes_are_no_message_and_get_no_receipt].
+- The receiver of a receipt marks each own message that it names: delivered, then read.
+  A read receipt also counts as delivered, a mark never goes back, and an id that names no
+  own message of the log is ignored
+  [test: tests/client/test_changes.py::test_delivery_receipt_marks_delivered_then_read_and_never_goes_back]
+  [test: tests/client/test_changes.py::test_read_receipt_alone_counts_as_delivered]
+  [test: tests/client/test_changes.py::test_change_for_a_message_that_is_gone_is_dropped].
+- With read receipts off a client sends delivery receipts only, and the read receipts that
+  it still owes go out as delivery receipts. The peer then sees delivered and never read:
+  nothing tells it whether read receipts are off or the message is not read yet. Delivery
+  receipts cannot be turned off
+  [test: tests/client/test_changes.py::test_read_receipts_off_send_none_and_the_peer_sees_delivered].
+- A receipt is a message of the ratchet: one that does not decrypt marks nothing, and the
+  relay cannot make one
+  [test: tests/client/test_changes.py::test_receipt_that_does_not_decrypt_marks_nothing].
+
+What the user sees of an own message
+[test: tests/client/test_changes.py::test_two_network_clients_see_sent_delivered_read_and_a_message_disappear]:
+
+| State     | When                                         |
+|-----------|----------------------------------------------|
+| Sending   | The message is in the outbox                 |
+| Sent      | The relay answered its Send with Stored      |
+| Delivered | A delivery receipt of the peer names it      |
+| Read      | A read receipt of the peer names it          |
+
+### 39.6 The disappearing timer
+
+- Each chat has a timer, off at first. Either side sets it by sending a `timer`, and both
+  keep the new value: the sender in the transaction of SEND, the receiver in the one of
+  ACCEPT [test: tests/client/test_changes.py::test_timer_applies_to_messages_sent_after_the_change].
+- Every text and attachment that a client sends carries the timer that its chat has at
+  that moment in `expires_after`. Each message carries its own timer, so a change applies
+  to the messages sent after it, and a change and a message that cross on the way keep
+  the timer that the sender of the message meant. Only a `timer` changes the timer of the
+  chat, never the `expires_after` of a message
+  [test: tests/client/test_changes.py::test_timer_applies_to_messages_sent_after_the_change].
+- A message with a timer of T seconds expires at its sender T seconds after the sender
+  logged it, and at its receiver T seconds after the user of the receiver has seen it.
+  A message that the user never saw does not expire at the receiver
+  [test: tests/client/test_changes.py::test_timer_counts_from_reading_at_the_receiver_and_from_sending_at_the_sender].
+- An expired message is deleted as section 39.4 says, with its file, without a message to
+  anyone. The receiver saves a DeleteBlob for an attachment whose blob it has not
+  downloaded; the sender saves none, as the recipient may not have fetched the blob yet
+  [test: tests/client/test_changes.py::test_expired_attachment_takes_its_file_and_its_blob].
+- A client deletes a message when it expires while the client runs, and at its start
+  those that expired while it did not run. An expired text is in none of the files of
+  the store after that commit
+  [test: tests/client/test_changes.py::test_expired_message_goes_after_a_restart_and_is_in_no_file_of_the_store]
+  [test: tests/client/test_changes.py::test_two_network_clients_see_sent_delivered_read_and_a_message_disappear].
+- The timer is a request as the deletion is (section 39.4): a client of the peer that
+  does not implement part 5 keeps the message, and so does any copy that the peer made.
+
+### 39.7 Order
+
+The relay delivers the messages of one sender in the order in which it stored them, but a
+Back off or a lost connection can change that order (section 23.5), and a message can be
+lost (section 20.6). A change can so arrive before the message that it names, or after
+that message is gone:
+
+- An edit or a deletion of a message that the client does not have is kept as a trace:
+  the author, the id and, of an edit, the newest text and the count. When the message
+  arrives, it is logged with that text, or after a deletion not at all
+  [test: tests/client/test_changes.py::test_edit_and_deletion_before_their_message_are_applied_when_it_arrives].
+- A trace is forgotten SEEN_ID_SECONDS after it was written, with the seen ids of its time
+  (section 20.4): by then the relay has deleted the message that it waits for
+  (section 10.7)
+  [test: tests/client/test_changes.py::test_traces_are_forgotten_with_the_seen_ids].
+- A change of a message that is gone, deleted or expired, is dropped, and a receipt of
+  it marks nothing
+  [test: tests/client/test_changes.py::test_change_for_a_message_that_is_gone_is_dropped].
+- A message of part 5 that is not a text or an attachment is never shown as a message of
+  its own, gets no number in the log, owes no receipt and never counts as unread
+  [test: tests/client/test_changes.py::test_changes_are_no_message_and_get_no_receipt].
+
+### 39.8 What the user sees
+
+- A message of the chat is shown with the timer that it carries and, for a reply, the
+  quote of section 39.2.
+- A client MAY tell the user once that the peer edited or deleted a message or changed
+  the timer. The command-line client prints one line for each, and the texts of an edit
+  and of a quote go through the escape of section 19.5
+  [test: tests/client/test_cli.py::test_chat_prints_numbers_marks_and_one_line_per_change].
+- A number or a row by which a client names a message to its user, or by which a command
+  of the user takes one, is never given to another message. A message that is deleted
+  or expires leaves its number unused: a number taken from an earlier line would
+  otherwise edit or delete another message, at both sides
+  [test: tests/client/test_changes.py::test_number_of_a_message_that_is_gone_is_never_given_again].
+- The command-line client prints every message of the chat with its number, its position
+  in the log, and takes that number in `/reply`, `/edit` and `/delete`. `/timer` shows and
+  sets the timer of the chat, and the command `read-receipts` turns read receipts on and
+  off
+  [test: tests/client/test_cli.py::test_timer_is_parsed_and_described]
+  [test: tests/client/test_cli.py::test_read_receipts_are_shown_and_turned_off_and_on]
+  [test: tests/client/test_cli.py::test_two_processes_reply_edit_delete_see_the_marks_and_lose_a_timed_message].
+
+### 39.9 An older client
+
+A client of version 1 that does not implement part 5 parses an `edit`, a `deletion`, a
+`receipt` and a `timer` as a `Content` without a member that it knows: the result is
+UNKNOWN_CONTENT, and it acks the message and shows nothing (section 20.3). It ignores
+`quote` and `expires_after`, fields that it does not have: it shows a reply as a text
+without its quote and keeps a message with a timer like any other
+[test: tests/client/test_envelope.py::test_change_is_unknown_content_and_a_reply_a_text_to_a_client_without_part_5].
+A client cannot learn whether its peer implements part 5.
+
+### 39.10 What a client keeps
+
+A client that implements part 5 keeps, besides what sections 22.1, 33.7 and 36.1 list
+[test: tests/client/test_client_store.py::test_store_holds_what_section_22_1_lists]:
+
+- for every message of the chat that it sent or received: the author and the id, the
+  text as last edited and the count of the edits, the quote, the timer and the moment of
+  expiry; for a received message whether its user has seen it and the receipt that it
+  owes, and for a sent message the last receipt of the peer;
+- the traces of section 39.7;
+- the timer of each chat, and whether read receipts are on.
+
+The command-line client logs an attachment with its caption as its text, and keeps the
+highest number that a message of its log ever had (section 39.8). A store of the
+client of this repository that does not implement part 5 opens in one that does: it
+gains what this section lists, and its earlier messages have no timer, no quote and no
+receipt and cannot be edited
+[test: tests/client/test_changes.py::test_store_of_the_previous_version_opens_and_takes_part_5].
+
+### 39.11 Constants and local results
+
+| Name              | Value   | Unit    | Meaning                                                   |
+|-------------------|---------|---------|-----------------------------------------------------------|
+| MAX_CONTENT_BYTES | 65023   | bytes   | The longest `Content` a client sends (section 38.4)      |
+| MAX_QUOTE_BYTES   | 256     | bytes   | The longest `text` of a quote a client sends              |
+| MAX_RECEIPT_IDS   | 1000    | ids     | The most ids of one receipt a client sends                |
+| MAX_TIMER_SECONDS | 2419200 | seconds | The longest timer, four weeks                             |
+| MAX_EDITS         | 10      | edits   | The most edits of one message                             |
+| EDIT_SECONDS      | 86400   | seconds | The time after the logging of a message within which a client edits it, one day |
+
+MAX_TIMER_SECONDS and MAX_EDITS bound what a client sends and what a receiver accepts
+(sections 38.3 and 39.3); the others bound what a client sends.
+
+| Name            | Where                  | Meaning                                                     |
+|-----------------|------------------------|-------------------------------------------------------------|
+| NO_SUCH_MESSAGE | Sections 39.2 to 39.4  | The number names no message of the log of the chat          |
+| NOT_OWN_MESSAGE | Sections 39.3 and 39.4 | The message to edit or to delete is the contact's           |
+| TOO_MANY_EDITS  | Section 39.3           | The message was edited MAX_EDITS times                      |
+| EDIT_TOO_LATE   | Section 39.3           | The message was logged more than EDIT_SECONDS ago           |
+| BAD_TIMER       | Section 38.2           | A timer to send is above MAX_TIMER_SECONDS                  |
+
+## 40. The test vectors of part 5
+
+The vectors of part 5 are the file `vectors/content.json`, in the schema of section 15.2,
+written by `scripts/generate_vectors.py` with the code of part 5
+[test: tests/crypto/test_content_vectors.py::test_vector_file_follows_the_schema]
+[test: tests/crypto/test_content_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_content_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_content_vectors.py::test_negative_vectors_raise_their_named_error]
+[test: tests/crypto/test_content_vectors.py::test_intermediates_are_the_content_in_front_of_the_padding].
+A field of the schema is a key with its name: a message is an object of its fields that
+are set, `message_ids` an array of hex strings, a number a number, `own` and `read`
+booleans, a text a JSON string, and every other value a hex string.
+
+| Operation        | Rule             | `inputs`                                                     | `intermediates` | `outputs`                                                    | `error`                       |
+|------------------|------------------|--------------------------------------------------------------|-----------------|--------------------------------------------------------------|-------------------------------|
+| `content-encode` | 38.2, 38.4, 19.6 | `text`, `attachment`, `quote`, `expires_after`, `edit`, `deletion`, `receipt`, `timer` | `content` | `plaintext` | TEXT_TOO_LONG, BAD_TIMER |
+| `content-decode` | 38.3, 19.5, 19.6 | `plaintext`                                                  | `content`       | `text`, `attachment`, `quote`, `expires_after`, `edit`, `deletion`, `receipt`, `timer` | BAD_CONTENT, UNKNOWN_CONTENT |
+
+- `content-encode`: the inputs are the fields of a `Content` that are set. A client
+  encodes them with the encoder of its member: a text or an attachment with its quote
+  and its timer, an edit, a deletion, a receipt or a timer. `content` is the serialized
+  `Content` and `plaintext` the padded plaintext of section 19.6. The cases: a text with
+  a timer; replies to an own message and to a message of the receiver; a reply with the
+  longest quote; a reply with a timer and a quote without a text; an attachment that
+  replies, with a timer; an edit, an edit to an empty text and the longest edit of
+  section 38.4; a deletion; a delivery receipt of two ids and a read receipt of one; the
+  timer off, of an hour and of MAX_TIMER_SECONDS. The negative cases: the longest text
+  with a quote, an edit one byte longer than the longest, and a timer of
+  MAX_TIMER_SECONDS + 1 in a `Timer` and in `expires_after`.
+- `content-decode`: the outputs are the fields of the `Content` that the receiver reads,
+  in the form of the inputs of `content-encode`. The positive cases are the plaintexts of
+  the `content-encode` vectors of the same name after the operation, whose outputs are
+  their inputs; an edit with a quote and a timer, which the receiver does not read; an
+  edit with a field that the client does not know; and a receipt without an id. The
+  negative cases with BAD_CONTENT: a quote id of 15 bytes, an edit id of 17, a deletion
+  without an id, a receipt with one id of 15 bytes, a timer of MAX_TIMER_SECONDS + 1 in
+  a `Timer` and in `expires_after`, and the text of an edit and of a quote that is not
+  UTF-8. With UNKNOWN_CONTENT: member 10, which no client knows, and a quote without a
+  member [test: tests/crypto/test_content_vectors.py::test_vectors_cover_the_cases_of_section_40].
+- The fields of a message are serialized in the order of their numbers, as both runtimes
+  do, so the bytes of `content` and `plaintext` are exact.
 - A negative vector records no intermediate.
 
 ## Appendix A. One key agreement and two messages in hex

@@ -1,15 +1,28 @@
-"""The peer envelope and the plaintext of docs/protocol.md, sections 19, 32 and 35."""
+"""The peer envelope and the plaintext of docs/protocol.md, sections 19, 32, 35 and 38."""
+
+from collections.abc import Sequence
 
 from google.protobuf.message import DecodeError
 
 from sotto.crypto.blob import DIGEST_LENGTH, FILE_KEY_LENGTH, MAX_FILE_BYTES
 from sotto.crypto.identity import KEY_LENGTH, SIGNATURE_LENGTH, CryptoError
 from sotto.crypto.ratchet import HEADER_LENGTH, MESSAGE_NONCE_LENGTH, TAG_LENGTH
-from sotto.proto.sotto_pb2 import Attachment, Content, PeerMessage, Profile
+from sotto.proto.sotto_pb2 import (
+    Attachment,
+    Content,
+    Deletion,
+    Edit,
+    PeerMessage,
+    Profile,
+    Quote,
+    Receipt,
+    Timer,
+)
 
 VERSION = 1
 PADDING_BLOCK = 256
 MAX_TEXT_BYTES = 65019
+MAX_CONTENT_BYTES = 65023
 PADDING_MARK = b"\x80"
 SEALING_OVERHEAD = MESSAGE_NONCE_LENGTH + TAG_LENGTH
 BLOB_ID_LENGTH = 16
@@ -19,6 +32,12 @@ MAX_THUMBNAIL_BYTES = 16384
 MAX_CAPTION_BYTES = 4096
 MAX_PROFILE_NAME_BYTES = 256
 MAX_AVATAR_BYTES = 1048576
+MESSAGE_ID_LENGTH = 16
+MAX_QUOTE_BYTES = 256
+MAX_TIMER_SECONDS = 2419200
+MAX_RECEIPT_IDS = 1000
+# The members that are messages of the chat; `quote` and `expires_after` go with them.
+CHAT_MEMBERS = frozenset({"text", "attachment"})
 AVATAR_SIGNATURES = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n"}
 BIDI_CONTROLS = frozenset(
     chr(code)
@@ -26,6 +45,8 @@ BIDI_CONTROLS = frozenset(
 )
 LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
 ESCAPED_ABOVE_C1 = BIDI_CONTROLS | LINE_SEPARATORS
+
+type Body = str | Attachment | Profile | Edit | Deletion | Receipt | Timer
 
 
 class UnsupportedVersionError(CryptoError):
@@ -64,6 +85,10 @@ class NotAnImageError(CryptoError):
     result = "NOT_AN_IMAGE"
 
 
+class BadTimerError(CryptoError):
+    result = "BAD_TIMER"
+
+
 def pad(content: bytes) -> bytes:
     """Returns P of section 19.6: the content, `80`, then `00` up to the next block."""
     padded_length = PADDING_BLOCK * (len(content) // PADDING_BLOCK + 1)
@@ -82,26 +107,115 @@ def unpad(padded: bytes) -> bytes:
     return stripped[: -len(PADDING_MARK)]
 
 
-def encode_text(text: str) -> bytes:
-    """Returns the padded plaintext of a text.
+def encode_text(text: str, *, quote: Quote | None = None, expires_after: int = 0) -> bytes:
+    """Returns the padded plaintext of a text, a reply when it has a quote (section 38.2).
 
     Raises:
-        TextTooLongError: The text is longer than MAX_TEXT_BYTES in UTF-8.
+        TextTooLongError: The text is longer than MAX_TEXT_BYTES in UTF-8, or the content
+            with its quote and timer longer than MAX_CONTENT_BYTES.
+        BadTimerError: `expires_after` is above MAX_TIMER_SECONDS.
+        ValueError: The quote breaks its limits of section 38.2.
     """
     text_length = len(text.encode("utf-8"))
     if text_length > MAX_TEXT_BYTES:
         raise TextTooLongError(f"the text is {text_length} bytes long, above {MAX_TEXT_BYTES}")
-    return pad(Content(text=text).SerializeToString())
+    return _padded_message(Content(text=text), quote, expires_after)
 
 
-def encode_attachment(attachment: Attachment) -> bytes:
+def encode_attachment(
+    attachment: Attachment, *, quote: Quote | None = None, expires_after: int = 0
+) -> bytes:
     """Returns the padded plaintext of an attachment that the client filled (section 32.1).
 
     Raises:
-        ValueError: A field is beyond its limit of section 32.1.
+        BadTimerError: `expires_after` is above MAX_TIMER_SECONDS.
+        ValueError: A field is beyond its limit of section 32.1, or the quote beyond its
+            limits of section 38.2.
     """
     _check_attachment_limits(attachment)
-    return pad(Content(attachment=attachment).SerializeToString())
+    return _padded_message(Content(attachment=attachment), quote, expires_after)
+
+
+def encode_edit(message_id: bytes, text: str) -> bytes:
+    """Returns the padded plaintext of an edit (section 38.2).
+
+    Raises:
+        TextTooLongError: The content is longer than MAX_CONTENT_BYTES.
+        ValueError: The message id is not MESSAGE_ID_LENGTH bytes.
+    """
+    _require_message_id(message_id)
+    return _padded(Content(edit=Edit(message_id=message_id, text=text)))
+
+
+def encode_deletion(message_id: bytes) -> bytes:
+    """Returns the padded plaintext of a deletion for both (section 38.2).
+
+    Raises:
+        ValueError: The message id is not MESSAGE_ID_LENGTH bytes.
+    """
+    _require_message_id(message_id)
+    return _padded(Content(deletion=Deletion(message_id=message_id)))
+
+
+def encode_receipt(message_ids: Sequence[bytes], *, read: bool) -> bytes:
+    """Returns the padded plaintext of a delivery or a read receipt (section 38.2).
+
+    Raises:
+        ValueError: An id is not MESSAGE_ID_LENGTH bytes, or there are more than
+            MAX_RECEIPT_IDS.
+    """
+    if len(message_ids) > MAX_RECEIPT_IDS:
+        raise ValueError(f"a receipt names at most {MAX_RECEIPT_IDS} messages")
+    for message_id in message_ids:
+        _require_message_id(message_id)
+    return _padded(Content(receipt=Receipt(read=read, message_ids=message_ids)))
+
+
+def encode_timer(seconds: int) -> bytes:
+    """Returns the padded plaintext of a change of the chat timer (section 38.2).
+
+    Raises:
+        BadTimerError: The seconds are above MAX_TIMER_SECONDS.
+    """
+    _require_timer(seconds)
+    return _padded(Content(timer=Timer(seconds=seconds)))
+
+
+def _padded_message(content: Content, quote: Quote | None, expires_after: int) -> bytes:
+    """A text or an attachment with the quote and the timer of part 5, padded."""
+    _require_timer(expires_after)
+    if quote is not None:
+        _require_message_id(quote.message_id)
+        if len(quote.text.encode()) > MAX_QUOTE_BYTES:
+            raise ValueError(f"a quote holds at most {MAX_QUOTE_BYTES} bytes of text")
+        content.quote.CopyFrom(quote)
+    content.expires_after = expires_after
+    return _padded(content)
+
+
+def _padded(content: Content) -> bytes:
+    """The padded plaintext of a content that fits a message whatever its session (38.4)."""
+    serialized = content.SerializeToString()
+    if len(serialized) > MAX_CONTENT_BYTES:
+        raise TextTooLongError(
+            f"the content is {len(serialized)} bytes long, above {MAX_CONTENT_BYTES}"
+        )
+    return pad(serialized)
+
+
+def _require_message_id(message_id: bytes) -> None:
+    if len(message_id) != MESSAGE_ID_LENGTH:
+        raise ValueError(f"a message id is {MESSAGE_ID_LENGTH} bytes, not {len(message_id)}")
+
+
+def _require_timer(seconds: int) -> None:
+    if seconds > MAX_TIMER_SECONDS:
+        raise BadTimerError(f"a timer is at most {MAX_TIMER_SECONDS} seconds, not {seconds}")
+
+
+def cut_to(text: str, limit: int) -> str:
+    """The longest start of `text` that is at most `limit` bytes of UTF-8."""
+    return text.encode()[:limit].decode(errors="ignore")
 
 
 def encode_profile(name: str, avatar: Attachment | None) -> bytes:
@@ -163,14 +277,22 @@ def _check_attachment_limits(attachment: Attachment) -> None:
         raise ValueError("a field of the attachment is beyond its limit of section 32.1")
 
 
-def decode_content(padded: bytes) -> str | Attachment | Profile:
-    """Returns the text, the attachment or the profile of a padded plaintext by sections
-    19.5, 19.6, 32.2 and 35.3.
+def decode_content(padded: bytes) -> Body:
+    """Returns the member of the body of a padded plaintext that `open_content` checked."""
+    content = open_content(padded)
+    body: Body = getattr(content, str(content.WhichOneof("body")))
+    return body
+
+
+def open_content(padded: bytes) -> Content:
+    """Returns the content of a padded plaintext by sections 19.5, 19.6, 32.2, 35.3 and
+    38.3; `quote` and `expires_after` are cleared unless the body is a text or an
+    attachment, which alone they go with.
 
     Raises:
         BadPaddingError: The plaintext has no padding.
-        BadContentError: The content does not parse, a text that is not UTF-8 included, an
-            attachment breaks a length of section 32.2 or a profile a check of 35.3.
+        BadContentError: The content does not parse, a string that is not UTF-8 included, or
+            a member breaks a check of section 32.2, 35.3 or 38.3.
         UnknownContentError: The content sets no member that this client knows.
     """
     try:
@@ -178,17 +300,34 @@ def decode_content(padded: bytes) -> str | Attachment | Profile:
     except DecodeError as error:
         raise BadContentError("the plaintext is not a Content") from error
 
-    match content.WhichOneof("body"):
+    member = content.WhichOneof("body")
+    match member:
         case "text":
-            return content.text
+            pass
         case "attachment":
             _check_attachment(content.attachment)
-            return content.attachment
         case "profile":
             _check_profile(content.profile)
-            return content.profile
+        case "edit":
+            _check_message_id(content.edit.message_id)
+        case "deletion":
+            _check_message_id(content.deletion.message_id)
+        case "receipt":
+            for message_id in content.receipt.message_ids:
+                _check_message_id(message_id)
+        case "timer":
+            _check_seconds(content.timer.seconds)
         case _:
             raise UnknownContentError("the Content sets no member that this client knows")
+
+    if member not in CHAT_MEMBERS:
+        content.ClearField("quote")
+        content.ClearField("expires_after")
+        return content
+    if content.HasField("quote"):
+        _check_message_id(content.quote.message_id)
+    _check_seconds(content.expires_after)
+    return content
 
 
 def is_control(character: str) -> bool:
@@ -205,6 +344,16 @@ def _check_attachment(attachment: Attachment) -> None:
         raise BadContentError("a field of the attachment breaks its length")
     if attachment.size > MAX_FILE_BYTES:
         raise BadContentError(f"the attachment names a file above {MAX_FILE_BYTES} bytes")
+
+
+def _check_message_id(message_id: bytes) -> None:
+    if len(message_id) != MESSAGE_ID_LENGTH:
+        raise BadContentError("a message id of the content breaks its length")
+
+
+def _check_seconds(seconds: int) -> None:
+    if seconds > MAX_TIMER_SECONDS:
+        raise BadContentError(f"a timer of the content is above {MAX_TIMER_SECONDS} seconds")
 
 
 def _check_profile(profile: Profile) -> None:

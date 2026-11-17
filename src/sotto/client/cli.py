@@ -4,6 +4,8 @@ Peer text reaches the terminal only through `printable`. No command takes the se
 argument or prints it (docs/protocol.md, section 22.4). Received files go into the folder
 `received` of the data directory (section 32.2). The profile of part 4 is set offline and
 goes to the contacts at the next connection; the local name of a contact is the name used.
+`chat` prints every message with its number in the log, which the commands of part 5 take
+(section 39), and counts a message as read once it printed it.
 """
 
 import argparse
@@ -18,20 +20,23 @@ from pathlib import Path
 
 from sotto.client.envelope import MAX_AVATAR_BYTES, TextTooLongError, is_control
 from sotto.client.files import FILE_MODE
-from sotto.client.session import Client, FileState, OwnIdentityError
+from sotto.client.session import Client, FileState, OwnIdentityError, Quoted, Received
 from sotto.client.store import ContactProfile, Store, StoreModeError
 from sotto.client.transport import (
     Connected,
     Event,
+    Expired,
     FileUpdate,
     Incoming,
     Refused,
     RefusedError,
     Retrying,
+    Sent,
     Stopped,
     TransferFailed,
     Transport,
     UrlRefusedError,
+    Written,
 )
 from sotto.crypto.identity import CryptoError, encode_user_id
 
@@ -46,6 +51,12 @@ QUIT_GRACE_SECONDS = 2
 CONTACT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 # UNKNOWN_CONTENT may be a later member of Content that is no message (section 20.3).
 SILENT_RESULTS = frozenset({"DUPLICATE", "NOT_A_CONTACT", "UNKNOWN_CONTENT"})
+CHAT_COMMANDS = (
+    "commands: /reply N text, /edit N text, /delete N, /timer [off|30s|5m|1h|1d|1w], /quit"
+)
+TIMER = re.compile(r"([0-9]{1,7})([smhdw])")
+TIMER_UNITS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+QUOTE_SHOWN = 60
 
 type Commands = argparse._SubParsersAction[argparse.ArgumentParser]
 
@@ -113,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_relay_options(send_file)
     send_file.set_defaults(command=_send_file)
     _add_profile_commands(commands)
+
+    receipts = commands.add_parser(
+        "read-receipts", help="show, or turn on or off, the read receipts contacts get"
+    )
+    receipts.add_argument("state", nargs="?", choices=("on", "off"))
+    receipts.set_defaults(command=_read_receipts)
     return parser
 
 
@@ -247,10 +264,19 @@ def _show_profile(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _read_receipts(arguments: argparse.Namespace) -> int:
+    with _client(arguments) as client:
+        if arguments.state is not None:
+            client.set_read_receipts(on=arguments.state == "on")
+        print(f"read receipts: {'on' if client.read_receipts() else 'off'}")
+    return 0
+
+
 def _chat(arguments: argparse.Namespace) -> int:
     with _client(arguments) as client:
         contact = _contact_named(client, arguments.name)
         transport = _transport(client, arguments)
+        _say(f"timer: {describe_timer(client.timer(contact))}")
         return asyncio.run(_run_chat(transport, contact))
 
 
@@ -291,6 +317,30 @@ async def _run_chat(transport: Transport, contact: bytes) -> int:
     return 1 if stopped else 0
 
 
+def describe_timer(seconds: int) -> str:
+    """`off`, or the seconds in the largest unit of TIMER_UNITS that divides them."""
+    if seconds == 0:
+        return "off"
+    for unit, unit_seconds in TIMER_UNITS.items():
+        if seconds % unit_seconds == 0:
+            return f"{seconds // unit_seconds}{unit}"
+    return f"{seconds}s"
+
+
+def parse_timer(text: str) -> int:
+    """The seconds of `off` or of a number with a unit of TIMER_UNITS, such as `5m`.
+
+    Raises:
+        CommandError: The text is neither.
+    """
+    if text == "off":
+        return 0
+    match = TIMER.fullmatch(text)
+    if match is None:
+        raise CommandError(CHAT_COMMANDS)
+    return int(match.group(1)) * TIMER_UNITS[match.group(2)]
+
+
 async def _run_send_file(
     transport: Transport, contact: bytes, path: Path, caption: str
 ) -> int:
@@ -316,7 +366,7 @@ async def _run_send_file(
 
         while True:
             event = await transport.events.get()
-            _print_event(event, names, progress)
+            _show(transport, event, names, progress)
             if isinstance(event, Stopped | TransferFailed):
                 return 1
             if not isinstance(event, FileUpdate) or event.blob_id != blob_id:
@@ -360,7 +410,9 @@ async def _send_lines(
         if not line:
             continue
         try:
-            await transport.send_text(contact, line)
+            await _run_line(transport, contact, line)
+        except CommandError as error:
+            _say(str(error))
         except TextTooLongError:
             _say("not sent: the text is too long")
         except RefusedError as error:
@@ -369,15 +421,71 @@ async def _send_lines(
             _say(f"not sent: {error.result}")
 
 
+async def _run_line(transport: Transport, contact: bytes, line: str) -> None:
+    """Sends a typed line as a text, or runs the chat command of part 5 it starts with.
+
+    Raises:
+        CommandError: The line is a command that does not parse.
+    """
+    if not line.startswith("/"):
+        await transport.send_text(contact, line)
+        return
+
+    command, _, rest = line.partition(" ")
+    match command:
+        case "/reply":
+            number, text = _number_and_text(rest)
+            await transport.send_text(contact, text, reply_to=number)
+        case "/edit":
+            number, text = _number_and_text(rest)
+            await transport.edit(contact, number, text)
+            _say(f"#{number} you edited: {printable(text)}")
+        case "/delete":
+            number = _number(rest)
+            await transport.delete(contact, number)
+            _say(f"#{number} deleted for both")
+        case "/timer":
+            if rest:
+                await transport.set_timer(contact, parse_timer(rest))
+            _say(f"timer: {describe_timer(transport.client.timer(contact))}")
+        case _:
+            raise CommandError(CHAT_COMMANDS)
+
+
+def _number_and_text(rest: str) -> tuple[int, str]:
+    number, _, text = rest.partition(" ")
+    if not text:
+        raise CommandError(CHAT_COMMANDS)
+    return _number(number), text
+
+
+def _number(text: str) -> int:
+    if not text.isdecimal():
+        raise CommandError(CHAT_COMMANDS)
+    return int(text)
+
+
 async def _print_events(transport: Transport, names: dict[bytes, str]) -> None:
     progress: dict[bytes, int] = {}
     while True:
-        _print_event(await transport.events.get(), names, progress)
+        _show(transport, await transport.events.get(), names, progress)
 
 
 def _print_waiting_events(transport: Transport, names: dict[bytes, str]) -> None:
     while not transport.events.empty():
-        _print_event(transport.events.get_nowait(), names, {})
+        _show(transport, transport.events.get_nowait(), names, {})
+
+
+def _show(
+    transport: Transport, event: Event, names: dict[bytes, str], progress: dict[bytes, int]
+) -> None:
+    """Prints an event; a message of the chat that it printed counts as read (39.5)."""
+    _print_event(event, names, progress)
+    if not isinstance(event, Incoming):
+        return
+    number = event.received.number
+    if number is not None and event.received.is_a_new_message:
+        transport.mark_read(event.sender, number)
 
 
 def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, int]) -> None:
@@ -389,21 +497,16 @@ def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, in
             name = names.get(sender) or encode_user_id(sender)
             if received.missing:
                 _say(f"{name}: {received.missing} earlier messages can never be read")
-            if received.text is not None:
-                _say(f"{name}: {printable(received.text)}")
-            elif received.profile is not None:
-                profile = received.profile
-                has_avatar = profile.HasField("avatar")
-                _say(f"{name}: {_describe_profile(profile.name, has_avatar=has_avatar)}")
-            elif received.attachment is not None:
-                attachment = received.attachment
-                caption = f": {printable(attachment.caption)}" if attachment.caption else ""
-                _say(
-                    f"{name}: file {printable(attachment.file_name)}, "
-                    f"{attachment.size} bytes{caption}"
-                )
-            elif received.result not in SILENT_RESULTS:
-                _say(f"{name}: a message could not be read ({received.result})")
+            _print_received(received, name)
+        case Written():
+            reply = "" if event.reply_to is None else f", replying to #{event.reply_to}"
+            head = _message_head(event.number, "you", event.expires_after)
+            _say(f"{head}{reply}: {printable(event.text)}")
+        case Sent(number=number):
+            _say(f"#{number} sent")
+        case Expired(numbers=numbers):
+            for number in numbers:
+                _say(f"#{number} disappeared")
         case Refused(result=result, contact=None):
             _say(f"the relay refused the prekey upload ({result})")
         case Refused(result=result, contact=bytes() as contact):
@@ -419,6 +522,57 @@ def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, in
             _print_file_update(
                 event, names.get(event.contact) or encode_user_id(event.contact), progress
             )
+
+
+def _print_received(received: Received, name: str) -> None:
+    """One line for a message, a change of part 5 or a failure; several for a receipt."""
+    if received.edited:
+        _say(f"#{received.number} {name} edited: {printable(received.text or '')}")
+    elif received.deleted:
+        _say(f"#{received.number} {name} deleted the message")
+    elif received.marked:
+        for number in received.marked:
+            _say(f"#{number} {'read' if received.read else 'delivered'}")
+    elif received.timer is not None:
+        _say(f"{name} set the timer: {describe_timer(received.timer)}")
+    elif received.text is not None:
+        _say(f"{_received_head(received, name)}: {printable(received.text)}")
+    elif received.profile is not None:
+        profile = received.profile
+        has_avatar = profile.HasField("avatar")
+        _say(f"{name}: {_describe_profile(profile.name, has_avatar=has_avatar)}")
+    elif received.attachment is not None:
+        attachment = received.attachment
+        caption = f": {printable(attachment.caption)}" if attachment.caption else ""
+        _say(
+            f"{_received_head(received, name)}: file {printable(attachment.file_name)}, "
+            f"{attachment.size} bytes{caption}"
+        )
+    elif received.result is not None and received.result not in SILENT_RESULTS:
+        _say(f"{name}: a message could not be read ({received.result})")
+
+
+def _received_head(received: Received, name: str) -> str:
+    head = _message_head(received.number, name, received.expires_after)
+    if received.quote is None:
+        return head
+    return f"{head}, replying to {_describe_quote(received.quote)}"
+
+
+def _message_head(number: int | None, who: str, expires_after: int) -> str:
+    """`#12 alice`, with the timer of the message as `(1h)` behind it when it has one."""
+    head = who if number is None else f"#{number} {who}"
+    if expires_after:
+        head += f" ({describe_timer(expires_after)})"
+    return head
+
+
+def _describe_quote(quote: Quoted) -> str:
+    if quote.text is None:
+        return "a message that is gone"
+    shown = quote.text[:QUOTE_SHOWN] + ("..." if len(quote.text) > QUOTE_SHOWN else "")
+    text = f'"{printable(shown)}"'
+    return text if quote.number is None else f"#{quote.number} {text}"
 
 
 def _print_file_update(update: FileUpdate, name: str, progress: dict[bytes, int]) -> None:

@@ -17,17 +17,23 @@ opens one.
   or reported as not sent
   [test: tests/client/test_files.py::test_upload_cut_in_the_middle_goes_on_from_the_stored_length]
   [test: tests/client/test_files.py::test_download_cut_in_the_middle_goes_on_from_the_bytes_it_holds].
+  A message can be answered with a quote, edited and deleted for both, shows when it
+  reached the other client and when it was read, and can disappear after a timer
+  [test: tests/client/test_cli.py::test_two_processes_reply_edit_delete_see_the_marks_and_lose_a_timed_message].
+  Delete for both and the timer are requests that the other side's client honours, and
+  nothing more: whoever received a message can keep it.
   The relay logs a connection in by a signature over its own challenge, stores and hands
   out prekey bundles, and keeps a message until its recipient acks it or it expires; it
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
   `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
-  holds four parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  holds five parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
   resumable uploads and downloads through the relay and the attachment of a message.
   Part 4 is the profile: a display name and an avatar that a client sends to its
-  contacts.
+  contacts. Part 5 is replies, edits, delete for both, delivery and read receipts and
+  disappearing messages.
   [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
@@ -90,8 +96,30 @@ Python 3.14 and Docker.
    ```
 
    Both print `connected`. A line typed in one terminal is printed in the other as
-   `alice: <the line>`. `/quit` or the end of input leaves the chat; what the other side
-   sends meanwhile waits at the relay and is printed by the next `chat`.
+   `#1 alice: <the line>`, where `#1` is the number of the message in that terminal's
+   log. `/quit` or the end of input leaves the chat; what the other side sends meanwhile
+   waits at the relay and is printed by the next `chat`.
+
+   Under your own message the chat prints `#1 sent` when the relay has it, then
+   `#1 delivered` or `#1 read` when the other client reports it. A message counts as
+   read once the other chat printed it. In the chat:
+
+   ```text
+   /reply 1 see you there    answer message 1 with a quote of it
+   /edit 2 see you at 8      change your own message 2, up to 10 times within a day
+   /delete 2                 ask both sides to delete your own message 2
+   /timer 1h                 messages sent from now on disappear after an hour
+   /timer off                messages sent from now on stay
+   ```
+
+   A message with a timer disappears from the reader's store an hour after it was read
+   and from the sender's an hour after it was sent, with any file it brought. The other
+   side's chat prints one line for each edit, deletion and timer change.
+   `sotto --data-dir bob read-receipts off` stops Bob's read receipts: Alice then sees
+   `delivered` and never `read`. A deletion and a timer are requests that the other
+   client honours: it removes the text and any received file from its store, but it
+   cannot clear what the terminal already printed, and nothing stops the other person
+   from keeping a copy.
 
    Send a file from a third terminal while Bob's chat runs:
 
@@ -133,8 +161,7 @@ What the alpha does not do yet:
 - The data directory is not encrypted: whoever can read it holds the identity, the keys
   and the message log.
 - One device per identity, one-to-one chats, texts and files. No groups, no thumbnails
-  from the command line, no history view and no notice that a message was delivered or
-  read.
+  from the command line and no history view: a chat prints what arrives while it runs.
 - Nothing checks that an id belongs to the person you think; ids are compared out of
   band, by you.
 - No security audit.
