@@ -17,9 +17,11 @@ opens one.
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
   `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
-  holds both parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  holds three parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
-  the session rules and the client store. [docs/threat-model.md](docs/threat-model.md)
+  the session rules and the client store. Part 3 is files and photos: the blob cipher,
+  resumable uploads and downloads through the relay and the attachment of a message; no
+  code implements it yet. [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
   [what the relay can do](docs/threat-model.md#what-the-relay-can-do) and what is

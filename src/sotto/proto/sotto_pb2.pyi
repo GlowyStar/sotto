@@ -17,6 +17,8 @@ class ErrorCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     NOT_FOUND: _ClassVar[ErrorCode]
     BAD_BUNDLE: _ClassVar[ErrorCode]
     IDENTITY_KEY_MISMATCH: _ClassVar[ErrorCode]
+    QUOTA_FULL: _ClassVar[ErrorCode]
+    BLOB_TOO_LARGE: _ClassVar[ErrorCode]
 ERROR_CODE_UNSPECIFIED: ErrorCode
 UNKNOWN_RECIPIENT: ErrorCode
 QUEUE_FULL: ErrorCode
@@ -25,6 +27,8 @@ RATE_LIMITED: ErrorCode
 NOT_FOUND: ErrorCode
 BAD_BUNDLE: ErrorCode
 IDENTITY_KEY_MISMATCH: ErrorCode
+QUOTA_FULL: ErrorCode
+BLOB_TOO_LARGE: ErrorCode
 
 class ClientFrame(_message.Message):
     __slots__ = ("login", "upload_bundle", "fetch_bundle", "send", "ack")
@@ -77,10 +81,12 @@ class Login(_message.Message):
     def __init__(self, identity_key: _Optional[bytes] = ..., client_nonce: _Optional[bytes] = ..., signature: _Optional[bytes] = ...) -> None: ...
 
 class LoggedIn(_message.Message):
-    __slots__ = ("one_time_prekey_count",)
+    __slots__ = ("one_time_prekey_count", "blob_max_bytes")
     ONE_TIME_PREKEY_COUNT_FIELD_NUMBER: _ClassVar[int]
+    BLOB_MAX_BYTES_FIELD_NUMBER: _ClassVar[int]
     one_time_prekey_count: int
-    def __init__(self, one_time_prekey_count: _Optional[int] = ...) -> None: ...
+    blob_max_bytes: int
+    def __init__(self, one_time_prekey_count: _Optional[int] = ..., blob_max_bytes: _Optional[int] = ...) -> None: ...
 
 class SignedPrekey(_message.Message):
     __slots__ = ("id", "key", "signature")
@@ -179,14 +185,16 @@ class Ack(_message.Message):
     def __init__(self, messages: _Optional[_Iterable[_Union[MessageRef, _Mapping]]] = ...) -> None: ...
 
 class Error(_message.Message):
-    __slots__ = ("code", "message_id", "identity")
+    __slots__ = ("code", "message_id", "identity", "blob_id")
     CODE_FIELD_NUMBER: _ClassVar[int]
     MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
     IDENTITY_FIELD_NUMBER: _ClassVar[int]
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
     code: ErrorCode
     message_id: bytes
     identity: bytes
-    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message_id: _Optional[bytes] = ..., identity: _Optional[bytes] = ...) -> None: ...
+    blob_id: bytes
+    def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message_id: _Optional[bytes] = ..., identity: _Optional[bytes] = ..., blob_id: _Optional[bytes] = ...) -> None: ...
 
 class PeerMessage(_message.Message):
     __slots__ = ("version", "initial_header", "header", "ciphertext")
@@ -215,7 +223,33 @@ class InitialHeader(_message.Message):
     def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ...) -> None: ...
 
 class Content(_message.Message):
-    __slots__ = ("text",)
+    __slots__ = ("text", "attachment")
     TEXT_FIELD_NUMBER: _ClassVar[int]
+    ATTACHMENT_FIELD_NUMBER: _ClassVar[int]
     text: str
-    def __init__(self, text: _Optional[str] = ...) -> None: ...
+    attachment: Attachment
+    def __init__(self, text: _Optional[str] = ..., attachment: _Optional[_Union[Attachment, _Mapping]] = ...) -> None: ...
+
+class Attachment(_message.Message):
+    __slots__ = ("blob_id", "key", "size", "digest", "media_type", "file_name", "width", "height", "thumbnail", "caption")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    KEY_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    MEDIA_TYPE_FIELD_NUMBER: _ClassVar[int]
+    FILE_NAME_FIELD_NUMBER: _ClassVar[int]
+    WIDTH_FIELD_NUMBER: _ClassVar[int]
+    HEIGHT_FIELD_NUMBER: _ClassVar[int]
+    THUMBNAIL_FIELD_NUMBER: _ClassVar[int]
+    CAPTION_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    key: bytes
+    size: int
+    digest: bytes
+    media_type: str
+    file_name: str
+    width: int
+    height: int
+    thumbnail: bytes
+    caption: str
+    def __init__(self, blob_id: _Optional[bytes] = ..., key: _Optional[bytes] = ..., size: _Optional[int] = ..., digest: _Optional[bytes] = ..., media_type: _Optional[str] = ..., file_name: _Optional[str] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., thumbnail: _Optional[bytes] = ..., caption: _Optional[str] = ...) -> None: ...
