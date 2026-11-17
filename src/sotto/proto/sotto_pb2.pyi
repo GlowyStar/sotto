@@ -295,12 +295,14 @@ class InitialHeader(_message.Message):
     def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ...) -> None: ...
 
 class Content(_message.Message):
-    __slots__ = ("text", "attachment")
+    __slots__ = ("text", "attachment", "profile")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     ATTACHMENT_FIELD_NUMBER: _ClassVar[int]
+    PROFILE_FIELD_NUMBER: _ClassVar[int]
     text: str
     attachment: Attachment
-    def __init__(self, text: _Optional[str] = ..., attachment: _Optional[_Union[Attachment, _Mapping]] = ...) -> None: ...
+    profile: Profile
+    def __init__(self, text: _Optional[str] = ..., attachment: _Optional[_Union[Attachment, _Mapping]] = ..., profile: _Optional[_Union[Profile, _Mapping]] = ...) -> None: ...
 
 class Attachment(_message.Message):
     __slots__ = ("blob_id", "key", "size", "digest", "media_type", "file_name", "width", "height", "thumbnail", "caption")
@@ -325,3 +327,11 @@ class Attachment(_message.Message):
     thumbnail: bytes
     caption: str
     def __init__(self, blob_id: _Optional[bytes] = ..., key: _Optional[bytes] = ..., size: _Optional[int] = ..., digest: _Optional[bytes] = ..., media_type: _Optional[str] = ..., file_name: _Optional[str] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., thumbnail: _Optional[bytes] = ..., caption: _Optional[str] = ...) -> None: ...
+
+class Profile(_message.Message):
+    __slots__ = ("name", "avatar")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    AVATAR_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    avatar: Attachment
+    def __init__(self, name: _Optional[str] = ..., avatar: _Optional[_Union[Attachment, _Mapping]] = ...) -> None: ...

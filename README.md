@@ -22,10 +22,12 @@ opens one.
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
   `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
-  holds three parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  holds four parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
   resumable uploads and downloads through the relay and the attachment of a message.
+  Part 4 is the profile: a display name and an avatar that a client sends to its
+  contacts.
   [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
@@ -101,6 +103,19 @@ Python 3.14 and Docker.
    size and caption, downloads it into `bob/received/` and prints where it was saved. A
    received name never picks another folder and never replaces a file there. A
    `send-file` stopped halfway goes on at the next `chat` or `send-file` of Alice.
+
+   Give yourself a name and a picture, a JPEG or PNG of up to 1 MiB:
+
+   ```sh
+   uv run sotto --data-dir alice profile set --name "Alice A." --avatar me.jpg
+   ```
+
+   The profile goes to every contact at Alice's next `chat`, and into every new session
+   after that. Bob's chat prints `alice: profile "Alice A.", with an avatar`, `sotto
+   --data-dir bob contacts` shows the name next to Bob's own name for Alice, and `sotto
+   --data-dir bob profile show alice --avatar-to alice.jpg` writes the picture out. The
+   name Bob gave Alice stays the name his client uses. `sotto profile show` prints your
+   own profile and `sotto profile clear` clears it at your contacts too.
 
 5. Stop the relay and delete its data: `docker compose down -v`.
 

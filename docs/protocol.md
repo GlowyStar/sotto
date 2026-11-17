@@ -2,8 +2,9 @@
 
 Part 1, sections 1 to 15: identity, the prekey bundle and the relay protocol. Part 2,
 sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 27 close
-both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Appendix A
-follows section 34.
+both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Part 4,
+sections 35 to 37: the profile, a display name and an avatar. Appendix A follows
+section 37.
 
 ## 1. Status and scope
 
@@ -32,11 +33,14 @@ sections.
 Part 3 specifies files: the blob cipher, the frames that move a blob through the relay,
 the attachment of a message and the rules of a client around them (section 28).
 
+Part 4 specifies the profile that a client sends to its contacts: a display name and an
+avatar that travels as an attachment of part 3 (section 35).
+
 ### 1.2 Status
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee of parts 1, 2 and 3 carries a citation (section 2.6), which names the
+- Every guarantee of parts 1 to 4 carries a citation (section 2.6), which names the
   test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
@@ -46,7 +50,7 @@ the attachment of a message and the rules of a client around them (section 28).
 | Version                     | Value | Covers                                                    |
 |-----------------------------|-------|-----------------------------------------------------------|
 | Relay protocol version      | 1     | Sections 6 to 13, the login string of section 4.2, and sections 30 and 31 |
-| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, and sections 29, 32 and 33 |
+| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, sections 29, 32 and 33, and sections 35 and 36 |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
 what a client does with a relay protocol version it does not know.
@@ -1717,7 +1721,8 @@ has no rule about it (section 7.12).
 - A change that a client of version 1 would refuse or misread is a new version: another
   layout of the header, of the associated data or of the padding, another cipher or key
   derivation. A new member of the `Content` oneof is not: a client of version 1 reports
-  such a message as UNKNOWN_CONTENT (section 19.5).
+  such a message as UNKNOWN_CONTENT (section 19.5). `attachment` of part 3 and `profile`
+  of part 4 are of this kind.
 - A bundle has no version field. The keys and signatures of a bundle are those of version
   1; a version that adds a key adds a field and a signed string for it.
 
@@ -1748,7 +1753,10 @@ The second is `vectors/x3dh.json`, whose operations section 15.6 names, and the 
 vectors of the key agreement and of the ratchet record. The fourth is `vectors/blob.json`
 of part 3, whose operations section 34 names
 [test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte]
-[test: tests/crypto/test_blob_vectors.py::test_negative_vectors_raise_their_named_error].
+[test: tests/crypto/test_blob_vectors.py::test_negative_vectors_raise_their_named_error],
+and the fifth `vectors/profile.json` of part 4, whose operations section 37 names
+[test: tests/crypto/test_profile_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_profile_vectors.py::test_negative_vectors_raise_their_named_error].
 
 ### 15.2 The schema of a vector file
 
@@ -1768,7 +1776,7 @@ Each vector is a JSON object.
 | `inputs`        | object | always                   | Everything the operation consumes                              |
 | `intermediates` | object | always, MAY be empty     | Every value the operation computes on the way to its result    |
 | `outputs`       | object | positive case only       | The expected result, MAY be empty for a check that passes      |
-| `error`         | string | negative case only       | The expected failure: one name of section 11, 24.2 or 33.6     |
+| `error`         | string | negative case only       | The expected failure: one name of section 11, 24.2, 33.6 or 36.7 |
 
 Rules:
 
@@ -1781,7 +1789,7 @@ Rules:
 - `intermediates` holds each value an implementation needs to find where it went wrong,
   the signed strings of section 4 among them.
 - `error` is an Error code of section 11.2, the name of a close code of section 11.3 or a
-  local result of section 11.4, 24.2 or 33.6, spelled as there.
+  local result of section 11.4, 24.2, 33.6 or 36.7, spelled as there.
 - A reader refuses a file whose `schema` it does not know, and reports a vector whose
   `operation` it does not implement instead of skipping it.
 
@@ -2668,6 +2676,7 @@ message Content {
   oneof body {
     string text = 1;
     Attachment attachment = 2;
+    Profile profile = 3;
   }
 }
 
@@ -2684,6 +2693,12 @@ message Attachment {
   bytes thumbnail = 9;
   string caption = 10;
 }
+
+// The name and the avatar that a client shows to its contacts (section 35).
+message Profile {
+  string name = 1;
+  Attachment avatar = 2;
+}
 ```
 
 The field numbers are frozen by the rule of section 7.2 and were chosen by its rules:
@@ -2695,8 +2710,8 @@ every message counts from 1 without a gap and every tag is one byte. In addition
   two fields of `UploadBundle`.
 - `one_time_prekey_id` is the one field of this protocol with the proto3 label
   `optional`: 0 is a valid prekey id, so the field needs a presence of its own.
-- `Content` is a oneof with two members: `text`, and `attachment` of part 3
-  (section 32). A kind of message that is added later is a new member of the oneof with
+- `Content` is a oneof with three members: `text`, `attachment` of part 3 (section 32)
+  and `profile` of part 4 (section 35). A kind of message that is added later is a new member of the oneof with
   the next number, and travels as a message of the ratchet like a text.
 
 The relay parses none of this (section 7.12).
@@ -2757,6 +2772,7 @@ every message that decrypts to version 1 (section 16.5).
 |--------|-----|--------|---------------------------------------------------------------|
 | `text` | 1   | string | UTF-8, 0 to MAX_TEXT_BYTES bytes when sent (section 19.7)     |
 | `attachment` | 2 | Attachment | A file of part 3, with the checks of section 32.2   |
+| `profile` | 3 | Profile | The profile of part 4, with the checks of section 35.3      |
 
 After a message decrypted and its padding was removed (section 19.6), the client parses
 the bytes as a `Content`
@@ -2767,7 +2783,7 @@ the bytes as a `Content`
   BAD_CONTENT.
 - A `Content` in which no member that the client knows is set gives the result
   UNKNOWN_CONTENT. A client that does not implement part 3 knows one member, `text`; one
-  that does knows `attachment` as well.
+  that does knows `attachment` as well, and one that implements part 4 knows `profile`.
 - The text is whatever the peer chose to send. The command-line client of this
   repository prints it with the C0, C1 and bidirectional control characters escaped
   [test: tests/client/test_cli.py::test_peer_text_is_printed_with_control_characters_escaped].
@@ -2948,7 +2964,9 @@ Rules that hold for every row
   causes.
 - An ACCEPT whose plaintext gives BAD_PADDING, BAD_CONTENT or UNKNOWN_CONTENT saves the
   state and the seen id without a text. The first two are shown as a message that could
-  not be read. A client MAY show the third as a message of a kind it does not know.
+  not be read. The third is shown as nothing: a later member of `Content` need not be a
+  message of the chat, as `profile` of part 4 is not (section 36.6)
+  [test: tests/client/test_cli.py::test_unknown_content_prints_nothing].
 - A bundle without a one-time prekey starts a session all the same: START never fails
   for the lack of one (section 16.6). A client that refused such a bundle could be cut
   off from a contact by anyone who empties the handout bucket of that contact
@@ -3191,6 +3209,8 @@ A client keeps, for one identity
   the message id, the recipient and the bytes of the payload;
 - the message log: the texts it sent and received.
 
+Section 33.7 adds what part 3 keeps, and section 36.1 what part 4 keeps.
+
 No frame and no payload carries the seed or a private key [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 
 ### 22.2 The two ordering rules
@@ -3402,7 +3422,7 @@ their results have names, which a negative test vector states as its `error`
 
 IDENTITY_KEY_MISMATCH is the name of section 11.4 with the same meaning: another X25519
 identity key than the pinned one, in a bundle there and in an initial header here.
-Section 33.6 names the local results of part 3.
+Section 33.6 names the local results of part 3, and section 36.7 those of part 4.
 
 ### 24.3 What the test vectors record
 
@@ -4452,6 +4472,269 @@ value is a hex string.
   digest of another blob, and a `size` with another padded length
   [test: tests/crypto/test_blob_vectors.py::test_vectors_cover_the_sizes_files_and_cases_of_section_34]
   [test: tests/crypto/test_blob_vectors.py::test_negative_vector_at_the_chunks_has_its_length_and_its_own_digest].
+
+## 35. The profile
+
+### 35.1 What part 4 is
+
+Part 4 specifies the profile of an identity: a display name and an avatar, a picture,
+that a client sends to its contacts so that they can show them. It adds one member to
+the `Content` oneof, `profile`, and no key, no frame and no rule of the relay.
+
+- A profile travels as a message of the ratchet, like a text (sections 17 and 18). The
+  relay sees a message of the usual length and nothing of the profile.
+- The avatar is an `Attachment` of part 3: the picture goes as a blob to each contact,
+  and the message carries its key (sections 28 to 33).
+- The receiver keeps the latest profile of each contact and nothing older. A profile is
+  no message of the chat (section 36.3).
+- The name a contact sends is that contact's own choice. The name the user gave a
+  contact wins wherever the client shows one (section 36.4).
+
+Part 4 changes neither version number of section 1.3: `profile` is a new member of the
+`Content` oneof, which a client of version 1 that does not implement part 4 reports as
+UNKNOWN_CONTENT (sections 14.2 and 36.6).
+
+The command-line client of this repository implements part 4. Every rule of part 4
+carries a citation like the rules of parts 1 to 3 (section 1.2).
+
+### 35.2 The fields
+
+The `Profile` message is listed in section 19.1. It is the `profile` member of a
+`Content`.
+
+| Field    | No. | Type       | Length or value                                                          |
+|----------|-----|------------|--------------------------------------------------------------------------|
+| `name`   | 1   | string     | 0 to MAX_PROFILE_NAME_BYTES, 256, bytes of UTF-8 without a control character, or empty |
+| `avatar` | 2   | Attachment | Present or absent: the picture, a file of part 3 with the limits below   |
+
+The control characters are those that the command-line client escapes in a text
+(section 19.5): U+0000 to U+001F, U+007F to U+009F, U+061C, U+200E, U+200F, U+202A to
+U+202E, U+2066 to U+2069, U+2028 and U+2029.
+
+The fields of `avatar` follow section 32.1, with these limits of their own:
+
+| Field        | Value when sent                                                                  |
+|--------------|----------------------------------------------------------------------------------|
+| `size`       | 0 to MAX_AVATAR_BYTES, 1048576                                                   |
+| `media_type` | `image/jpeg` or `image/png`, the type of the bytes of the picture, spelled so    |
+| `file_name`  | Empty                                                                            |
+| `caption`    | Empty                                                                            |
+| `width`, `height` | The size of the picture in pixels, or 0 when the client does not know it   |
+| `thumbnail`  | A small JPEG of the picture, 0 to MAX_THUMBNAIL_BYTES bytes; SHOULD be present   |
+
+- The media type is read from the first bytes of the picture, not from a file name: a
+  JPEG starts with `ff d8 ff` and a PNG with `89 50 4e 47 0d 0a 1a 0a`
+  [test: tests/client/test_envelope.py::test_avatar_media_type_is_read_from_the_first_bytes]. A
+  picture of another kind is not sent: the result is NOT_AN_IMAGE. A picture of more than
+  MAX_AVATAR_BYTES is not sent: the result is AVATAR_TOO_LARGE. A name that breaks the
+  rule of the table is not sent: the result is BAD_PROFILE_NAME
+  [test: tests/client/test_envelope.py::test_profile_beyond_a_limit_of_section_35_2_is_not_encoded]
+  [test: tests/client/test_cli.py::test_profile_set_refuses_an_avatar_too_large_or_not_an_image].
+- The thumbnail travels inside the message, so it outlives the blob; it is what a client
+  shows of the avatar until the picture is downloaded, and when it never is
+  (section 36.5).
+- A `Profile` without `avatar` has no avatar, and one with an empty `name` has no name.
+  A `Profile` with neither is the empty profile: it clears the profile at the receiver
+  (section 36.3). A `Content` whose `profile` is the empty `Profile` is the two bytes
+  `1a 00` before padding [test: tests/client/test_envelope.py::test_profile_encodes_and_decodes_with_and_without_an_avatar].
+
+### 35.3 The receiver's checks
+
+After a message decrypted and its plaintext parsed as a `Content` with a `profile`
+(section 19.5), the result is BAD_CONTENT when
+[test: tests/client/test_envelope.py::test_received_profile_that_breaks_section_35_3_is_bad_content]:
+
+- `name` is longer than MAX_PROFILE_NAME_BYTES bytes or holds a control character of
+  section 35.2;
+- `avatar` is present and breaks a check of section 32.2, or its `size` is more than
+  MAX_AVATAR_BYTES, or its `media_type` is neither `image/jpeg` nor `image/png`.
+
+A profile with BAD_CONTENT changes nothing that the client keeps of the contact's
+profile. The other fields of `avatar` are not checked, and a client never shows its
+`file_name` or `caption`. A field of `Profile` that the client does not know is ignored,
+as everywhere in this protocol (section 19.4)
+[test: tests/client/test_envelope.py::test_profile_encodes_and_decodes_with_and_without_an_avatar].
+
+### 35.4 Lengths
+
+The longest profile within the limits of section 35.2 makes a `Content` of 16753 bytes
+[test: tests/client/test_envelope.py::test_longest_profile_is_the_content_of_section_35_4_and_decodes],
+below the 65023 bytes of the longest text (section 19.7), so it fits a message whatever
+the state of the session.
+
+| Part                                                              | Bytes |
+|-------------------------------------------------------------------|-------|
+| `name`: tag 1, length 2, 256                                      | 259   |
+| `avatar`: `blob_id` and `key` 36, `size` 4, `digest` 34, `media_type` 12, `width` and `height` 12, `thumbnail` 16388 | 16486 |
+| `avatar` as a field: tag 1, length 3                              | 16490 |
+| The `Profile`                                                     | 16749 |
+| The `Content`: tag 1, length 3 and the `Profile`                  | 16753 |
+
+## 36. The client and the profile
+
+### 36.1 What a client keeps
+
+A client that implements part 4 keeps, besides what sections 22.1 and 33.7 list
+[test: tests/client/test_client_store.py::test_store_holds_what_section_22_1_lists]:
+
+- its own profile: the name, the picture and its media type;
+- for every contact the latest profile it accepted: the name, the avatar attachment and,
+  once downloaded, the picture;
+- the contacts it owes its profile (section 36.2), and the upload of the avatar of each.
+
+The avatar of a received profile is no attachment of the message log. A contact that is
+removed takes its profile with it (section 20.6).
+
+### 36.2 Sending
+
+A client owes its profile to a contact, and saves that in the transaction that causes it
+[test: tests/client/test_profiles.py::test_profile_change_is_owed_to_every_contact_with_a_session]
+[test: tests/client/test_profiles.py::test_new_session_gets_the_profile_once_in_both_directions]
+[test: tests/client/test_profiles.py::test_empty_profile_is_not_sent_into_a_new_session]:
+
+- When the user changes or clears the profile: to every contact with a session. A
+  contact without a session gets the profile with its first session.
+- When a session enters the list of a contact (sections 20.1 and 20.3): START, as
+  initiator, and ACCEPT-NEW, as responder. So both sides of a new session send their
+  profiles once, and a reset by either side (section 20.6) sends both again. A client
+  whose profile is empty sends none into a new session.
+
+A client sends what it owes as soon as it is logged in, and its last profile only:
+
+1. Without an avatar, it sends at once a message whose `Content` is the `profile`: the
+   action SEND of section 20.3, whose transaction also clears the debt.
+2. With an avatar, it uploads the picture to the contact as a new blob by section 33.2,
+   steps 2 to 4: a new blob id, file key and nonce for every contact, since a blob is
+   kept for one recipient (section 31.1). When the blob is complete, the message carries
+   the `profile` with the name that is current at that moment and the avatar of the
+   upload; its transaction deletes the upload and clears the debt
+   [test: tests/client/test_profiles.py::test_avatar_reaches_the_contact_whole_and_its_blob_is_deleted].
+3. A relay that announces no blob frames, or whose `blob_max_bytes` is below the blob of
+   the picture, gets the profile without the avatar
+   [test: tests/client/test_profiles.py::test_relay_without_blobs_gets_the_profile_without_the_avatar].
+4. A change while an avatar upload is on its way gives the upload up: the client deletes
+   it and sends DeleteBlob for its blob (section 33.2), then owes the new profile
+   [test: tests/client/test_profiles.py::test_profile_change_is_owed_to_every_contact_with_a_session].
+5. An upload refused with an Error whose action is Stop, or a START that fails, ends the
+   debt without a message, as a file that is not sent (section 33.2). The next change or
+   the next new session sends the profile again.
+
+### 36.3 Receiving
+
+A Deliver whose `Content` holds a `profile` that passes section 35.3 is an ACCEPT or an
+ACCEPT-NEW of section 20.3. In its transaction (section 22.2) the client
+[test: tests/client/test_profiles.py::test_received_profile_replaces_the_earlier_one_and_is_no_message]
+[test: tests/client/test_profiles.py::test_cleared_profile_leaves_nothing_of_the_contact]:
+
+1. deletes the earlier profile of the contact with its avatar and picture. When the
+   earlier avatar was not downloaded yet, it saves the DeleteBlob of its blob, and a
+   download of it that is on its way ends without a result
+   [test: tests/client/test_profiles.py::test_newer_profile_takes_the_place_of_an_avatar_on_its_way];
+2. keeps the new profile, unless it is the empty profile, which leaves nothing;
+3. logs no message: a profile is not shown as a message of the chat, never counts as an
+   unread message and does not move the chat in a list of chats.
+
+The client downloads the avatar by itself by section 33.3, steps 2 to 6, without the
+user's request: it is at most MAX_AVATAR_BYTES. It writes no file: the picture stays in
+the store. When the opened picture does not start with the bytes of its media type
+(section 35.2), the avatar could not be received with the result NOT_AN_IMAGE, and the
+client sends DeleteBlob for its blob
+[test: tests/client/test_profiles.py::test_avatar_reaches_the_contact_whole_and_its_blob_is_deleted]
+[test: tests/client/test_profiles.py::test_avatar_that_is_no_image_of_its_media_type_is_not_kept].
+
+"The latest" is the profile of the last message accepted, in the order the client
+accepted them.
+
+### 36.4 What the user sees
+
+- Where the user gave a contact a name, that name is the name of the contact: in the
+  list of contacts, the list of chats, the chat and a notification. The name the contact
+  sent MAY be shown next to it, marked as the contact's own
+  [test: tests/client/test_cli.py::test_contacts_show_the_name_a_contact_sent_next_to_the_local_one].
+- A client MAY show the sent name of a contact that has no local name, marked the same
+  way. A sent name proves nothing: any contact can send any name, the name of another
+  contact included.
+- The name is a text of the peer. The command-line client prints it through the escape
+  of section 19.5 [test: tests/client/test_cli.py::test_peer_profile_name_is_printed_with_control_characters_escaped].
+- The avatar is shown when its picture decodes as an image of its media type, else the
+  thumbnail when it decodes as a JPEG image, else none. An empty profile, or a profile
+  without an avatar, shows the client's own drawing for a contact without a picture.
+- A client MAY tell the user once that a contact changed its profile. The command-line
+  client prints one line in the chat when a profile arrives
+  [test: tests/client/test_cli.py::test_chat_prints_one_line_when_the_contact_profile_changes].
+
+### 36.5 A lost avatar
+
+The blob of an avatar lives as long as the blob of any file, BLOB_TTL_SECONDS after its
+last write, and outlives the message that names it by about a week (section 31.5).
+When the download ends with BLOB_GONE, the profile stays with its name and its
+thumbnail, and its avatar is not available
+[test: tests/client/test_profiles.py::test_avatar_whose_blob_is_gone_is_not_available_and_the_name_stays].
+The picture comes again with the next change of the contact's profile or the next new
+session with the contact, which a reset by either side makes. No message asks a contact
+for its profile.
+
+### 36.6 An older client
+
+A client of version 1 that does not implement part 4 parses a profile as a `Content`
+without a member it knows: the result is UNKNOWN_CONTENT (section 19.5). It keeps the
+new ratchet state and the seen id, acks the message and shows nothing
+[test: tests/client/test_envelope.py::test_profile_is_unknown_content_to_a_client_without_part_4]
+[test: tests/client/test_cli.py::test_unknown_content_prints_nothing]. The blob of the
+avatar stays at the relay until it expires (section 31.5).
+
+### 36.7 Constants and local results
+
+| Name                   | Value   | Unit  | Meaning                                                 |
+|------------------------|---------|-------|---------------------------------------------------------|
+| MAX_PROFILE_NAME_BYTES | 256     | bytes | The longest name, in UTF-8: 64 characters of 4 bytes    |
+| MAX_AVATAR_BYTES       | 1048576 | bytes | The largest picture of an avatar, 1 MiB                 |
+
+Both bound what a client sends and what a receiver accepts (section 35.3).
+
+| Name             | Where        | Meaning                                                                  |
+|------------------|--------------|--------------------------------------------------------------------------|
+| BAD_PROFILE_NAME | Section 35.2 | A name to send is longer than MAX_PROFILE_NAME_BYTES or holds a control character |
+| AVATAR_TOO_LARGE | Section 35.2 | A picture to send is longer than MAX_AVATAR_BYTES                        |
+| NOT_AN_IMAGE     | Sections 35.2 and 36.3 | The bytes are neither a JPEG nor a PNG picture, or not one of the media type of the avatar |
+
+## 37. The test vectors of the profile
+
+The vectors of part 4 are the file `vectors/profile.json`, in the schema of section 15.2,
+written by `scripts/generate_vectors.py` with the code of part 4
+[test: tests/crypto/test_profile_vectors.py::test_vector_file_follows_the_schema]
+[test: tests/crypto/test_profile_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_profile_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_profile_vectors.py::test_negative_vectors_raise_their_named_error].
+`name` and `media_type` are JSON strings, `size`, `width` and `height` are numbers,
+`avatar` is an object of the fields of an `Attachment` that are set, and every other
+value is a hex string.
+
+| Operation           | Rule       | `inputs`             | `intermediates` | `outputs`             | `error`                    |
+|---------------------|------------|----------------------|-----------------|-----------------------|----------------------------|
+| `profile-encode`    | 35.2, 19.6 | `name`, `avatar`     | `content`       | `plaintext`           | BAD_PROFILE_NAME, AVATAR_TOO_LARGE, NOT_AN_IMAGE |
+| `profile-decode`    | 35.3, 19.6 | `plaintext`          | `content`       | `name`, `avatar`      | BAD_CONTENT                |
+| `avatar-media-type` | 35.2       | `image`              |                 | `media_type`          | NOT_AN_IMAGE               |
+
+- `profile-encode`: `avatar` is absent for a profile without one. `content` is the
+  serialized `Content` and `plaintext` the padded plaintext of section 19.6. The cases:
+  a name alone, a name with a JPEG avatar and its thumbnail, a PNG avatar without a name
+  or a thumbnail, the empty profile, a name of MAX_PROFILE_NAME_BYTES bytes, and the
+  longest profile of section 35.4. The negative cases: a name of
+  MAX_PROFILE_NAME_BYTES + 1 bytes, a name with U+202E, an avatar of MAX_AVATAR_BYTES + 1
+  bytes and an avatar of the media type `image/gif`.
+- `profile-decode`: `content` is the bytes in front of the padding, and `outputs` hold
+  `avatar` only when it is present. The positive cases are the plaintexts of the
+  `profile-encode` vectors of the same name after the operation, and a profile with a
+  field that the client does not know. The negative cases: a name of
+  MAX_PROFILE_NAME_BYTES + 1 bytes; a name that is not UTF-8; a name with each kind of
+  control character of section 35.2 (U+0000, U+007F, U+0085, U+202E, U+2028); an avatar
+  whose `blob_id`, `key` or `digest` breaks its length; an avatar of MAX_AVATAR_BYTES + 1 bytes; and avatars of
+  the media types `image/gif`, `IMAGE/JPEG`, `image/jpeg; q=1` and the empty one
+  [test: tests/crypto/test_profile_vectors.py::test_vectors_cover_the_cases_of_section_37].
+- `avatar-media-type`: the first bytes of a picture. The cases: a JPEG, a PNG, a GIF,
+  no bytes, and the first two bytes of a JPEG.
+- A negative vector records no intermediate.
 
 ## Appendix A. One key agreement and two messages in hex
 

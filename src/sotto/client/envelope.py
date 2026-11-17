@@ -1,11 +1,11 @@
-"""The peer envelope and the plaintext of docs/protocol.md, section 19."""
+"""The peer envelope and the plaintext of docs/protocol.md, sections 19, 32 and 35."""
 
 from google.protobuf.message import DecodeError
 
 from sotto.crypto.blob import DIGEST_LENGTH, FILE_KEY_LENGTH, MAX_FILE_BYTES
 from sotto.crypto.identity import KEY_LENGTH, SIGNATURE_LENGTH, CryptoError
 from sotto.crypto.ratchet import HEADER_LENGTH, MESSAGE_NONCE_LENGTH, TAG_LENGTH
-from sotto.proto.sotto_pb2 import Attachment, Content, PeerMessage
+from sotto.proto.sotto_pb2 import Attachment, Content, PeerMessage, Profile
 
 VERSION = 1
 PADDING_BLOCK = 256
@@ -17,6 +17,9 @@ MAX_MEDIA_TYPE_BYTES = 127
 MAX_FILE_NAME_BYTES = 255
 MAX_THUMBNAIL_BYTES = 16384
 MAX_CAPTION_BYTES = 4096
+MAX_PROFILE_NAME_BYTES = 256
+MAX_AVATAR_BYTES = 1048576
+AVATAR_SIGNATURES = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n"}
 BIDI_CONTROLS = frozenset(
     chr(code)
     for code in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A))
@@ -47,6 +50,18 @@ class UnknownContentError(CryptoError):
 
 class TextTooLongError(CryptoError):
     result = "TEXT_TOO_LONG"
+
+
+class BadProfileNameError(CryptoError):
+    result = "BAD_PROFILE_NAME"
+
+
+class AvatarTooLargeError(CryptoError):
+    result = "AVATAR_TOO_LARGE"
+
+
+class NotAnImageError(CryptoError):
+    result = "NOT_AN_IMAGE"
 
 
 def pad(content: bytes) -> bytes:
@@ -85,6 +100,55 @@ def encode_attachment(attachment: Attachment) -> bytes:
     Raises:
         ValueError: A field is beyond its limit of section 32.1.
     """
+    _check_attachment_limits(attachment)
+    return pad(Content(attachment=attachment).SerializeToString())
+
+
+def encode_profile(name: str, avatar: Attachment | None) -> bytes:
+    """Returns the padded plaintext of the client's own profile (section 35.2).
+
+    Raises:
+        BadProfileNameError: The name is longer than MAX_PROFILE_NAME_BYTES or holds a
+            control character.
+        AvatarTooLargeError: The avatar is longer than MAX_AVATAR_BYTES.
+        NotAnImageError: The media type of the avatar is not one of AVATAR_SIGNATURES.
+        ValueError: A field of the avatar is beyond its limit of section 32.1, or it has a
+            file name or a caption.
+    """
+    if not is_profile_name(name):
+        raise BadProfileNameError("the name is too long or holds a control character")
+    profile = Profile(name=name)
+    if avatar is not None:
+        if avatar.size > MAX_AVATAR_BYTES:
+            raise AvatarTooLargeError(f"the avatar is above {MAX_AVATAR_BYTES} bytes")
+        if avatar.media_type not in AVATAR_SIGNATURES:
+            raise NotAnImageError("the avatar is not a JPEG or PNG image")
+        if avatar.file_name or avatar.caption:
+            raise ValueError("an avatar has no file name and no caption")
+        _check_attachment_limits(avatar)
+        profile.avatar.CopyFrom(avatar)
+    return pad(Content(profile=profile).SerializeToString())
+
+
+def is_profile_name(name: str) -> bool:
+    """Whether a name keeps the rule of section 35.2: its length and no control character."""
+    is_too_long = len(name.encode()) > MAX_PROFILE_NAME_BYTES
+    return not is_too_long and not any(is_control(character) for character in name)
+
+
+def avatar_media_type(image: bytes) -> str:
+    """The media type of an avatar by its first bytes (section 35.2).
+
+    Raises:
+        NotAnImageError: The bytes start with no signature of AVATAR_SIGNATURES.
+    """
+    for media_type, signature in AVATAR_SIGNATURES.items():
+        if image.startswith(signature):
+            return media_type
+    raise NotAnImageError("the bytes are not a JPEG or PNG image")
+
+
+def _check_attachment_limits(attachment: Attachment) -> None:
     breaks_a_limit = (
         len(attachment.blob_id) != BLOB_ID_LENGTH
         or len(attachment.key) != FILE_KEY_LENGTH
@@ -97,17 +161,16 @@ def encode_attachment(attachment: Attachment) -> bytes:
     )
     if breaks_a_limit:
         raise ValueError("a field of the attachment is beyond its limit of section 32.1")
-    return pad(Content(attachment=attachment).SerializeToString())
 
 
-def decode_content(padded: bytes) -> str | Attachment:
-    """Returns the text or the attachment of a padded plaintext by sections 19.5, 19.6
-    and 32.2.
+def decode_content(padded: bytes) -> str | Attachment | Profile:
+    """Returns the text, the attachment or the profile of a padded plaintext by sections
+    19.5, 19.6, 32.2 and 35.3.
 
     Raises:
         BadPaddingError: The plaintext has no padding.
-        BadContentError: The content does not parse, a text that is not UTF-8 included, or
-            an attachment breaks a length of section 32.2.
+        BadContentError: The content does not parse, a text that is not UTF-8 included, an
+            attachment breaks a length of section 32.2 or a profile a check of 35.3.
         UnknownContentError: The content sets no member that this client knows.
     """
     try:
@@ -121,6 +184,9 @@ def decode_content(padded: bytes) -> str | Attachment:
         case "attachment":
             _check_attachment(content.attachment)
             return content.attachment
+        case "profile":
+            _check_profile(content.profile)
+            return content.profile
         case _:
             raise UnknownContentError("the Content sets no member that this client knows")
 
@@ -139,6 +205,19 @@ def _check_attachment(attachment: Attachment) -> None:
         raise BadContentError("a field of the attachment breaks its length")
     if attachment.size > MAX_FILE_BYTES:
         raise BadContentError(f"the attachment names a file above {MAX_FILE_BYTES} bytes")
+
+
+def _check_profile(profile: Profile) -> None:
+    if not is_profile_name(profile.name):
+        raise BadContentError("the name of the profile breaks section 35.3")
+    if not profile.HasField("avatar"):
+        return
+    avatar = profile.avatar
+    _check_attachment(avatar)
+    is_too_large = avatar.size > MAX_AVATAR_BYTES
+    is_no_image_type = avatar.media_type not in AVATAR_SIGNATURES
+    if is_too_large or is_no_image_type:
+        raise BadContentError("the avatar of the profile breaks section 35.3")
 
 
 def parse_envelope(payload: bytes) -> PeerMessage:

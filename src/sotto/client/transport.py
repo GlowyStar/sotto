@@ -22,7 +22,12 @@ from google.protobuf.message import DecodeError
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from sotto.client.envelope import MAX_FILE_NAME_BYTES, MAX_MEDIA_TYPE_BYTES, encode_text
+from sotto.client.envelope import (
+    MAX_FILE_NAME_BYTES,
+    MAX_MEDIA_TYPE_BYTES,
+    NotAnImageError,
+    encode_text,
+)
 from sotto.client.session import (
     BLOB_GONE,
     Client,
@@ -121,7 +126,7 @@ type ServerMessage = (
     | BlobData
 )
 type BlobReply = BlobStored | BlobData | ErrorFrame
-type TransferKey = tuple[str, bytes | int]
+type TransferKey = tuple[str, bytes]
 type Jitter = Callable[[float], float]
 
 _system_random = secrets.SystemRandom()
@@ -218,6 +223,7 @@ class FileUpdate:
     `contact` is the recipient of a file being sent and the sender of a received one;
     `file_name` is the name in the attachment, a text of the peer for a received file.
     `done` out of `total` bytes of the blob are stored at the relay or downloaded.
+    `avatar` marks the avatar of a profile (section 36), which is no file of the chat.
     """
 
     contact: bytes
@@ -228,6 +234,7 @@ class FileUpdate:
     total: int = 0
     result: str | None = None
     path: Path | None = None
+    avatar: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -473,6 +480,7 @@ class Transport:
         self._holders = 0
         self._requests: list[_Request] = []
         self._back_offs: set[asyncio.Task[None]] = set()
+        self._profile_sends: set[asyncio.Task[None]] = set()
         self._transfers: dict[TransferKey, asyncio.Task[None]] = {}
         self._sequence = 0
         # A DeleteBlob sent on this connection, with the sequence of the last request
@@ -516,6 +524,7 @@ class Transport:
         outgoing = self.client.send_text(contact, text, bundle=bundle)
         if self._ready.is_set():
             await self._request(_Request(frame=send_frame(outgoing)))
+        await self._send_owed_profiles()
 
     async def send_file(self, contact: bytes, path: Path, *, caption: str = "") -> bytes:
         """Steps 1 and 2 of section 33.2 once logged in; the upload goes on in the
@@ -550,7 +559,9 @@ class Transport:
     async def reset_session(self, contact: bytes) -> int:
         """L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left."""
         bundle = await self.fetch_bundle(contact)
-        return self.client.start_session(contact, bundle)
+        missing = self.client.start_session(contact, bundle)
+        await self._send_owed_profiles()
+        return missing
 
     async def fetch_bundle(self, contact: bytes) -> Bundle:
         """The bundle of a contact, fetched again after a reconnect until an answer.
@@ -640,7 +651,7 @@ class Transport:
         self._ready.set()
         self.events.put_nowait(Connected())
         self._end_transfers_beyond_the_relay()
-        self._start_transfers()
+        await self._send_owed_profiles()
 
     async def _serve(self, connection: ClientConnection) -> None:
         while True:
@@ -680,14 +691,20 @@ class Transport:
             sender=deliver.sender, message_id=deliver.message_id, payload=deliver.payload
         )
         received = self.client.receive(delivered)
+        if received.profile is not None:
+            # Before the first await: the task of a replaced avatar must not write into
+            # the row that took its position.
+            self._cancel_ended_downloads()
         if received.ack:
             reference = MessageRef(message_id=deliver.message_id, sender=deliver.sender)
             await connection.send(
                 ClientFrame(ack=Ack(messages=[reference])).SerializeToString()
             )
         self.events.put_nowait(Incoming(sender=deliver.sender, received=received))
-        if received.attachment is not None:
-            self._start_transfers()
+        # In a task, so that a held request never stops this loop from reading frames.
+        task = asyncio.create_task(self._send_owed_profiles())
+        self._profile_sends.add(task)
+        task.add_done_callback(self._profile_sends.discard)
 
     def _confirm_stored(self, message_id: bytes) -> None:
         file = self.client.confirm_stored(message_id)
@@ -828,8 +845,13 @@ class Transport:
                 result = FilesUnsupportedError.result
             elif upload.length > self.blob_max_bytes:
                 result = FileTooLargeError.result
-            if result is not None:
-                self.client.give_up_upload(upload.blob_id)
+            if result is None:
+                continue
+            self.client.give_up_upload(upload.blob_id)
+            if upload.profile:
+                # Owed again, the profile goes out without its avatar (section 36.2).
+                self.client.owe_profile(upload.contact)
+            else:
                 self._report_upload(upload, FileState.NOT_SENT, result=result)
 
         if self.blob_max_bytes == 0 and self.received_files is not None:
@@ -847,12 +869,31 @@ class Transport:
             if key not in self._transfers:
                 self._track(key, self._upload(upload))
         folder = self.received_files
-        if folder is None:
-            return
         for file in self.client.downloads():
-            key = ("download", file.position)
-            if key not in self._transfers:
+            key = _download_key(file)
+            if key in self._transfers:
+                continue
+            if file.avatar:
+                self._track(key, self._download(file, None))
+            elif folder is not None:
                 self._track(key, self._download(file, folder))
+
+    def _cancel_ended_downloads(self) -> None:
+        """Cancels the download tasks whose file the store no longer offers."""
+        offered = {_download_key(file) for file in self.client.downloads()}
+        for key, transfer in list(self._transfers.items()):
+            if key[0] == "download" and key not in offered:
+                transfer.cancel()
+                del self._transfers[key]
+
+    async def _send_owed_profiles(self) -> None:
+        """Section 36.2 once logged in: the owed profiles go out as Sends or as avatar
+        uploads, and every transfer without a task gets one."""
+        if not self._ready.is_set():
+            return
+        for outgoing in self.client.send_owed_profiles(blob_max_bytes=self.blob_max_bytes):
+            await self._request(_Request(frame=send_frame(outgoing)))
+        self._start_transfers()
 
     def _track(self, key: TransferKey, transfer: Coroutine[None, None, None]) -> None:
         task = asyncio.create_task(_until_the_connection_ends(transfer))
@@ -861,7 +902,10 @@ class Transport:
         def forget(done: asyncio.Task[None]) -> None:
             if self._transfers.get(key) is done:
                 del self._transfers[key]
-            if not done.cancelled() and (error := done.exception()) is not None:
+            if done.cancelled():
+                # A task cancelled before its first step never started the transfer.
+                transfer.close()
+            elif (error := done.exception()) is not None:
                 self.events.put_nowait(TransferFailed(reason=repr(error)))
 
         task.add_done_callback(forget)
@@ -908,6 +952,7 @@ class Transport:
             await self._not_sent(upload, error.result)
             return
         await self._request(_Request(frame=send_frame(outgoing)))
+        await self._send_owed_profiles()
 
     async def _not_sent(self, upload: UploadRow, result: str) -> None:
         self.client.give_up_upload(upload.blob_id)
@@ -926,11 +971,13 @@ class Transport:
                 done=done,
                 total=upload.length,
                 result=result,
+                avatar=upload.profile,
             )
         )
 
-    async def _download(self, file: FileRow, folder: Path) -> None:
-        """Steps 2 to 6 of section 33.3 from the bytes the store holds."""
+    async def _download(self, file: FileRow, folder: Path | None) -> None:
+        """Steps 2 to 6 of section 33.3 from the bytes the store holds; `folder` is None
+        for an avatar, which stays in the store (section 36.3)."""
         attachment = file.attachment
         length = blob_length(attachment.size)
         held = file.held
@@ -958,8 +1005,12 @@ class Transport:
             )
 
         try:
-            path = self.client.finish_download(file.position, folder)
-        except BadBlobError as error:
+            if folder is None:
+                self.client.finish_avatar_download(file.position)
+                path = None
+            else:
+                path = self.client.finish_download(file.position, folder)
+        except (BadBlobError, NotAnImageError) as error:
             await self._not_received(file, error.result)
             return
         except OSError as error:
@@ -1000,7 +1051,7 @@ class Transport:
 
     def _end_connection(self) -> None:
         """What section 21.4 and 23.5 ask when a connection ends with requests open."""
-        for task in self._back_offs:
+        for task in self._back_offs | self._profile_sends:
             task.cancel()
         for transfer in self._transfers.values():
             transfer.cancel()
@@ -1094,7 +1145,13 @@ def _file_update(
         total=total,
         result=result,
         path=path,
+        avatar=file.avatar,
     )
+
+
+def _download_key(file: FileRow) -> TransferKey:
+    """A download by its blob: the position of a deleted file can be taken by another."""
+    return ("download", file.contact + file.attachment.blob_id)
 
 
 def _cut_to(name: str, limit: int) -> str:

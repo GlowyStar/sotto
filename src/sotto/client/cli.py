@@ -2,11 +2,13 @@
 
 Peer text reaches the terminal only through `printable`. No command takes the seed as an
 argument or prints it (docs/protocol.md, section 22.4). Received files go into the folder
-`received` of the data directory (section 32.2).
+`received` of the data directory (section 32.2). The profile of part 4 is set offline and
+goes to the contacts at the next connection; the local name of a contact is the name used.
 """
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import threading
@@ -14,9 +16,10 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-from sotto.client.envelope import TextTooLongError, is_control
+from sotto.client.envelope import MAX_AVATAR_BYTES, TextTooLongError, is_control
+from sotto.client.files import FILE_MODE
 from sotto.client.session import Client, FileState, OwnIdentityError
-from sotto.client.store import Store, StoreModeError
+from sotto.client.store import ContactProfile, Store, StoreModeError
 from sotto.client.transport import (
     Connected,
     Event,
@@ -41,7 +44,10 @@ SENDING_ENDS = frozenset({FileState.SENT, FileState.NOT_SENT})
 QUIT = "/quit"
 QUIT_GRACE_SECONDS = 2
 CONTACT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
-SILENT_RESULTS = frozenset({"DUPLICATE", "NOT_A_CONTACT"})
+# UNKNOWN_CONTENT may be a later member of Content that is no message (section 20.3).
+SILENT_RESULTS = frozenset({"DUPLICATE", "NOT_A_CONTACT", "UNKNOWN_CONTENT"})
+
+type Commands = argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 class CommandError(Exception):
@@ -106,7 +112,32 @@ def _parser() -> argparse.ArgumentParser:
     send_file.add_argument("--caption", default="", help="a text shown with the file")
     _add_relay_options(send_file)
     send_file.set_defaults(command=_send_file)
+    _add_profile_commands(commands)
     return parser
+
+
+def _add_profile_commands(commands: Commands) -> None:
+    profile = commands.add_parser(
+        "profile", help="set, show or clear the name and the avatar your contacts see"
+    )
+    actions = profile.add_subparsers(required=True)
+
+    set_profile = actions.add_parser(
+        "set", help="set the name, the avatar or both; it goes out at the next chat"
+    )
+    set_profile.add_argument("--name", help="the name your contacts see, up to 256 bytes")
+    avatar = set_profile.add_mutually_exclusive_group()
+    avatar.add_argument("--avatar", type=Path, help="a JPEG or PNG picture, up to 1 MiB")
+    avatar.add_argument("--no-avatar", action="store_true", help="remove the avatar")
+    set_profile.set_defaults(command=_set_profile)
+
+    show = actions.add_parser("show", help="print your profile or the one a contact sent")
+    show.add_argument("name", nargs="?", help="the local name of a contact")
+    show.add_argument("--avatar-to", type=Path, help="write the avatar into this new file")
+    show.set_defaults(command=_show_profile)
+
+    clear = actions.add_parser("clear", help="clear the name and the avatar")
+    clear.set_defaults(command=_clear_profile)
 
 
 def _add_relay_options(parser: argparse.ArgumentParser) -> None:
@@ -158,7 +189,61 @@ def _add(arguments: argparse.Namespace) -> int:
 def _contacts(arguments: argparse.Namespace) -> int:
     with _client(arguments) as client:
         for contact, name in _names(client).items():
-            print(f"{name} {encode_user_id(contact)}")
+            sent = client.store.profile(contact)
+            note = "" if sent is None else f" {_profile_note(client, sent)}"
+            print(f"{name} {encode_user_id(contact)}{note}")
+    return 0
+
+
+def _set_profile(arguments: argparse.Namespace) -> int:
+    has_a_change = arguments.name is not None or arguments.avatar or arguments.no_avatar
+    if not has_a_change:
+        raise CommandError("give --name, --avatar or --no-avatar")
+    with _client(arguments) as client:
+        own = client.own_profile()
+        name, avatar = own.name, own.avatar
+        if arguments.name is not None:
+            name = arguments.name
+        if arguments.no_avatar:
+            avatar = None
+        if arguments.avatar is not None:
+            avatar = _read_avatar(arguments.avatar)
+        _save_profile(client, name, avatar)
+    return 0
+
+
+def _clear_profile(arguments: argparse.Namespace) -> int:
+    with _client(arguments) as client:
+        _save_profile(client, "", None)
+    return 0
+
+
+def _show_profile(arguments: argparse.Namespace) -> int:
+    with _client(arguments) as client:
+        if arguments.name is None:
+            own = client.own_profile()
+            name, avatar = own.name, own.avatar
+            has_avatar = avatar is not None
+            avatar_note = f"avatar {own.media_type}" if has_avatar else "no avatar"
+        else:
+            contact = _contact_named(client, arguments.name)
+            sent = client.store.profile(contact)
+            if sent is None:
+                print(f"{arguments.name} sent no profile")
+                return 0
+            name, avatar = sent.name, sent.avatar
+            has_avatar = sent.avatar_file is not None
+            avatar_note = _avatar_note(client, sent)
+
+        is_the_empty_profile = not name and not has_avatar
+        if is_the_empty_profile:
+            print("no profile")
+        else:
+            print(f'name "{printable(name)}"' if name else "no name")
+            size = "" if avatar is None else f", {len(avatar)} bytes"
+            print(f"{avatar_note}{size}")
+        if arguments.avatar_to is not None:
+            _write_avatar(arguments.avatar_to, avatar)
     return 0
 
 
@@ -306,6 +391,10 @@ def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, in
                 _say(f"{name}: {received.missing} earlier messages can never be read")
             if received.text is not None:
                 _say(f"{name}: {printable(received.text)}")
+            elif received.profile is not None:
+                profile = received.profile
+                has_avatar = profile.HasField("avatar")
+                _say(f"{name}: {_describe_profile(profile.name, has_avatar=has_avatar)}")
             elif received.attachment is not None:
                 attachment = received.attachment
                 caption = f": {printable(attachment.caption)}" if attachment.caption else ""
@@ -333,6 +422,9 @@ def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, in
 
 
 def _print_file_update(update: FileUpdate, name: str, progress: dict[bytes, int]) -> None:
+    if update.avatar:
+        _print_avatar_update(update, name)
+        return
     file_name = printable(update.file_name)
     match update.state:
         case FileState.SENDING | FileState.RECEIVING:
@@ -348,6 +440,72 @@ def _print_file_update(update: FileUpdate, name: str, progress: dict[bytes, int]
             _say(f"sent {file_name} to {name}")
         case _:
             _say(f"{update.state}: {file_name}, {name} ({update.result})")
+
+
+def _print_avatar_update(update: FileUpdate, name: str) -> None:
+    """Only the end of an avatar transfer that failed: the profile line said the rest."""
+    match update.state:
+        case FileState.NOT_SENT:
+            _say(f"your avatar was not sent to {name} ({update.result})")
+        case FileState.NOT_RECEIVED | FileState.NOT_AVAILABLE:
+            _say(f"{name}: the avatar {update.state} ({update.result})")
+
+
+def _describe_profile(name: str, *, has_avatar: bool) -> str:
+    is_the_empty_profile = not name and not has_avatar
+    if is_the_empty_profile:
+        return "profile cleared"
+    named = f'profile "{printable(name)}"' if name else "profile without a name"
+    return f"{named}, {'with an avatar' if has_avatar else 'no avatar'}"
+
+
+def _profile_note(client: Client, sent: ContactProfile) -> str:
+    """The profile a contact sent, for a line that starts with the local name."""
+    named = f'"{printable(sent.name)}"' if sent.name else "without a name"
+    return f"profile {named}, {_avatar_note(client, sent)}"
+
+
+def _avatar_note(client: Client, sent: ContactProfile) -> str:
+    if sent.avatar_file is None:
+        return "no avatar"
+    if sent.avatar is not None:
+        return "avatar received"
+    file = client.store.file(sent.avatar_file)
+    state = FileState.OFFERED if file is None else file.state
+    return f"avatar {state}"
+
+
+def _read_avatar(path: Path) -> bytes:
+    """At most one byte more than MAX_AVATAR_BYTES, enough for the check of the client."""
+    try:
+        with path.open("rb") as file:
+            return file.read(MAX_AVATAR_BYTES + 1)
+    except OSError as error:
+        raise CommandError(f"cannot read {path}: {error.strerror}") from error
+
+
+def _save_profile(client: Client, name: str, avatar: bytes | None) -> None:
+    try:
+        client.set_profile(name, avatar)
+    except CryptoError as error:
+        raise CommandError(f"the profile is not set: {error.result}") from error
+    print(_describe_profile(name, has_avatar=avatar is not None))
+    print("it goes to your contacts at the next chat")
+
+
+def _write_avatar(path: Path, avatar: bytes | None) -> None:
+    if avatar is None:
+        raise CommandError("there is no avatar to write")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+    except OSError as error:
+        raise CommandError(f"cannot write {path}: {error.strerror}") from error
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(avatar)
+    except OSError as error:
+        path.unlink(missing_ok=True)
+        raise CommandError(f"cannot write {path}: {error.strerror}") from error
 
 
 def _say(line: str) -> None:

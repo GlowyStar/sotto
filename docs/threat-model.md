@@ -126,6 +126,13 @@ Whoever controls the relay learns all of this, with or without the rules of the 
   deleted and by which side.
 - Which message carries which file, by time: a sender sends the message of a file to the
   recipient of the blob right after the blob is complete.
+- When a user changes the profile (protocol, part 4): a burst of messages from one sender
+  to every contact with which it has a session, each after a blob of the same length when
+  the profile has an avatar. The burst shows the relay the contacts of the user at once,
+  quiet ones included, and a blob of one length to many recipients at one time marks the
+  avatar as one picture. A new session is followed by a profile message, and an avatar
+  blob, in both directions. Nothing of the name or the picture: the profile is sealed
+  like a text and the picture like a file.
 
 The relay does not learn the content of a message: it holds no key that opens a payload
 (protocol, sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
@@ -410,6 +417,19 @@ its id.
   this repository opens and runs no received file at all. A contact can send
   files of up to MAX_FILE_BYTES each, as many as its quota at the relay allows; what a
   client downloads without the user's request is the client's choice.
+- A profile is whatever the peer sent (protocol, part 4). A contact can call itself by any
+  name, the name of another contact or of the user included, and send any picture of up
+  to 1 MiB, which the client downloads without the user's request. The name the user gave
+  the contact is the name the client shows; the sent name is shown only next to it,
+  marked as the contact's own, through the escape of control characters
+  [test: tests/client/test_cli.py::test_contacts_show_the_name_a_contact_sent_next_to_the_local_one]. A
+  receiver refuses a name with a control character and a picture that is neither a JPEG
+  nor a PNG by its first bytes
+  [test: tests/client/test_envelope.py::test_received_profile_that_breaks_section_35_3_is_bad_content]
+  [test: tests/client/test_profiles.py::test_avatar_that_is_no_image_of_its_media_type_is_not_kept];
+  the picture is still decoded by an image library of the platform, whose flaws this
+  project does not cover. A contact learns the profile of the user as soon as a session
+  starts.
 - An identity that is not a contact is no peer. Its messages are dropped before a byte of
   them is parsed, shown nowhere and acked (protocol, section 20.3)
   [test: tests/client/test_session.py::test_stranger_is_acked_before_a_byte_is_parsed].
@@ -614,6 +634,9 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
   its number of 256-byte blocks shows the length of its name, thumbnail and caption in
   that step. Which blob it names is sealed; the relay links the two by time ("What the
   relay learns").
+- For a profile, the same: its `Content` is padded like a text. Its blocks show whether it
+  carries a thumbnail, and roughly how large; the relay links a profile message to the
+  blob of its avatar by time, as for a file.
 
 The header is not encrypted, and hiding it is not part of this protocol (protocol,
 section 26). What the relay does not see is the sealed text: it holds no key of a session
