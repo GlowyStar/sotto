@@ -15,13 +15,20 @@ from pathlib import Path
 
 from sotto.client.envelope import (
     BLOB_ID_LENGTH,
+    MAX_AVATAR_BYTES,
     VERSION,
+    AvatarTooLargeError,
     BadContentError,
     BadPaddingError,
+    BadProfileNameError,
+    NotAnImageError,
     UnknownContentError,
+    avatar_media_type,
     decode_content,
     encode_attachment,
+    encode_profile,
     encode_text,
+    is_profile_name,
     parse_envelope,
 )
 from sotto.client.files import save_file
@@ -29,6 +36,7 @@ from sotto.client.store import (
     FileRow,
     Identity,
     OutboxRow,
+    OwnProfile,
     Store,
     StoredSession,
     StoredSignedPrekey,
@@ -64,7 +72,7 @@ from sotto.crypto.identity import (
 )
 from sotto.crypto.ratchet import MESSAGE_NONCE_LENGTH, DecryptFailedError, RatchetState
 from sotto.crypto.x3dh import BadInitialHeaderError
-from sotto.proto.sotto_pb2 import Attachment, InitialHeader, Login, PeerMessage
+from sotto.proto.sotto_pb2 import Attachment, InitialHeader, Login, PeerMessage, Profile
 
 MESSAGE_ID_LENGTH = 16
 SEEN_ID_SECONDS = 3196800
@@ -74,8 +82,10 @@ ONE_TIME_PREKEY_REFILL_BELOW = 50
 ONE_TIME_PREKEY_CAP = 100
 ONE_TIME_PREKEY_HELD_MAX = 1000
 BLOB_GONE = "BLOB_GONE"
+DELETED_ON_FAILURE = frozenset({BadBlobError.result, NotAnImageError.result})
 
 type RandomBytes = Callable[[int], bytes]
+type Body = str | Attachment | Profile
 type Clock = Callable[[], float]
 
 
@@ -139,8 +149,8 @@ class Delivered:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Received:
-    """What a Deliver gives: a text or an attachment to show, or the named result of
-    section 24.2.
+    """What a Deliver gives: a text or an attachment to show, a profile that replaced the
+    sender's earlier one, or the named result of section 24.2.
 
     `missing` is the GAP of section 20.3: the messages of the sender that can never be read,
     counted by the skipped keys that this message removed without use.
@@ -151,6 +161,7 @@ class Received:
     result: str | None
     missing: int = 0
     attachment: Attachment | None = None
+    profile: Profile | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -365,6 +376,7 @@ class Client:
             missing = self.store.drop_sessions_behind(contact)
             if pin is None:
                 self.store.set_pin(contact, bundle.identity_dh_key)
+            self._owe_profile_to_a_new_session(contact)
         return missing
 
     def send_text(
@@ -424,26 +436,20 @@ class Client:
             ValueError: A name, media type or caption is beyond its limit of 32.1.
         """
         self.check_file(contact, len(file), blob_max_bytes=blob_max_bytes)
-        blob_id = self.random_bytes(BLOB_ID_LENGTH)
-        file_key = self.random_bytes(FILE_KEY_LENGTH)
-        blob = encrypt_blob(
-            file, file_key=file_key, nonce=self.random_bytes(BLOB_NONCE_LENGTH)
-        )
-        attachment = Attachment(
-            blob_id=blob_id,
-            key=file_key,
-            size=len(file),
-            digest=digest_of(blob),
-            media_type=media_type,
-            file_name=file_name,
-            caption=caption,
-        )
+        attachment, blob = self._encrypt_file(file, media_type=media_type)
+        attachment.file_name = file_name
+        attachment.caption = caption
         encode_attachment(attachment)
 
         with self.store.transaction():
-            self.store.add_upload(blob_id, contact=contact, attachment=attachment, blob=blob)
+            self.store.add_upload(
+                attachment.blob_id, contact=contact, attachment=attachment, blob=blob
+            )
         return UploadRow(
-            blob_id=blob_id, contact=contact, attachment=attachment, length=len(blob)
+            blob_id=attachment.blob_id,
+            contact=contact,
+            attachment=attachment,
+            length=len(blob),
         )
 
     def uploads(self) -> list[UploadRow]:
@@ -453,17 +459,24 @@ class Client:
         return self.store.read_upload(blob_id, offset, length)
 
     def send_attachment(self, upload: UploadRow, *, bundle: Bundle | None = None) -> Outgoing:
-        """Step 5 of section 33.2: SEND of the attachment, which deletes the upload.
+        """Step 5 of section 33.2: SEND of the attachment, which deletes the upload. The
+        upload of an avatar sends the own profile with its current name (section 36.2).
 
         Raises:
             NotAContactError: The identity is no longer a contact.
             CryptoError: START failed with the result that it names.
             ValueError: The contact has no session and no bundle was given.
         """
-        sealed = self._seal(upload.contact, encode_attachment(upload.attachment), bundle)
+        if upload.profile:
+            plaintext = encode_profile(self.store.own_profile().name, upload.attachment)
+        else:
+            plaintext = encode_attachment(upload.attachment)
+        sealed = self._seal(upload.contact, plaintext, bundle)
         with self.store.transaction():
             self._commit_sealed(sealed)
             self.store.delete_upload(upload.blob_id)
+            if upload.profile:
+                return sealed.outgoing
             self.store.add_file(
                 upload.contact,
                 incoming=False,
@@ -517,14 +530,38 @@ class Client:
             self.store.add_blob_deletion(file.contact, attachment.blob_id)
         return path
 
+    def finish_avatar_download(self, position: int) -> None:
+        """Step 4 of section 33.3 for an avatar (section 36.3): opens the blob, keeps the
+        image with the profile of its contact and saves the DeleteBlob of the blob.
+
+        Raises:
+            BadBlobError: The blob does not open (section 29.7); nothing is kept.
+            NotAnImageError: The image does not start with the signature of its media type.
+        """
+        file = self._file(position)
+        attachment = file.attachment
+        image = open_blob(
+            self.store.downloaded(position),
+            file_key=attachment.key,
+            size=attachment.size,
+            digest=attachment.digest,
+        )
+        if avatar_media_type(image) != attachment.media_type:
+            raise NotAnImageError("the avatar is not an image of its media type")
+        with self.store.transaction():
+            self.store.set_avatar(position, image)
+            self.store.set_file_state(position, FileState.RECEIVED)
+            self.store.add_blob_deletion(file.contact, attachment.blob_id)
+
     def fail_download(self, position: int, result: str) -> FileState:
-        """Steps 5 and 6 of section 33.3: drops the downloaded bytes, and a BAD_BLOB also
-        saves the DeleteBlob of the blob; returns the state that the file takes."""
+        """Steps 5 and 6 of section 33.3: drops the downloaded bytes, and a BAD_BLOB or a
+        NOT_AN_IMAGE also saves the DeleteBlob of the blob; returns the state that the
+        file takes."""
         file = self._file(position)
         state = FileState.NOT_AVAILABLE if result == BLOB_GONE else FileState.NOT_RECEIVED
         with self.store.transaction():
             self.store.set_file_state(position, state)
-            if result == BadBlobError.result:
+            if result in DELETED_ON_FAILURE:
                 self.store.add_blob_deletion(file.contact, file.attachment.blob_id)
         return state
 
@@ -536,6 +573,63 @@ class Client:
         """Forgets a DeleteBlob that the relay handled (section 33.2, last paragraph)."""
         with self.store.transaction():
             self.store.delete_blob_deletion(uploader, blob_id)
+
+    def own_profile(self) -> OwnProfile:
+        return self.store.own_profile()
+
+    def set_profile(self, name: str, avatar: bytes | None) -> None:
+        """Saves the own profile and owes it to every contact with a session (section
+        36.2); an empty name and no avatar clear it. A newer profile gives up the avatar
+        upload of an older one.
+
+        Raises:
+            BadProfileNameError: The name breaks section 35.2.
+            AvatarTooLargeError: The avatar is longer than MAX_AVATAR_BYTES.
+            NotAnImageError: The avatar is neither a JPEG nor a PNG image.
+        """
+        if not is_profile_name(name):
+            raise BadProfileNameError("the name is too long or holds a control character")
+        media_type = ""
+        if avatar is not None:
+            if len(avatar) > MAX_AVATAR_BYTES:
+                raise AvatarTooLargeError(f"the avatar is above {MAX_AVATAR_BYTES} bytes")
+            media_type = avatar_media_type(avatar)
+
+        with self.store.transaction():
+            self.store.set_own_profile(name, avatar, media_type)
+            for contact, _name in self.store.contacts():
+                blob_id = self.store.profile_upload(contact)
+                if blob_id is not None:
+                    self.store.delete_upload(blob_id)
+                    self.store.add_blob_deletion(self.identity_key, blob_id)
+                if self.has_session(contact):
+                    self.store.owe_profile(contact)
+
+    def owe_profile(self, contact: bytes) -> None:
+        with self.store.transaction():
+            self.store.owe_profile(contact)
+
+    def send_owed_profiles(self, *, blob_max_bytes: int) -> list[Outgoing]:
+        """Turns the profile sends owed to contacts into messages (section 36.2).
+
+        A profile without an avatar, or one whose avatar the relay does not take, is sealed
+        and committed at once and returned as a Send. One with an avatar becomes an upload
+        of `uploads`, whose message `send_attachment` sends once its blob is complete.
+        """
+        own = self.store.own_profile()
+        outgoing = []
+        for contact in self.store.owed_profiles():
+            if not self.has_session(contact):
+                continue
+            if own.avatar is not None and blob_length(len(own.avatar)) <= blob_max_bytes:
+                self._start_profile_upload(contact, own.avatar, own.media_type)
+                continue
+            sealed = self._seal(contact, encode_profile(own.name, None), None)
+            with self.store.transaction():
+                self._commit_sealed(sealed)
+                self.store.delete_profile_send(contact)
+            outgoing.append(sealed.outgoing)
+        return outgoing
 
     def outbox(self) -> list[Outgoing]:
         """The Sends that the relay has not confirmed, to be sent again as they are."""
@@ -653,7 +747,7 @@ class Client:
             signed_prekey_private_key=signed_prekey_private_key,
         )
         decrypted = self._decrypt_state(state, agreement.associated_data, delivered, envelope)
-        text, attachment, result = _read_content(decrypted.padded_plaintext)
+        content, result = _read_content(decrypted.padded_plaintext)
 
         with self.store.transaction():
             session_id = self.store.add_session(
@@ -673,47 +767,97 @@ class Client:
                 self.store.delete_one_time_prekey(one_time_prekey_id)
             if pin is None:
                 self.store.set_pin(delivered.sender, initial_header.identity_dh_key)
-            self._save_received(delivered, text, attachment)
-        return Received(
-            ack=True,
-            text=text,
-            result=result,
-            missing=decrypted.purged + dropped,
-            attachment=attachment,
-        )
+            self._owe_profile_to_a_new_session(delivered.sender)
+            self._save_received(delivered, content)
+        return _received(content, result, missing=decrypted.purged + dropped)
 
     def _accept(
         self, delivered: Delivered, session: StoredSession, decrypted: ratchet.Decrypted
     ) -> Received:
         """ACCEPT of section 20.3."""
-        text, attachment, result = _read_content(decrypted.padded_plaintext)
+        content, result = _read_content(decrypted.padded_plaintext)
         with self.store.transaction():
             self.store.accept_on_session(session.session_id, decrypted.state)
-            self._save_received(delivered, text, attachment)
-        return Received(
-            ack=True,
-            text=text,
-            result=result,
-            missing=decrypted.purged,
-            attachment=attachment,
-        )
+            self._save_received(delivered, content)
+        return _received(content, result, missing=decrypted.purged)
 
-    def _save_received(
-        self, delivered: Delivered, text: str | None, attachment: Attachment | None
-    ) -> None:
+    def _save_received(self, delivered: Delivered, content: Body | None) -> None:
         self.store.add_seen_id(delivered.sender, delivered.message_id, seen_at=self.now())
-        if text is not None:
-            self.store.log_message(
-                delivered.sender, direction="in", message_id=delivered.message_id, text=text
-            )
-        if attachment is not None:
-            self.store.add_file(
-                delivered.sender,
+        match content:
+            case str():
+                self.store.log_message(
+                    delivered.sender,
+                    direction="in",
+                    message_id=delivered.message_id,
+                    text=content,
+                )
+            case Attachment():
+                self.store.add_file(
+                    delivered.sender,
+                    incoming=True,
+                    message_id=delivered.message_id,
+                    attachment=content,
+                    state=FileState.OFFERED,
+                )
+            case Profile():
+                self._save_profile(delivered, content)
+
+    def _save_profile(self, delivered: Delivered, profile: Profile) -> None:
+        """Section 36.3: the profile replaces the earlier one of its sender whole; an
+        earlier avatar that was not downloaded gets its blob deleted."""
+        contact = delivered.sender
+        earlier = self.store.profile(contact)
+        if earlier is not None and earlier.avatar_file is not None:
+            earlier_file = self._file(earlier.avatar_file)
+            if earlier_file.state in (FileState.OFFERED, FileState.RECEIVING):
+                self.store.add_blob_deletion(contact, earlier_file.attachment.blob_id)
+            self.store.delete_file(earlier.avatar_file)
+
+        has_an_avatar = profile.HasField("avatar")
+        is_the_empty_profile = not profile.name and not has_an_avatar
+        if is_the_empty_profile:
+            self.store.delete_profile(contact)
+            return
+        avatar_file = None
+        if has_an_avatar:
+            avatar_file = self.store.add_file(
+                contact,
                 incoming=True,
                 message_id=delivered.message_id,
-                attachment=attachment,
+                attachment=profile.avatar,
                 state=FileState.OFFERED,
             )
+        self.store.set_profile(contact, profile.name, avatar_file=avatar_file)
+
+    def _owe_profile_to_a_new_session(self, contact: bytes) -> None:
+        """Section 36.2: a session that enters the list gets the own profile once, unless
+        the profile is empty."""
+        if not self.store.own_profile().is_empty:
+            self.store.owe_profile(contact)
+
+    def _start_profile_upload(self, contact: bytes, avatar: bytes, media_type: str) -> None:
+        attachment, blob = self._encrypt_file(avatar, media_type=media_type)
+        with self.store.transaction():
+            self.store.add_upload(
+                attachment.blob_id, contact=contact, attachment=attachment, blob=blob
+            )
+            self.store.start_profile_upload(contact, attachment.blob_id)
+
+    def _encrypt_file(self, file: bytes, *, media_type: str) -> tuple[Attachment, bytes]:
+        """Step 2 of section 33.2: a new blob id, file key and nonce, and the blob."""
+        blob_id = self.random_bytes(BLOB_ID_LENGTH)
+        file_key = self.random_bytes(FILE_KEY_LENGTH)
+        blob = encrypt_blob(
+            file, file_key=file_key, nonce=self.random_bytes(BLOB_NONCE_LENGTH)
+        )
+        attachment = Attachment(
+            blob_id=blob_id,
+            key=file_key,
+            size=len(file),
+            digest=digest_of(blob),
+            media_type=media_type,
+        )
+        return attachment, blob
 
     def _seal(self, contact: bytes, padded_plaintext: bytes, bundle: Bundle | None) -> _Sealed:
         """L1 of section 20.2 up to the commit: START when the contact has no session.
@@ -859,15 +1003,20 @@ def _check_initial_header(
         raise IdentityKeyMismatchError("the initial header carries another X25519 key")
 
 
-def _read_content(
-    padded_plaintext: bytes,
-) -> tuple[str | None, Attachment | None, str | None]:
-    """The text or the attachment of a message that decrypted, or the result that it has
-    neither (20.3)."""
+def _read_content(padded_plaintext: bytes) -> tuple[Body | None, str | None]:
+    """The content of a message that decrypted, or the result that it has none (20.3)."""
     try:
-        content = decode_content(padded_plaintext)
+        return decode_content(padded_plaintext), None
     except (BadPaddingError, BadContentError, UnknownContentError) as error:
-        return None, None, error.result
-    if isinstance(content, str):
-        return content, None, None
-    return None, content, None
+        return None, error.result
+
+
+def _received(content: Body | None, result: str | None, *, missing: int) -> Received:
+    return Received(
+        ack=True,
+        text=content if isinstance(content, str) else None,
+        result=result,
+        missing=missing,
+        attachment=content if isinstance(content, Attachment) else None,
+        profile=content if isinstance(content, Profile) else None,
+    )

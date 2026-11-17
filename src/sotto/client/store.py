@@ -132,6 +132,31 @@ TABLES = (
         PRIMARY KEY (uploader, blob_id)
     ) STRICT, WITHOUT ROWID
     """,
+    """
+    CREATE TABLE IF NOT EXISTS own_profile (
+        only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+        name TEXT NOT NULL,
+        avatar BLOB,
+        media_type TEXT NOT NULL
+    ) STRICT
+    """,
+    # The latest profile of each contact; `avatar_file` is the row of `files` that
+    # carries its avatar, which is no attachment of the message log.
+    """
+    CREATE TABLE IF NOT EXISTS profiles (
+        contact BLOB PRIMARY KEY,
+        name TEXT NOT NULL,
+        avatar_file INTEGER UNIQUE,
+        avatar BLOB
+    ) STRICT, WITHOUT ROWID
+    """,
+    # The contacts owed the own profile; `blob_id` names the upload of its avatar.
+    """
+    CREATE TABLE IF NOT EXISTS profile_sends (
+        contact BLOB PRIMARY KEY,
+        blob_id BLOB UNIQUE
+    ) STRICT, WITHOUT ROWID
+    """,
 )
 
 ADD_SESSION = """
@@ -196,16 +221,34 @@ DELETE_LOWEST_ONE_TIME_PREKEYS = """
 """
 
 READ_FILES = """
-    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as,
+        position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL)
     FROM files ORDER BY position
 """
 READ_FILE = """
-    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as,
+        position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL)
     FROM files WHERE position = ?
 """
 READ_FILE_OF_MESSAGE = """
-    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as,
+        position IN (SELECT avatar_file FROM profiles WHERE avatar_file IS NOT NULL)
     FROM files WHERE direction = 'out' AND message_id = ?
+"""
+READ_UPLOADS = """
+    SELECT blob_id, contact, attachment, length(blob),
+        blob_id IN (SELECT blob_id FROM profile_sends WHERE blob_id IS NOT NULL)
+    FROM uploads ORDER BY position
+"""
+SET_OWN_PROFILE = """
+    INSERT INTO own_profile VALUES (1, ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+        name = excluded.name, avatar = excluded.avatar, media_type = excluded.media_type
+"""
+SET_PROFILE = """
+    INSERT INTO profiles VALUES (?, ?, ?, NULL)
+    ON CONFLICT DO UPDATE SET
+        name = excluded.name, avatar_file = excluded.avatar_file, avatar = NULL
 """
 
 
@@ -255,6 +298,7 @@ class UploadRow:
     contact: bytes
     attachment: Attachment
     length: int
+    profile: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -269,6 +313,27 @@ class FileRow:
     state: str
     held: int
     saved_as: str | None
+    avatar: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OwnProfile:
+    name: str = ""
+    avatar: bytes | None = field(default=None, repr=False)
+    media_type: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.name and self.avatar is None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContactProfile:
+    """The latest profile of a contact; `avatar` is None until the avatar is received."""
+
+    name: str
+    avatar_file: int | None
+    avatar: bytes | None = field(repr=False)
 
 
 class Store:
@@ -458,7 +523,13 @@ class Store:
         )
 
     def remove_contact(self, contact: bytes) -> None:
-        """Deletes the contact and its sessions; its seen ids and records stay (20.6)."""
+        """Deletes the contact with its sessions and its profile; its seen ids and records
+        stay (20.6)."""
+        profile = self.profile(contact)
+        if profile is not None and profile.avatar_file is not None:
+            self.delete_file(profile.avatar_file)
+        self._change("DELETE FROM profiles WHERE contact = ?", (contact,))
+        self._change("DELETE FROM profile_sends WHERE contact = ?", (contact,))
         self._change("DELETE FROM sessions WHERE contact = ?", (contact,))
         self._change("DELETE FROM contacts WHERE identity_key = ?", (contact,))
         self._change(DELETE_ORPHAN_RECORDS, ())
@@ -537,17 +608,16 @@ class Store:
         )
 
     def uploads(self) -> list[UploadRow]:
-        rows = self.connection.execute(
-            "SELECT blob_id, contact, attachment, length(blob) FROM uploads ORDER BY position"
-        ).fetchall()
+        rows = self.connection.execute(READ_UPLOADS).fetchall()
         return [
             UploadRow(
                 blob_id=blob_id,
                 contact=contact,
                 attachment=Attachment.FromString(attachment),
                 length=length,
+                profile=profile == 1,
             )
-            for blob_id, contact, attachment, length in rows
+            for blob_id, contact, attachment, length, profile in rows
         ]
 
     def read_upload(self, blob_id: bytes, offset: int, length: int) -> bytes:
@@ -568,7 +638,9 @@ class Store:
         )
 
     def delete_upload(self, blob_id: bytes) -> None:
+        """Deletes an upload, and the profile send that it carries, if it carries one."""
         self._change("DELETE FROM uploads WHERE blob_id = ?", (blob_id,))
+        self._change("DELETE FROM profile_sends WHERE blob_id = ?", (blob_id,))
 
     def files(self) -> list[FileRow]:
         return [_file(row) for row in self.connection.execute(READ_FILES).fetchall()]
@@ -590,10 +662,11 @@ class Store:
         message_id: bytes,
         attachment: Attachment,
         state: str,
-    ) -> None:
-        self._change(
+    ) -> int:
+        """Adds a file and returns its position."""
+        added = self._change(
             "INSERT INTO files (contact, direction, message_id, attachment, state) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?) RETURNING position",
             (
                 contact,
                 "in" if incoming else "out",
@@ -602,6 +675,12 @@ class Store:
                 state,
             ),
         )
+        position: int = added.fetchone()[0]
+        return position
+
+    def delete_file(self, position: int) -> None:
+        self._change("DELETE FROM files WHERE position = ?", (position,))
+        self._change("DELETE FROM downloads WHERE position = ?", (position,))
 
     def set_file_state(
         self, position: int, state: str, *, saved_as: str | None = None
@@ -660,6 +739,66 @@ class Store:
             (uploader, blob_id),
         )
 
+    def own_profile(self) -> OwnProfile:
+        """The own profile; the empty one when none was ever set."""
+        row = self.connection.execute(
+            "SELECT name, avatar, media_type FROM own_profile"
+        ).fetchone()
+        if row is None:
+            return OwnProfile()
+        return OwnProfile(name=row[0], avatar=row[1], media_type=row[2])
+
+    def set_own_profile(self, name: str, avatar: bytes | None, media_type: str) -> None:
+        self._change(SET_OWN_PROFILE, (name, avatar, media_type))
+
+    def owe_profile(self, contact: bytes) -> None:
+        """Marks the own profile as owed to a contact; a send already owed stays as it is."""
+        self._change(
+            "INSERT INTO profile_sends (contact) VALUES (?) ON CONFLICT DO NOTHING", (contact,)
+        )
+
+    def profile_upload(self, contact: bytes) -> bytes | None:
+        """The blob id of the avatar upload of the profile owed to a contact, if any."""
+        row = self.connection.execute(
+            "SELECT blob_id FROM profile_sends WHERE contact = ?", (contact,)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def owed_profiles(self) -> list[bytes]:
+        """The contacts owed the own profile whose avatar upload has not started."""
+        rows = self.connection.execute(
+            "SELECT contact FROM profile_sends WHERE blob_id IS NULL ORDER BY contact"
+        ).fetchall()
+        return [contact for (contact,) in rows]
+
+    def start_profile_upload(self, contact: bytes, blob_id: bytes) -> None:
+        self._change(
+            "UPDATE profile_sends SET blob_id = ? WHERE contact = ?", (blob_id, contact)
+        )
+
+    def delete_profile_send(self, contact: bytes) -> None:
+        self._change("DELETE FROM profile_sends WHERE contact = ?", (contact,))
+
+    def profile(self, contact: bytes) -> ContactProfile | None:
+        row = self.connection.execute(
+            "SELECT name, avatar_file, avatar FROM profiles WHERE contact = ?", (contact,)
+        ).fetchone()
+        if row is None:
+            return None
+        return ContactProfile(name=row[0], avatar_file=row[1], avatar=row[2])
+
+    def set_profile(self, contact: bytes, name: str, *, avatar_file: int | None) -> None:
+        """Saves the latest profile of a contact; its avatar is not received yet."""
+        self._change(SET_PROFILE, (contact, name, avatar_file))
+
+    def delete_profile(self, contact: bytes) -> None:
+        self._change("DELETE FROM profiles WHERE contact = ?", (contact,))
+
+    def set_avatar(self, avatar_file: int, avatar: bytes) -> None:
+        self._change(
+            "UPDATE profiles SET avatar = ? WHERE avatar_file = ?", (avatar, avatar_file)
+        )
+
     def _change(self, statement: str, parameters: tuple[Any, ...]) -> sqlite3.Cursor:
         if not self.connection.in_transaction:
             raise RuntimeError("a write of the store runs outside a transaction")
@@ -705,7 +844,7 @@ def _session(row: tuple[Any, ...]) -> StoredSession:
 
 
 def _file(row: tuple[Any, ...]) -> FileRow:
-    position, contact, direction, message_id, attachment, state, held, saved_as = row
+    position, contact, direction, message_id, attachment, state, held, saved_as, avatar = row
     return FileRow(
         position=position,
         contact=contact,
@@ -715,6 +854,7 @@ def _file(row: tuple[Any, ...]) -> FileRow:
         state=state,
         held=held,
         saved_as=saved_as,
+        avatar=avatar == 1,
     )
 
 

@@ -13,9 +13,20 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from google.protobuf.message import Message as ProtoMessage
 
+from sotto.client.envelope import (
+    MAX_AVATAR_BYTES,
+    MAX_PROFILE_NAME_BYTES,
+    MAX_THUMBNAIL_BYTES,
+    avatar_media_type,
+    encode_profile,
+    pad,
+    unpad,
+)
 from sotto.crypto.blob import (
     BLOB_NONCE_LENGTH,
     MAX_FILE_BYTES,
@@ -56,6 +67,7 @@ from sotto.crypto.ratchet import (
     kdf_rk,
 )
 from sotto.crypto.x3dh import KeyAgreement, dh, initiate, respond
+from sotto.proto.sotto_pb2 import Attachment, Content, Profile
 
 type Fields = dict[str, str | int]
 type Vector = dict[str, str | Fields]
@@ -64,6 +76,8 @@ type RatchetFields = dict[str, str | int | list[Entry]]
 type RatchetVector = dict[str, str | RatchetFields]
 type BlobFields = dict[str, str | int | list[str]]
 type BlobVector = dict[str, str | BlobFields]
+type ProfileFields = dict[str, str | int | dict[str, str | int]]
+type ProfileVector = dict[str, str | ProfileFields]
 
 VECTORS = Path(__file__).parent.parent / "vectors"
 SCHEMA = 1
@@ -1285,11 +1299,195 @@ def blob_vectors() -> list[BlobVector]:
     return blob_length_vectors() + blob_cipher_vectors()
 
 
+AVATAR_BLOB_ID = bytes(range(0x10, 0x20))
+AVATAR_KEY = bytes(range(0x20, 0x30))
+AVATAR_DIGEST = bytes(range(0x40, 0x60))
+LARGEST_UINT32 = 2**32 - 1
+FAKE_THUMBNAIL = bytes.fromhex("ffd8ffe000104a464946") + bytes(range(54))
+JPEG_START = bytes.fromhex("ffd8ffe000104a46494600010100")
+PNG_START = bytes.fromhex("89504e470d0a1a0a0000000d49484452")
+GIF_START = b"GIF89a" + bytes(8)
+UNKNOWN_PROFILE_FIELD = bytes.fromhex("7a03") + b"new"
+
+
+def avatar(**fields: Any) -> Attachment:
+    """An avatar of section 35.2 with fixed keys; `fields` override or add."""
+    defaults: dict[str, Any] = {
+        "blob_id": AVATAR_BLOB_ID,
+        "key": AVATAR_KEY,
+        "size": 51234,
+        "digest": AVATAR_DIGEST,
+        "media_type": "image/jpeg",
+    }
+    return Attachment(**(defaults | fields))
+
+
+def set_fields(message: ProtoMessage) -> dict[str, str | int]:
+    """The fields of a message that are set: bytes as hex, numbers and strings as they are."""
+    fields: dict[str, str | int] = {}
+    for descriptor, value in message.ListFields():
+        fields[descriptor.name] = value.hex() if isinstance(value, bytes) else value
+    return fields
+
+
+def profile_content(name: str, avatar_of_it: Attachment | None) -> bytes:
+    profile = Profile(name=name)
+    if avatar_of_it is not None:
+        profile.avatar.CopyFrom(avatar_of_it)
+    return Content(profile=profile).SerializeToString()
+
+
+def profile_cases() -> dict[str, tuple[str, Attachment | None]]:
+    largest = avatar(
+        size=MAX_AVATAR_BYTES,
+        width=LARGEST_UINT32,
+        height=LARGEST_UINT32,
+        thumbnail=bytes(MAX_THUMBNAIL_BYTES),
+    )
+    return {
+        "name-alone": ("Alice", None),
+        "name-and-jpeg-avatar": (
+            "\u0410\u043b\u0438\u0441\u0430 \U0001f338",
+            avatar(width=512, height=512, thumbnail=FAKE_THUMBNAIL),
+        ),
+        "png-avatar-without-a-name": ("", avatar(media_type="image/png", size=2048)),
+        "empty": ("", None),
+        "longest-name": ("\u00e9" * (MAX_PROFILE_NAME_BYTES // 2), None),
+        "longest": ("\u00e9" * (MAX_PROFILE_NAME_BYTES // 2), largest),
+    }
+
+
+def profile_inputs(name: str, avatar_of_it: Attachment | None) -> ProfileFields:
+    inputs: ProfileFields = {"name": name}
+    if avatar_of_it is not None:
+        inputs["avatar"] = set_fields(avatar_of_it)
+    return inputs
+
+
+def profile_encode_vectors() -> list[ProfileVector]:
+    vectors: list[ProfileVector] = []
+    for case, (name, avatar_of_it) in profile_cases().items():
+        plaintext = encode_profile(name, avatar_of_it)
+        vectors.append(
+            {
+                "name": f"profile-encode-{case}",
+                "operation": "profile-encode",
+                "inputs": profile_inputs(name, avatar_of_it),
+                "intermediates": {"content": unpad(plaintext).hex()},
+                "outputs": {"plaintext": plaintext.hex()},
+            }
+        )
+    refused = {
+        "name-too-long": ("x" * (MAX_PROFILE_NAME_BYTES + 1), None, "BAD_PROFILE_NAME"),
+        "name-with-a-bidi-control": ("Alice\u202e", None, "BAD_PROFILE_NAME"),
+        "avatar-too-large": ("Alice", avatar(size=MAX_AVATAR_BYTES + 1), "AVATAR_TOO_LARGE"),
+        "gif-avatar": ("Alice", avatar(media_type="image/gif"), "NOT_AN_IMAGE"),
+    }
+    for case, (name, avatar_of_it, error) in refused.items():
+        vectors.append(
+            {
+                "name": f"profile-encode-{case}",
+                "operation": "profile-encode",
+                "inputs": profile_inputs(name, avatar_of_it),
+                "intermediates": {},
+                "error": error,
+            }
+        )
+    return vectors
+
+
+def decoded_outputs(profile: Profile) -> ProfileFields:
+    outputs: ProfileFields = {"name": profile.name}
+    if profile.HasField("avatar"):
+        outputs["avatar"] = set_fields(profile.avatar)
+    return outputs
+
+
+def profile_decode_vectors() -> list[ProfileVector]:
+    vectors: list[ProfileVector] = []
+    known = Profile(name="Alice").SerializeToString() + UNKNOWN_PROFILE_FIELD
+    with_unknown = b"\x1a" + bytes([len(known)]) + known
+    accepted = {
+        case: profile_content(name, avatar_of_it)
+        for case, (name, avatar_of_it) in profile_cases().items()
+    } | {"unknown-field": with_unknown}
+    for case, content in accepted.items():
+        vectors.append(
+            {
+                "name": f"profile-decode-{case}",
+                "operation": "profile-decode",
+                "inputs": {"plaintext": pad(content).hex()},
+                "intermediates": {"content": content.hex()},
+                "outputs": decoded_outputs(Content.FromString(content).profile),
+            }
+        )
+
+    not_utf_8 = bytes.fromhex("1a03" + "0a01ff")
+    refused = {
+        "name-too-long": profile_content("x" * (MAX_PROFILE_NAME_BYTES + 1), None),
+        "name-not-utf-8": not_utf_8,
+        **{
+            f"name-with-u{code:04x}": profile_content(f"Al{chr(code)}ice", None)
+            for code in (0x0000, 0x007F, 0x0085, 0x202E, 0x2028)
+        },
+        "avatar-blob-id-of-15-bytes": profile_content("", avatar(blob_id=bytes(15))),
+        "avatar-key-of-17-bytes": profile_content("", avatar(key=bytes(17))),
+        "avatar-digest-of-31-bytes": profile_content("", avatar(digest=bytes(31))),
+        "avatar-too-large": profile_content("", avatar(size=MAX_AVATAR_BYTES + 1)),
+        "avatar-gif": profile_content("", avatar(media_type="image/gif")),
+        "avatar-media-type-in-capitals": profile_content("", avatar(media_type="IMAGE/JPEG")),
+        "avatar-media-type-with-a-parameter": profile_content(
+            "", avatar(media_type="image/jpeg; q=1")
+        ),
+        "avatar-without-a-media-type": profile_content("", avatar(media_type="")),
+    }
+    for case, content in refused.items():
+        vectors.append(
+            {
+                "name": f"profile-decode-{case}",
+                "operation": "profile-decode",
+                "inputs": {"plaintext": pad(content).hex()},
+                "intermediates": {},
+                "error": "BAD_CONTENT",
+            }
+        )
+    return vectors
+
+
+def avatar_media_type_vectors() -> list[ProfileVector]:
+    images = {
+        "jpeg": JPEG_START,
+        "png": PNG_START,
+        "gif": GIF_START,
+        "empty": b"",
+        "two-bytes-of-a-jpeg": JPEG_START[:2],
+    }
+    vectors: list[ProfileVector] = []
+    for case, image in images.items():
+        vector: ProfileVector = {
+            "name": f"avatar-media-type-{case}",
+            "operation": "avatar-media-type",
+            "inputs": {"image": image.hex()},
+            "intermediates": {},
+        }
+        try:
+            vector["outputs"] = {"media_type": avatar_media_type(image)}
+        except CryptoError as error:
+            vector["error"] = error.result
+        vectors.append(vector)
+    return vectors
+
+
+def profile_vectors() -> list[ProfileVector]:
+    return profile_encode_vectors() + profile_decode_vectors() + avatar_media_type_vectors()
+
+
 FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "identity.json": identity_vectors,
     "x3dh.json": x3dh_vectors,
     "ratchet.json": ratchet_vectors,
     "blob.json": blob_vectors,
+    "profile.json": profile_vectors,
 }
 
 
