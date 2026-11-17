@@ -66,7 +66,7 @@ def test_content_that_does_not_parse_or_is_not_utf8_is_bad_content() -> None:
 
 
 def test_content_without_a_known_member_is_unknown_content() -> None:
-    unknown_member = b"\x12\x01x"
+    unknown_member = b"\x1a\x01x"
     for content in (Content().SerializeToString(), unknown_member):
         with pytest.raises(UnknownContentError):
             decode_text(pad(content))

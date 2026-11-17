@@ -2,7 +2,8 @@
 
 Part 1, sections 1 to 15: identity, the prekey bundle and the relay protocol. Part 2,
 sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 27 close
-both parts, and Appendix A follows section 27.
+both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Appendix A
+follows section 34.
 
 ## 1. Status and scope
 
@@ -28,12 +29,15 @@ Part 2 specifies what two clients do with each other through the relay: the key 
 the ratchet, the encryption of a message and the rules around them. Section 1.4 lists its
 sections.
 
+Part 3 specifies files: the blob cipher, the frames that move a blob through the relay,
+the attachment of a message and the rules of a client around them (section 28).
+
 ### 1.2 Status
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee in this document carries a citation (section 2.6), which names the
-  test that holds it.
+- Every guarantee of parts 1 and 2 carries a citation (section 2.6), which names the test
+  that holds it. Part 3 is written before its code and carries none (section 28.3).
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
 
@@ -41,8 +45,8 @@ sections.
 
 | Version                     | Value | Covers                                                    |
 |-----------------------------|-------|-----------------------------------------------------------|
-| Relay protocol version      | 1     | Sections 6 to 13 and the login string of section 4.2      |
-| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, and sections 16 to 25 |
+| Relay protocol version      | 1     | Sections 6 to 13, the login string of section 4.2, and sections 30 and 31 |
+| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, and sections 29, 32 and 33 |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
 what a client does with a relay protocol version it does not know.
@@ -533,7 +537,8 @@ Error come first. Until every frame is in the file, the file is a part of the li
 below: an envelope lacks the members whose frames the file does not have, and every other
 message and enum of the file is as listed
 [test: tests/test_docs.py::test_schema_file_is_a_part_of_the_listing_in_the_spec]. The messages of the end-to-end protocol are in the same file and are
-listed in section 19.1.
+listed in section 19.1. The listing holds the blob frames of part 3 as well, which
+section 30 specifies.
 
 ```proto
 syntax = "proto3";
@@ -548,6 +553,10 @@ message ClientFrame {
     FetchBundle fetch_bundle = 3;
     Send send = 4;
     Ack ack = 5;
+    StartBlob start_blob = 6;
+    PutBlob put_blob = 7;
+    FetchBlob fetch_blob = 8;
+    DeleteBlob delete_blob = 9;
   }
 }
 
@@ -561,6 +570,8 @@ message ServerFrame {
     Stored stored = 5;
     Deliver deliver = 6;
     Error error = 7;
+    BlobStored blob_stored = 8;
+    BlobData blob_data = 9;
   }
 }
 
@@ -577,6 +588,7 @@ message Login {
 
 message LoggedIn {
   uint32 one_time_prekey_count = 1;
+  uint32 blob_max_bytes = 2;
 }
 
 message SignedPrekey {
@@ -647,12 +659,52 @@ enum ErrorCode {
   NOT_FOUND = 5;
   BAD_BUNDLE = 6;
   IDENTITY_KEY_MISMATCH = 7;
+  QUOTA_FULL = 8;
+  BLOB_TOO_LARGE = 9;
 }
 
 message Error {
   ErrorCode code = 1;
   bytes message_id = 2;
   bytes identity = 3;
+  bytes blob_id = 4;
+}
+
+// The blob frames of part 3 (section 30).
+message StartBlob {
+  bytes blob_id = 1;
+  bytes recipient = 2;
+  uint32 length = 3;
+}
+
+message PutBlob {
+  bytes blob_id = 1;
+  uint32 offset = 2;
+  bytes data = 3;
+}
+
+message BlobStored {
+  bytes blob_id = 1;
+  uint32 stored_length = 2;
+}
+
+message FetchBlob {
+  bytes blob_id = 1;
+  bytes uploader = 2;
+  uint32 offset = 3;
+  uint32 length = 4;
+}
+
+message BlobData {
+  bytes blob_id = 1;
+  bytes uploader = 2;
+  uint32 offset = 3;
+  bytes data = 4;
+}
+
+message DeleteBlob {
+  bytes blob_id = 1;
+  bytes uploader = 2;
 }
 ```
 
@@ -716,6 +768,8 @@ is signed, hashed or compared.
 | Ack          | client  | After the Login of the connection                      | none                           |
 | Deliver      | relay   | After LoggedIn, at any time                            | an Ack, when the client saved the message |
 | BundleStored, Bundle, Stored, Error | relay | As answers only                       | none                           |
+| StartBlob, PutBlob, FetchBlob, DeleteBlob | client | After the Login of the connection, to a relay that announced them (section 30.1) | Section 30.1 |
+| BlobStored, BlobData | relay | As answers only                                     | none                           |
 
 Rules of state for the relay:
 
@@ -791,6 +845,7 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
 | Field                   | No. | Type   | Length or value                                         |
 |-------------------------|-----|--------|---------------------------------------------------------|
 | `one_time_prekey_count` | 1   | uint32 | The number of one-time prekeys the relay holds for the identity, 0 for an identity that is not registered |
+| `blob_max_bytes`        | 2   | uint32 | BLOB_MAX_BYTES of a relay that serves the blob frames of part 3, 0 for a relay that does not (section 28.2) |
 
 - Sent by the relay once, when it accepted the Login
   [test: tests/test_login.py::test_login_is_accepted]
@@ -938,13 +993,14 @@ so that every stored payload fits into a Deliver.
 |--------------|-----|-----------|--------------------------------------------------------------|
 | `code`       | 1   | ErrorCode | One of the codes of section 11.2                             |
 | `message_id` | 2   | bytes     | 16 when the refused frame is a Send, its `message_id`; otherwise empty |
-| `identity`   | 3   | bytes     | 32 when the refused frame is a FetchBundle, its `identity`; otherwise empty |
+| `identity`   | 3   | bytes     | 32 when the refused frame is a FetchBundle, its `identity`, or a FetchBlob, its `uploader`; otherwise empty |
+| `blob_id`    | 4   | bytes     | 16 when the refused frame is a StartBlob, a PutBlob or a FetchBlob, its `blob_id`; otherwise empty (section 30.8) |
 
 - Sent by the relay as the answer to a Send, an UploadBundle or a FetchBundle that it
   refuses. The connection stays open
   [test: tests/test_bundles.py::test_refused_frames_get_an_error_with_their_key_and_the_connection_goes_on].
 - The key fields tell the client which frame was refused: `message_id` set means a Send,
-  `identity` set means a FetchBundle, neither set means an UploadBundle
+  `identity` set alone means a FetchBundle, no key field set means an UploadBundle
   [test: tests/test_bundles.py::test_refused_frames_get_an_error_with_their_key_and_the_connection_goes_on]
   [test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]. Answers arrive in the order of their requests
   (section 7.4), which tells two requests with one key apart.
@@ -953,6 +1009,8 @@ so that every stored payload fits into a Deliver.
   `identity` that is neither empty nor 32 bytes and an Error with both set are malformed
   frames. A `code` that the client does not know, 0 included, is not: the client treats
   the request as refused and stops repeating it (section 11.1).
+- The relay answers the blob frames of part 3 with an Error as well. Such an Error has
+  `blob_id` set; section 30.8 says how its key fields are set and read.
 
 ## 8. Login
 
@@ -1388,6 +1446,8 @@ section 7.1.
 - BAD_BUNDLE and IDENTITY_KEY_MISMATCH are also results of the client's own checks of a
   fetched bundle (sections 5.4 and 11.4).
 - A code that a client does not know is handled as Stop for the refused frame.
+- The codes 8 and 9, QUOTA_FULL and BLOB_TOO_LARGE, refuse blob frames only. Section 31.6
+  lists them with the codes of this table that refuse a blob frame.
 
 The relay sends each code under the stated condition and no other
 [test: tests/test_bundles.py::test_refused_upload_gets_the_code_of_its_reason_and_stores_nothing]
@@ -1481,7 +1541,8 @@ of a setting that the relay reads from the environment variable of the same name
 prefix `RELAY_`. A test compares this table with the code, constant by constant
 [test: tests/test_docs.py::test_limits_table_is_the_settings_of_the_relay].
 
-No frame carries a limit, so a client uses the defaults of the four it needs:
+No frame carries a limit of this table, so a client uses the defaults of the four it
+needs:
 MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECONDS.
 
 - MAX_FRAME_BYTES is a constant of relay protocol version 1. A relay that serves clients
@@ -1517,6 +1578,8 @@ again is the same as a new one, and the relay MAY forget it
   before the identity is known. An Ack has no answer that could refuse it, and an Ack that
   is dropped keeps a message on the relay. Acks are therefore not limited: one identity
   can send them without bound, and each makes the relay look up every pair it names.
+- Of the blob frames of part 3, a StartBlob takes a token and the others do not
+  (section 31.2).
 - The handout bucket belongs to a target identity. Handing out one of its one-time prekeys
   takes one token, whoever asks. A fetch that finds no token gets the bundle without a
   one-time prekey and no Error (section 9.3)
@@ -1540,6 +1603,11 @@ protected").
   The ceiling does not bound the write-ahead log (section 13.2). A write that fails
   because the disk is full is the same failure to the relay and gets the same answer; no
   test covers a full disk.
+
+### 12.4 The limits of part 3
+
+The limits of the blob frames are in a table of their own, section 31.7. Blobs count
+toward MAX_PAGES.
 
 ## 13. Erasure on the relay
 
@@ -1594,6 +1662,11 @@ How the relay gets there:
   this repository; whoever runs a relay can keep a copy of every frame (threat model,
   "What the relay can do").
 
+### 13.4 Blobs
+
+The blobs of part 3 are deleted by a DeleteBlob or by expiry, and "deleted" means for
+them what section 13.2 says (section 31.8).
+
 ## 14. Versioning
 
 ### 14.1 The relay protocol version
@@ -1610,8 +1683,11 @@ of Hello, the first frame of every connection.
 - A client states no version. A client that stays on the connection speaks the version of
   the Hello.
 - A change that an implementation of version 1 would refuse or misread is a new version:
-  a new frame, a new meaning of a field, a new layout of the login string. A new field
-  that a receiver of version 1 can ignore is not.
+  a new frame that a client could send to a relay without the frame, a new meaning of a
+  field, a new layout of the login string. A new field that a receiver of version 1 can
+  ignore is not, and neither is a new frame that a client sends only to a relay that
+  announced it in its LoggedIn: the blob frames of part 3 are of this kind
+  (section 28.2).
 
 ### 14.2 The end-to-end protocol version
 
@@ -1660,7 +1736,8 @@ of their objects
 [test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
 The second is `vectors/x3dh.json`, whose operations section 15.6 names, and the third
 `vectors/ratchet.json`, whose operations section 15.7 names. Section 24.3 says what the
-vectors of the key agreement and of the ratchet record.
+vectors of the key agreement and of the ratchet record. Part 3 adds a fourth file,
+`vectors/blob.json`, with its code; section 34 names its operations.
 
 ### 15.2 The schema of a vector file
 
@@ -1680,7 +1757,7 @@ Each vector is a JSON object.
 | `inputs`        | object | always                   | Everything the operation consumes                              |
 | `intermediates` | object | always, MAY be empty     | Every value the operation computes on the way to its result    |
 | `outputs`       | object | positive case only       | The expected result, MAY be empty for a check that passes      |
-| `error`         | string | negative case only       | The expected failure: one name of section 11 or of section 24.2 |
+| `error`         | string | negative case only       | The expected failure: one name of section 11, 24.2 or 33.6     |
 
 Rules:
 
@@ -1693,7 +1770,7 @@ Rules:
 - `intermediates` holds each value an implementation needs to find where it went wrong,
   the signed strings of section 4 among them.
 - `error` is an Error code of section 11.2, the name of a close code of section 11.3 or a
-  local result of section 11.4 or of section 24.2, spelled as there.
+  local result of section 11.4, 24.2 or 33.6, spelled as there.
 - A reader refuses a file whose `schema` it does not know, and reports a vector whose
   `operation` it does not implement instead of skipping it.
 
@@ -2579,7 +2656,22 @@ message InitialHeader {
 message Content {
   oneof body {
     string text = 1;
+    Attachment attachment = 2;
   }
+}
+
+// A file that travels as a blob of the relay (section 32).
+message Attachment {
+  bytes blob_id = 1;
+  bytes key = 2;
+  uint32 size = 3;
+  bytes digest = 4;
+  string media_type = 5;
+  string file_name = 6;
+  uint32 width = 7;
+  uint32 height = 8;
+  bytes thumbnail = 9;
+  string caption = 10;
 }
 ```
 
@@ -2592,9 +2684,9 @@ every message counts from 1 without a gap and every tag is one byte. In addition
   two fields of `UploadBundle`.
 - `one_time_prekey_id` is the one field of this protocol with the proto3 label
   `optional`: 0 is a valid prekey id, so the field needs a presence of its own.
-- `Content` is a oneof with one member. A kind of message that is added later is a new
-  member of the oneof with the next number, and travels as a message of the ratchet like
-  a text.
+- `Content` is a oneof with two members: `text`, and `attachment` of part 3
+  (section 32). A kind of message that is added later is a new member of the oneof with
+  the next number, and travels as a message of the ratchet like a text.
 
 The relay parses none of this (section 7.12).
 
@@ -2653,6 +2745,7 @@ every message that decrypts to version 1 (section 16.5).
 | Field  | No. | Type   | Length or value                                               |
 |--------|-----|--------|---------------------------------------------------------------|
 | `text` | 1   | string | UTF-8, 0 to MAX_TEXT_BYTES bytes when sent (section 19.7)     |
+| `attachment` | 2 | Attachment | A file of part 3, with the checks of section 32.2   |
 
 After a message decrypted and its padding was removed (section 19.6), the client parses
 the bytes as a `Content`
@@ -2662,7 +2755,8 @@ the bytes as a `Content`
 - Bytes that do not parse, a `text` that is not UTF-8 included, give the result
   BAD_CONTENT.
 - A `Content` in which no member that the client knows is set gives the result
-  UNKNOWN_CONTENT. A client of version 1 knows one member, `text`.
+  UNKNOWN_CONTENT. A client that does not implement part 3 knows one member, `text`; one
+  that does knows `attachment` as well.
 - The text is whatever the peer chose to send. The command-line client of this
   repository prints it with the C0, C1 and bidirectional control characters escaped
   [test: tests/client/test_cli.py::test_peer_text_is_printed_with_control_characters_escaped].
@@ -3297,6 +3391,7 @@ their results have names, which a negative test vector states as its `error`
 
 IDENTITY_KEY_MISMATCH is the name of section 11.4 with the same meaning: another X25519
 identity key than the pinned one, in a bundle there and in an initial header here.
+Section 33.6 names the local results of part 3.
 
 ### 24.3 What the test vectors record
 
@@ -3429,6 +3524,29 @@ a bundle show that the identity published those keys, and the relay sees who sen
 whom. The deniability that X3DH describes (X3DH, section 4.4) was not examined for the
 changes of section 25.1.
 
+### 25.6 From the age format
+
+The blob cipher of section 29 is the payload of the age format, version 1, with these
+differences:
+
+| age, version 1                                                           | This protocol                                                              | Reason                                                                     |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------------------------|
+| A header in front of the payload wraps the file key for each recipient, and a MAC covers the header | No header. A blob is the payload alone, and the file key travels in an `Attachment` inside a message of the ratchet (section 32) | The ratchet already carries a key to one recipient and authenticates it with the session. A header would wrap the same key a second time |
+| The payload encrypts the file                                            | It encrypts the file followed by zero bytes up to the padded length of section 29.2 | The relay sees the length of every blob                         |
+| A reader decrypts chunks until it reaches the final one                  | The reader knows the length of the blob from `size` and refuses another length before it opens a chunk. It also checks the SHA-256 of the whole blob and that the padding is zero bytes (section 29.7) | One verdict on the whole blob before any byte of it is shown, however the download was split and resumed |
+
+Kept as written: a file key of 16 bytes from the random number generator, for one file
+only; a nonce of 16 bytes at the start of the payload, new for each file; the payload key
+from HKDF-SHA-256 with the nonce as salt and `payload` as info; chunks of 64 KiB; the
+nonce of a chunk, an 11-byte big-endian counter from 0 and a last byte `01` for the final
+chunk and `00` for the others; a final chunk of 64 KiB or less that is not empty;
+ChaCha20-Poly1305, which the age text names by RFC 7539 and RFC 8439 obsoletes with the
+same algorithm, with no associated data.
+
+The padding is the Padmé function as Nikitin and others define it, applied to the size
+or to 256, whichever is larger: the function is not defined for 0 and 1, and the lower
+bound gives every small file one length.
+
 ## 26. Not part of this protocol
 
 These are left out on purpose. Each is a second protocol, or needs a deployed
@@ -3443,14 +3561,18 @@ environment, or has no user before a later stage of the project.
 - Post-quantum key agreement and a post-quantum ratchet (section 25.4). Nothing is
   reserved for them beyond the two version numbers.
 - Verification of keys by a safety number.
-- Several devices per identity, groups, attachments and calls.
+- Several devices per identity, groups and calls.
 - Any claim of deniability (section 25.5).
 - Encryption of the client store, and key storage in a keychain or in hardware.
 - Moving an identity to another device, and a backup of it.
 - Replacing or revoking an identity key.
 - Delivery receipts, read receipts and requests to send a message again.
 - Expiry of a session by time.
-- Kinds of content other than a text. The oneof of section 19.1 is their place.
+- Kinds of content other than a text and an attachment. The oneof of section 19.1 is
+  their place.
+- Of files: a blob for several recipients, the forwarding of a blob to another
+  recipient, playback of a file before its download ends, previews that the relay makes,
+  and the reuse of a blob for the same file.
 
 ## 27. References
 
@@ -3464,6 +3586,8 @@ environment, or has no user before a later stage of the project.
 - RFC 6455, The WebSocket Protocol.
 - RFC 7748, Elliptic Curves for Security.
 - RFC 8032, Edwards-Curve Digital Signature Algorithm (EdDSA).
+- RFC 6838, Media Type Specifications and Registration Procedures.
+- RFC 7539, ChaCha20 and Poly1305 for IETF Protocols, obsoleted by RFC 8439.
 - RFC 8439, ChaCha20 and Poly1305 for IETF Protocols.
 - Protocol Buffers documentation, "Proto Serialization Is Not Canonical",
   https://protobuf.dev/programming-guides/serialization-not-canonical/
@@ -3479,6 +3603,739 @@ environment, or has no user before a later stage of the project.
   https://signal.org/docs/specifications/pqxdh/
 - IANA, WebSocket Close Code Number Registry,
   https://www.iana.org/assignments/websocket/websocket.xhtml
+- C2SP, "age", the age-encryption.org/v1 file format, section "Payload",
+  https://c2sp.org/age
+- V. T. Hoang, R. Reyhanitabar, P. Rogaway, D. Vizár, "Online Authenticated-Encryption
+  and its Nonce-Reuse Misuse-Resistance", CRYPTO 2015, IACR ePrint 2015/189,
+  https://eprint.iacr.org/2015/189
+- K. Nikitin, L. Barman, W. Lueks, M. Underwood, J.-P. Hubaux, B. Ford, "Reducing
+  Metadata Leakage from Encrypted Files and Communication with PURBs", Proceedings on
+  Privacy Enhancing Technologies 2019(4), https://arxiv.org/abs/1806.03160
+
+## 28. Attachments
+
+### 28.1 What part 3 is
+
+Part 3 specifies how a client sends a file to a contact: a photo, a document, any byte
+string of up to MAX_FILE_BYTES. It adds no key agreement and no key of an identity.
+
+- The sender encrypts the file on its device under a new random key with the blob cipher
+  of section 29. The result is a blob.
+- It uploads the blob to the relay in pieces with the blob frames of section 30, and an
+  upload that stopped goes on from the length that the relay stored. The relay keeps the
+  blob for the one recipient that the upload names (section 31).
+- When the relay holds the whole blob, the sender sends a message of the ratchet whose
+  `Content` is an `Attachment` (section 32): the blob id, the key, the size of the file,
+  the digest of the blob and what the recipient shows before it downloads the file: the
+  media type, the file name, the size of an image, a thumbnail and a caption.
+- The recipient fetches the blob by ranges, and a download that stopped goes on from the
+  bytes it holds. It checks the blob, decrypts it and then deletes the blob at the relay.
+
+The relay stores and passes on the blob and holds no key that opens it: the key travels
+only inside a message of the ratchet (sections 17 and 18). Section 33 states what a client
+does and when a file counts as sent, received or failed, and section 34 the test vectors
+of the blob cipher.
+
+### 28.2 Versions and the announcement
+
+Part 3 changes neither version number of section 1.3.
+
+- The relay protocol. A relay announces that it serves the blob frames with the field
+  `blob_max_bytes` of LoggedIn (section 7.7): the length of the largest blob it accepts,
+  BLOB_MAX_BYTES (section 31.7). A relay that does not serve them leaves the field at 0,
+  and a client that reads 0 sends no blob frame (section 33.1). A client that does not
+  implement part 3 ignores the field (section 7.3) and never receives a blob frame: the
+  relay sends the frames of section 30 only as answers to blob frames. Section 14.1 counts
+  a frame of this kind as no new version.
+- The end-to-end protocol. `attachment` is a new member of the `Content` oneof. A client
+  that does not implement part 3 reports such a message as UNKNOWN_CONTENT (section 19.5)
+  and acks it; the blob stays at the relay until it expires (section 31.5).
+
+### 28.3 Status of part 3
+
+Part 3 is written before its code. Its rules carry no citation (section 1.2), and no test
+of this repository runs a blob frame, the blob cipher or an attachment. The relay of this
+repository does not serve the blob frames and announces 0.
+
+### 28.4 Terms
+
+- A file: the bytes that a user sends, 0 to MAX_FILE_BYTES of them.
+- A blob: a file encrypted by section 29, as the relay stores it.
+- The uploader of a blob: the identity of the connection that sent its StartBlob. The
+  recipient of a blob: the identity that the StartBlob names.
+- The blob id: 16 random bytes that the uploader chooses. Like a message id it is unique
+  per uploader only: a blob is named by the pair (uploader, blob id).
+- The length of a blob: its number of bytes, B. The stored length: how many of its first
+  bytes the relay holds.
+- A complete blob: a blob whose stored length is its length.
+
+## 29. The blob cipher
+
+### 29.1 What it is
+
+The blob cipher is the payload of the age format, version 1, as the section "Payload" of
+the age specification defines it (section 27): the STREAM construction with
+ChaCha20-Poly1305 in chunks of 64 KiB. A blob is an age payload byte for byte and has no
+age header. The file is padded before it is encrypted (section 29.2). Section 25.6 lists
+every difference from the age format with its reason.
+
+An encryption takes the file, a file key of 16 random bytes and a nonce of 16 random
+bytes. A client makes a new file key and a new nonce for every blob. It MUST NOT use a
+file key or a nonce for a second blob, the same file sent again included.
+
+### 29.2 Padding
+
+The padded length P of a file of `size` bytes is the Padmé function of Nikitin and others
+(section 27) applied to the size or to FILE_PADDING_MIN, 256 bytes, whichever is larger:
+
+```
+L = max(size, 256)
+E = floor(log2(L))
+S = floor(log2(E)) + 1
+z = E - S
+m = 2^z - 1
+P = (L + m) AND NOT m
+```
+
+The plaintext M of the cipher is the file followed by P - size bytes `00`.
+
+| `size`    | P         |
+|-----------|-----------|
+| 0         | 256       |
+| 255       | 256       |
+| 257       | 272       |
+| 1000      | 1024      |
+| 65537     | 67584     |
+| 1000000   | 1015808   |
+| 104857600 | 104857600 |
+| 104857601 | 106954752 |
+
+- P is at least 256 and never less than `size`. For a file of 256 bytes or more, P - size
+  is less than size / 16: the last z bits of P are zero, and z is less than E by S, which
+  is at least 4.
+- Between 2^E and 2^(E+1) lie 2^S padded lengths: 16 for E from 8 to 15, 32 for E from
+  16 to 26. The relay learns which of them a file has and nothing finer.
+- MAX_FILE_BYTES, 104857600, is its own padded length, and the next size gives 106954752:
+  a file of more than MAX_FILE_BYTES is not sent (section 33.1).
+
+### 29.3 The payload key
+
+The payload key is one call of HKDF (RFC 5869):
+
+| Parameter          | Value                                              |
+|--------------------|----------------------------------------------------|
+| Hash               | SHA-256                                            |
+| Salt               | The 16-byte nonce                                  |
+| Input key material | The 16-byte file key                               |
+| Info               | ASCII `payload`, 7 bytes, hex `7061796c6f6164`     |
+| Output length      | 32 bytes                                           |
+
+The calls are `HKDF(algorithm=hashes.SHA256(), length=32, salt=nonce, info=b"payload")`
+with `derive(file_key)` in the Python package cryptography and
+`HKDF<SHA256>.deriveKey(inputKeyMaterial:salt:info:outputByteCount:)` in CryptoKit.
+
+### 29.4 Chunks
+
+M is cut into chunks of STREAM_CHUNK_BYTES, 65536 bytes. Chunk i, counted from 0, is the
+bytes 65536 * i to 65536 * (i + 1) - 1 of M. There are n = ceil(P / 65536) chunks, and the
+last one, number n - 1, holds what is left: 1 to 65536 bytes. M has at least 256 bytes,
+so no chunk is empty.
+
+Chunk i is sealed with ChaCha20-Poly1305 (RFC 8439 section 2.8) under the payload key,
+with no associated data, and with this nonce of 12 bytes:
+
+| Offset | Length | Field   | Value                                              |
+|--------|--------|---------|----------------------------------------------------|
+| 0      | 11     | counter | i, big-endian                                      |
+| 11     | 1      | last    | `01` for chunk n - 1, `00` for every other chunk   |
+
+The sealed chunk is the ciphertext, as long as the chunk, followed by a tag of 16 bytes.
+The calls are `ChaCha20Poly1305(payload_key).encrypt(nonce, chunk, None)` in the Python
+package cryptography and `ChaChaPoly.seal(_:using:nonce:)` in CryptoKit, whose
+`ciphertext` and `tag` are taken in this order.
+
+### 29.5 The blob
+
+| Offset              | Length            | Field                                       |
+|---------------------|-------------------|---------------------------------------------|
+| 0                   | 16                | The nonce of section 29.1                   |
+| 16                  | 65552             | Sealed chunk 0                              |
+| 16 + 65552 * i      | 65552             | Sealed chunk i, for every chunk but the last |
+| 16 + 65552 * (n - 1) | 16 + the length of the last chunk | Sealed chunk n - 1        |
+
+The length of the blob is B = 16 + P + 16 * n.
+
+| `size`    | P         | n    | B         |
+|-----------|-----------|------|-----------|
+| 0         | 256       | 1    | 288       |
+| 65536     | 65536     | 1    | 65568     |
+| 65537     | 67584     | 2    | 67632     |
+| 104857600 | 104857600 | 1600 | 104883216 |
+
+### 29.6 The digest
+
+The digest of a blob is SHA-256 (RFC 6234) of its B bytes, 32 bytes. The calls are
+`hashlib.sha256` of the Python standard library and `SHA256.hash(data:)` in CryptoKit.
+The digest travels in the attachment, inside a message of the ratchet (section 32).
+
+### 29.7 Opening a blob
+
+A client opens a blob from the bytes it fetched and the `key`, `size` and `digest` of the
+attachment. The opening succeeds when all six steps hold. When one fails, the result is
+BAD_BLOB, whichever step a client runs first:
+
+1. The number of bytes is B for the P of `size` (sections 29.2 and 29.5).
+2. SHA-256 of the bytes is `digest`.
+3. The payload key is derived from `key` and the first 16 bytes (section 29.3).
+4. The rest is cut into sealed chunks of 65552 bytes, the last one shorter or equal. Each
+   is opened in order, with the nonce of its number and the byte `01` for the last chunk
+   only. A chunk that does not verify fails the step.
+5. The bytes of M from `size` on are all `00`.
+6. The file is the first `size` bytes of M.
+
+A client MAY open chunks as they arrive, as the age format allows, but it shows and saves
+no byte as the file before all six steps passed. A blob that fails leaves nothing.
+
+What the steps catch. The relay holds no key, so it cannot make a chunk that opens. A
+chunk that is dropped, repeated, moved or cut fails at its nonce and its tag, and a blob
+that ends after a whole chunk fails at step 1 or at the last flag. The digest checks the
+whole blob in one step before any chunk is opened, however the download was split and
+resumed; it does not replace the tag of a chunk. Step 5 makes the plaintext of a blob a
+function of the file alone, so that two implementations accept the same blobs.
+
+## 30. The blob frames
+
+### 30.1 The frames
+
+Section 7.1 lists the blob frames with the other frames of the relay protocol.
+
+| Frame                                 | Sent by | Valid                                   | Answer                |
+|---------------------------------------|---------|-----------------------------------------|-----------------------|
+| StartBlob                             | client  | After the Login of the connection       | BlobStored or Error   |
+| PutBlob                               | client  | After the Login of the connection       | BlobStored or Error   |
+| FetchBlob                             | client  | After the Login of the connection       | BlobData or Error     |
+| DeleteBlob                            | client  | After the Login of the connection       | none                  |
+| BlobStored, BlobData                  | relay   | As answers only                         | none                  |
+
+- A client sends a blob frame only to a relay that announced a `blob_max_bytes` other
+  than 0 in the LoggedIn of the connection (section 28.2). A relay without the blob
+  frames treats one as a malformed frame and closes with 1008 (section 7.3).
+- The rules of state of section 7.4 hold for the blob frames: a blob frame before the
+  login closes with 1008; the relay handles the frames of a connection one at a time and
+  answers each before it handles the next; every StartBlob, PutBlob and FetchBlob gets
+  exactly one answer.
+- A client MAY send several PutBlob or FetchBlob frames before their answers arrive. The
+  answers come in the order of the frames.
+- The field numbers follow section 7.2: `blob_id` is field 1 of every blob frame, and
+  FetchBlob, BlobData and DeleteBlob share their first two fields, the pair (blob id,
+  uploader), as a MessageRef shares them with a Deliver.
+
+### 30.2 StartBlob
+
+| Field       | No. | Type   | Length or value                                    |
+|-------------|-----|--------|----------------------------------------------------|
+| `blob_id`   | 1   | bytes  | 16, random, chosen by the uploader                 |
+| `recipient` | 2   | bytes  | 32, the identity key of the recipient              |
+| `length`    | 3   | uint32 | 1 to 2^32 - 1, the length B of the blob            |
+
+- Sent by a logged-in client to start an upload, and again to learn how far an upload
+  got (section 33.4).
+- Valid answers: BlobStored; or Error with RATE_LIMITED, BLOB_TOO_LARGE,
+  UNKNOWN_RECIPIENT, QUOTA_FULL or STORAGE_FULL, with `blob_id` set to the `blob_id` of
+  the request (section 30.8).
+- Violations: a malformed StartBlob closes with 1008, a `length` of 0 included. Section
+  31.1 has the full rules.
+
+### 30.3 PutBlob
+
+| Field     | No. | Type   | Length or value                                       |
+|-----------|-----|--------|-------------------------------------------------------|
+| `blob_id` | 1   | bytes  | 16, the `blob_id` of a StartBlob of the same uploader |
+| `offset`  | 2   | uint32 | The position of `data` in the blob                    |
+| `data`    | 3   | bytes  | 1 to BLOB_CHUNK_BYTES, that is 65408 bytes             |
+
+- Sent by a logged-in client: bytes of a blob that it uploads.
+- Valid answers: BlobStored; or Error with NOT_FOUND, BLOB_TOO_LARGE or STORAGE_FULL,
+  with `blob_id` set.
+- Violations: a malformed PutBlob closes with 1008, an empty `data` included. Section 31.2
+  has the full rules.
+
+### 30.4 BlobStored
+
+| Field           | No. | Type   | Length or value                                      |
+|-----------------|-----|--------|------------------------------------------------------|
+| `blob_id`       | 1   | bytes  | 16, the `blob_id` of the request                     |
+| `stored_length` | 2   | uint32 | The stored length of the blob after the request      |
+
+- Sent by the relay as the answer to a StartBlob or a PutBlob, after the commit of what
+  the request stored.
+- No answer.
+- Violations, seen by the client: a `blob_id` that is not 16 bytes is a malformed frame.
+
+### 30.5 FetchBlob
+
+| Field      | No. | Type   | Length or value                                              |
+|------------|-----|--------|--------------------------------------------------------------|
+| `blob_id`  | 1   | bytes  | 16, the `blob_id` of an attachment                           |
+| `uploader` | 2   | bytes  | 32, the `sender` of the Deliver that carried the attachment  |
+| `offset`   | 3   | uint32 | The first byte asked for                                     |
+| `length`   | 4   | uint32 | 1 to BLOB_CHUNK_BYTES, the number of bytes asked for          |
+
+- Sent by a logged-in client: a range of a blob of which it is the recipient.
+- Valid answers: BlobData; or Error with NOT_FOUND, with `blob_id` set to the `blob_id`
+  and `identity` to the `uploader` of the request.
+- Violations: a malformed FetchBlob closes with 1008. Section 31.3 has the full rules.
+
+### 30.6 BlobData
+
+| Field      | No. | Type   | Length or value                                                          |
+|------------|-----|--------|--------------------------------------------------------------------------|
+| `blob_id`  | 1   | bytes  | 16, the `blob_id` of the request                                         |
+| `uploader` | 2   | bytes  | 32, the `uploader` of the request                                        |
+| `offset`   | 3   | uint32 | The `offset` of the request                                              |
+| `data`     | 4   | bytes  | 0 to BLOB_CHUNK_BYTES: the bytes of the blob from `offset` on, `length` of them, or fewer at the end of the blob |
+
+- Sent by the relay as the answer to a FetchBlob.
+- No answer.
+- Violations, seen by the client: a `blob_id` that is not 16 bytes, an `uploader` that is
+  not 32 bytes and a `data` above BLOB_CHUNK_BYTES are malformed frames.
+
+### 30.7 DeleteBlob
+
+| Field      | No. | Type  | Length or value                                                    |
+|------------|-----|-------|--------------------------------------------------------------------|
+| `blob_id`  | 1   | bytes | 16                                                                 |
+| `uploader` | 2   | bytes | 32, the uploader of the blob: the client's own identity key for a blob it uploads |
+
+- Sent by a logged-in client: the uploader gives up a blob, or the recipient is done with
+  one.
+- No answer and no Error, whatever the frame names (section 31.4).
+- Violations: a malformed DeleteBlob closes with 1008.
+
+### 30.8 The Error of a blob frame
+
+The `blob_id` of an Error (section 7.16) is 16 bytes when the refused frame is a
+StartBlob, a PutBlob or a FetchBlob, and is its `blob_id`; otherwise it is empty. The key
+fields tell a client which frame was refused:
+
+| Key fields set              | Refused frame                  |
+|-----------------------------|--------------------------------|
+| `blob_id` alone             | StartBlob or PutBlob           |
+| `blob_id` and `identity`    | FetchBlob; `identity` is its `uploader` |
+
+A StartBlob and a PutBlob of one blob have one key; the order of the answers tells them
+apart (section 7.4). A client treats an Error as a malformed frame when its `blob_id` is
+neither empty nor 16 bytes, or when `blob_id` and `message_id` are both set.
+
+## 31. The relay and blobs
+
+### 31.1 StartBlob
+
+The relay handles a well-formed StartBlob of a logged-in connection in this order. The
+uploader is the identity of the connection. Steps 2 to 6 are one transaction.
+
+1. It takes a token from the frame bucket of the uploader (section 12.2). Without a token
+   the answer is Error RATE_LIMITED.
+2. When the relay holds a blob with this uploader and this `blob_id`, the answer is
+   BlobStored with its stored length and nothing else happens. The `recipient` and the
+   `length` of the request are not looked at.
+3. When `length` is more than BLOB_MAX_BYTES, the answer is Error BLOB_TOO_LARGE.
+4. When `recipient` is not registered, the answer is Error UNKNOWN_RECIPIENT.
+5. When the lengths of the blobs that the relay holds for this uploader, complete or not,
+   together with `length` are more than BLOB_QUOTA_BYTES, the answer is Error
+   QUOTA_FULL.
+6. It stores the uploader, the recipient, the blob id, the length, no byte of the blob
+   and the time in whole seconds, and commits. When the transaction fails because the
+   database is at its page ceiling, it is rolled back and the answer is Error
+   STORAGE_FULL.
+7. The answer is BlobStored with `stored_length` 0.
+
+Step 2 is what makes a StartBlob safe to repeat: it is the question "how far did this
+upload get" after a connection ended (section 33.4).
+
+### 31.2 PutBlob
+
+The relay handles a well-formed PutBlob of a logged-in connection in this order. The
+uploader is the identity of the connection. Steps 1 to 4 are one transaction.
+
+1. When the relay holds no blob with this uploader and this `blob_id`, the answer is
+   Error NOT_FOUND.
+2. When `offset` is not the stored length of the blob, the answer is BlobStored with the
+   stored length and nothing is stored. This covers a PutBlob that is repeated after a
+   lost answer and one that a client sent behind a PutBlob that failed.
+3. When `offset` and the length of `data` together are more than the length of the blob,
+   the answer is Error BLOB_TOO_LARGE and nothing is stored.
+4. It appends `data` to the blob, sets the time of the blob to the time in whole seconds,
+   and commits. When the transaction fails because the database is at its page ceiling,
+   it is rolled back and the answer is Error STORAGE_FULL.
+5. The answer is BlobStored with the new stored length.
+
+A blob is complete when its stored length reaches its length; no frame finishes it.
+
+A PutBlob, a FetchBlob and a DeleteBlob take no token from the frame bucket. A token for
+each would hold the largest blob, 1604 frames of BLOB_CHUNK_BYTES, to one frame a second
+once the bucket is empty: more than 25 minutes. The relay handles the frames of a
+connection one at a time, so a connection moves blob bytes no faster than the relay
+writes and reads them; BLOB_QUOTA_BYTES and the page ceiling bound what is stored.
+
+### 31.3 FetchBlob
+
+The relay handles a well-formed FetchBlob of a logged-in connection in this order:
+
+1. When the relay holds no complete blob with this `uploader` and this `blob_id` whose
+   recipient is the identity of the connection, the answer is Error NOT_FOUND. The answer
+   is the same for a blob that does not exist, one that is not complete and one with
+   another recipient.
+2. The answer is BlobData with the bytes of the blob from `offset` on: `length` of them,
+   or as many as the blob has from `offset` on, when that is fewer. When `offset` is the
+   length of the blob or more, `data` is empty.
+
+A fetch changes nothing: the blob, its time and its bytes stay as they were. Only the
+recipient of a blob receives its bytes; the uploader cannot fetch its own blob.
+
+### 31.4 DeleteBlob
+
+- The relay deletes the blob with this `uploader` and this `blob_id` when the identity of
+  the connection is its uploader, whether the blob is complete or not, or is its
+  recipient and the blob is complete. Otherwise it does nothing.
+- A DeleteBlob has no answer and no Error, and is safe to repeat.
+- A deleted blob does not count toward the quota of its uploader.
+- The relay keeps no record of a deleted blob. A StartBlob with the same blob id after
+  the deletion makes a new blob (section 31.1).
+
+### 31.5 Expiry
+
+The relay deletes a blob BLOB_TTL_SECONDS after its last write, the StartBlob that made
+it or the last PutBlob that appended to it, at the first sweep after that moment
+(section 13), whether it is complete or not. Nobody gets a notice.
+
+A sender sends the message of a file after the last write of its blob (section 33.2),
+and the relay keeps a message for MESSAGE_TTL_SECONDS at most. With the defaults a blob so
+outlives the message that names it by a week, less the time from the last write of the
+blob to the moment the relay stored the message; for a client that stays connected that
+time is short. A recipient has about that week to download a file that reached it on the
+last day of its message.
+
+### 31.6 The errors of the blob frames
+
+The codes are those of section 11.2 and two more, QUOTA_FULL and BLOB_TOO_LARGE.
+
+| Code              | No. | Refuses            | Sent when                                                                  | Client                       |
+|-------------------|-----|--------------------|----------------------------------------------------------------------------|------------------------------|
+| UNKNOWN_RECIPIENT | 1   | StartBlob          | The recipient is not registered at this relay                              | Stop                         |
+| STORAGE_FULL      | 3   | StartBlob, PutBlob | The database is at its page ceiling                                        | Back off                     |
+| RATE_LIMITED      | 4   | StartBlob          | The frame bucket of the identity is empty                                  | Back off                     |
+| NOT_FOUND         | 5   | PutBlob            | The relay holds no blob of the uploader with this id                       | StartBlob again (section 33.2) |
+| NOT_FOUND         | 5   | FetchBlob          | The relay holds no complete blob with this uploader and id for this recipient | Stop: BLOB_GONE (section 33.3) |
+| QUOTA_FULL        | 8   | StartBlob          | The blob would take the blobs of the uploader over BLOB_QUOTA_BYTES        | Stop                         |
+| BLOB_TOO_LARGE    | 9   | StartBlob, PutBlob | `length` is more than BLOB_MAX_BYTES, or `data` would end past the length  | Stop                         |
+
+A refused blob frame stores nothing and deletes nothing. The actions are those of section
+11.1.
+
+### 31.7 Limits
+
+| Name             | Default   | Unit    | Meaning                                                                      |
+|------------------|-----------|---------|------------------------------------------------------------------------------|
+| BLOB_MAX_BYTES   | 104883216 | bytes   | The largest blob the relay accepts: the blob of a file of MAX_FILE_BYTES, 100 MiB (section 29.5). Announced in LoggedIn |
+| BLOB_QUOTA_BYTES | 268435456 | bytes   | The largest sum of the lengths of the blobs the relay holds for one uploader, 256 MiB |
+| BLOB_TTL_SECONDS | 3196800   | seconds | The time after the last write of a blob at which it expires, 37 days: MESSAGE_TTL_SECONDS and one week |
+| BLOB_CHUNK_BYTES | 65408     | bytes   | The largest `data` of a PutBlob and of a BlobData, and the largest `length` of a FetchBlob: MAX_FRAME_BYTES - 128 |
+
+- BLOB_CHUNK_BYTES is a constant of relay protocol version 1, like MAX_FRAME_BYTES. The
+  128 bytes bound what the envelope and the other fields add to `data`: 32 bytes in the
+  longest PutBlob and 66 in the longest BlobData.
+- The other three are settings that a relay which serves the blob frames reads from the
+  environment, as section 12.1 says, and they join the table of section 12.1 with the code
+  that reads them.
+- An operator MAY lower BLOB_MAX_BYTES: a client takes the value from the LoggedIn
+  (section 33.1). A larger value gains nothing, since no client sends a file of more than
+  MAX_FILE_BYTES.
+- A blob counts toward the quota of its uploader until it is deleted. A blob that its
+  recipient never downloads, because the user does not ask for it or the client of the
+  recipient does not implement part 3, holds its room for BLOB_TTL_SECONDS.
+- Blobs count toward MAX_PAGES (section 12.3). With the defaults the database holds about
+  ten blobs of the largest length, so a relay that serves files needs a larger MAX_PAGES.
+
+### 31.8 Storage, erasure and metrics
+
+- The relay of this repository keeps a blob, with its bytes, in its database file, the
+  one file of its state. It stores the `data` of each PutBlob as a piece of its own, so
+  that a PutBlob writes its own bytes and not the blob again. It sends BlobStored only
+  after the commit of what the request stored, so that a stored length it reported
+  survives a kill of the relay process.
+- A blob is deleted by a DeleteBlob (section 31.4) or by expiry in a sweep
+  (section 31.5). "Deleted" means what section 13.2 says:
+  after the first sweep that follows the deletion, the bytes of the blob and its blob id
+  are in none of the files of the database. Section 13.3 holds for blobs as well.
+- The metrics of the blob frames carry no label that names an identity, as the other
+  metrics:
+
+| Name                             | Kind    | Counts                                                      |
+|----------------------------------|---------|-------------------------------------------------------------|
+| `sotto_blobs_started_total`      | counter | StartBlob frames that made a blob                           |
+| `sotto_blobs_completed_total`    | counter | Blobs whose last byte was stored                            |
+| `sotto_blobs_deleted_total`      | counter | Blobs deleted by a DeleteBlob, with the label `by`, `uploader` or `recipient` |
+| `sotto_blobs_expired_total`      | counter | Blobs deleted by expiry                                     |
+| `sotto_blob_bytes_stored_total`  | counter | Bytes appended by PutBlob frames                            |
+| `sotto_blob_bytes_fetched_total` | counter | Bytes sent in BlobData frames                               |
+| `sotto_blob_bytes`               | gauge   | The stored lengths of all blobs the relay holds, added up   |
+
+  A QUOTA_FULL counts in `sotto_limit_refusals_total` with the `kind` `blob_quota`, and the
+  blob frames count in `sotto_frames_total` like every other frame.
+
+## 32. The attachment
+
+### 32.1 The fields
+
+The `Attachment` message is listed in section 19.1. It is the `attachment` member of a
+`Content` and travels as a message of the ratchet like a text.
+
+| Field        | No. | Type   | Length or value                                                          |
+|--------------|-----|--------|--------------------------------------------------------------------------|
+| `blob_id`    | 1   | bytes  | 16, the `blob_id` of the StartBlob                                       |
+| `key`        | 2   | bytes  | 16, the file key of section 29.1                                         |
+| `size`       | 3   | uint32 | 0 to MAX_FILE_BYTES, the length of the file                              |
+| `digest`     | 4   | bytes  | 32, the digest of the blob (section 29.6)                                |
+| `media_type` | 5   | string | 0 to MAX_MEDIA_TYPE_BYTES, 127, bytes when sent: a media type as RFC 6838 names it, such as `image/jpeg`, or empty |
+| `file_name`  | 6   | string | 0 to MAX_FILE_NAME_BYTES, 255, bytes when sent: the name of the file without any folder, or empty |
+| `width`      | 7   | uint32 | The width of an image in pixels, 0 for a file that is not an image       |
+| `height`     | 8   | uint32 | The height of an image in pixels, 0 for a file that is not an image      |
+| `thumbnail`  | 9   | bytes  | 0 to MAX_THUMBNAIL_BYTES, 16384, bytes when sent: a JPEG image that shows the file small, or empty |
+| `caption`    | 10  | string | 0 to MAX_CAPTION_BYTES, 4096, bytes of UTF-8 when sent                  |
+
+- The uploader of the blob is the `sender` of the Deliver that carries the attachment,
+  and no field names it, for the reason of section 16.7. A client fetches the blob with
+  that `sender` as `uploader`.
+- The key of a blob travels only in this message.
+
+### 32.2 The receiver's checks
+
+After a message decrypted and its plaintext parsed as a `Content` with an `attachment`
+(section 19.5), the result is BAD_CONTENT when `blob_id` is not 16 bytes, `key` is not 16
+bytes, `digest` is not 32 bytes or `size` is more than MAX_FILE_BYTES. The strings and the
+thumbnail have no limit of the receiver's own: the largest frame bounds them, as it bounds
+a text (section 19.7).
+
+Every value of an attachment is what the sender chose, and nothing binds the media type,
+the name, the size of the image, the thumbnail or the caption to the file:
+
+- A client MUST NOT use `file_name` as a path. It writes a received file only into a
+  folder that it chose, under a name of at most MAX_FILE_NAME_BYTES bytes that holds no
+  `/`, no `\`, no byte `00`, no C0 or C1 control character and no bidirectional control
+  character (the characters that section 19.5 escapes) and that is neither empty nor `.`
+  nor `..`. A name that breaks this is replaced by a name of the client's own.
+- A client never writes a received file over a file that is already there. When the
+  name is taken, it writes the file under another name.
+- A client does not open or run a received file by itself, whatever its media type or
+  name. It opens a file only when the user asks.
+- The thumbnail can show another picture than the file. A thumbnail that does not decode
+  as a JPEG image is not shown.
+- `file_name`, `media_type` and `caption` are texts of the peer (section 19.5). The
+  command-line client escapes their control characters as it does for a text.
+
+### 32.3 Lengths
+
+The longest attachment within the limits of section 32.1 makes a `Content` of 20965
+bytes, far below the 65023 bytes of the longest text (section 19.7). It so fits a message
+whatever the state of the session.
+
+| Part                                                          | Bytes |
+|---------------------------------------------------------------|-------|
+| `blob_id` and `key`: each tag 1, length 1, 16                 | 36    |
+| `size`: tag 1, value 4                                        | 5     |
+| `digest`: tag 1, length 1, 32                                 | 34    |
+| `media_type`: tag 1, length 1, 127                            | 129   |
+| `file_name`: tag 1, length 2, 255                             | 258   |
+| `width` and `height`: each tag 1, value at most 5             | 12    |
+| `thumbnail`: tag 1, length 3, 16384                           | 16388 |
+| `caption`: tag 1, length 2, 4096                              | 4099  |
+| The `Attachment`                                              | 20961 |
+| The `Content`: tag 1, length 3 and the `Attachment`           | 20965 |
+
+## 33. The client and files
+
+### 33.1 Before a file is sent
+
+A client runs these checks before it makes a key or a blob. The first that fails ends
+the sending with its result, and nothing else is done:
+
+1. The identity is a contact. Otherwise the result is NOT_A_CONTACT, as for a text
+   (section 20.2, L1).
+2. The relay announced the blob frames: the `blob_max_bytes` of the last LoggedIn the
+   client received is not 0. Otherwise the result is FILES_UNSUPPORTED.
+3. `size` is MAX_FILE_BYTES or less, and the B of the file (section 29.5) is that
+   `blob_max_bytes` or less. Otherwise the result is FILE_TOO_LARGE.
+
+The client fills `media_type`, `file_name`, `thumbnail` and `caption` within the limits of
+section 32.1.
+
+### 33.2 Sending
+
+1. The checks of section 33.1.
+2. The client reads the file once and makes the blob: a random blob id, file key and
+   nonce, 16 bytes each, the blob of section 29 and its digest. In one transaction it
+   saves an upload: the blob id, the contact, the bytes of the blob and the fields of the
+   attachment. From then on it sends those bytes. It never reads the file again and never
+   encrypts it a second time, so a file that changes or goes away does not change the
+   upload.
+3. It sends StartBlob with the blob id, the contact and B. The BlobStored gives the
+   stored length s.
+4. While s is less than B, it sends PutBlob with `offset` s and the next bytes of the
+   blob, BLOB_CHUNK_BYTES or fewer, and takes the `stored_length` of each BlobStored as
+   the new s. A BlobStored with a smaller length than the client expected means that a
+   PutBlob stored nothing, and the client goes on from that length.
+5. When a BlobStored says that s is B, the client sends the message: the action SEND of
+   section 20.3 with a `Content` whose `attachment` holds the fields of the upload, after
+   START when the contact has no session (section 20.2, L1). The transaction of SEND also
+   deletes the upload with its bytes.
+6. The file counts as sent when the relay answers the Send of the message with Stored
+   (section 22.2).
+
+The answers to the blob frames:
+
+- RATE_LIMITED and STORAGE_FULL: the client sends the frame again after the wait of Back
+  off (section 23.5).
+- NOT_FOUND to a PutBlob: the blob expired or was lost at the relay. The client goes back
+  to step 3, and the upload starts again from 0 with the same bytes and the same blob id.
+- UNKNOWN_RECIPIENT, QUOTA_FULL, BLOB_TOO_LARGE or a code the client does not know, and a
+  START that fails: the file is not sent. The client deletes the upload, sends DeleteBlob
+  for the blob and reports the result. No message is sent.
+- A user who cancels the sending before step 5 ends it in the same way, without a result.
+- When the Send of the message of a file ends with an Error whose action is Stop
+  (section 22.2), the client sends DeleteBlob for its blob.
+- While a frame waits after RATE_LIMITED or STORAGE_FULL, the client SHOULD hold back its
+  StartBlob and PutBlob frames as well, as section 23.5 says for the other frames.
+- After an Error whose action is Back off, the BlobStored answers to the PutBlob frames
+  that the client sent behind the refused one say that they stored nothing. The client
+  sends nothing for them: after the wait it sends the refused frame again and goes on
+  from its answer.
+- A BlobStored whose `stored_length` is more than B ends the upload as not sent with the
+  result BAD_BLOB, and the client sends DeleteBlob.
+
+A client saves every DeleteBlob that it has to send and sends it again after every login
+until the relay answered a frame that the client sent after it on one connection: the
+relay handles the frames of a connection in order (section 7.4), and a DeleteBlob has no
+answer of its own.
+
+### 33.3 Receiving
+
+1. A Deliver whose `Content` holds an `attachment` is an ACCEPT or an ACCEPT-NEW of
+   section 20.3: the client saves the attachment with the message in the transaction of
+   section 22.2 and acks after the commit. It shows the attachment at once: the
+   thumbnail, the name, the size and the caption.
+2. The client downloads the blob by itself or when the user asks; which is its own
+   choice. A download holds the bytes of the blob received so far, h of them. The client
+   sends FetchBlob with the `sender` of the Deliver as `uploader`, the `blob_id`, `offset`
+   h and a `length` of BLOB_CHUNK_BYTES or fewer. Several FetchBlob frames on the way ask
+   for ranges that follow each other without a gap. The client writes the `data` of each
+   BlobData at h and saves the new h together with those bytes; it counts no byte that
+   it has not saved.
+3. A BlobData ends the download with BAD_BLOB when its `blob_id`, `uploader` or `offset`
+   is not that of the FetchBlob it answers (section 7.4), when its `offset` is not h,
+   when its `data` is longer than the `length` asked for or would end past B, and when
+   its `data` is shorter than asked for although it ends before B.
+4. When h is B, the client opens the blob (section 29.7). When the opening succeeds, it
+   saves the file and deletes the downloaded bytes in one transaction, and then sends
+   DeleteBlob. The file counts as received.
+5. With BAD_BLOB the client deletes the downloaded bytes, reports that the file could not
+   be received and sends DeleteBlob.
+6. With NOT_FOUND the result is BLOB_GONE: the blob expired, was deleted or was never
+   complete. The client deletes the downloaded bytes and reports that the file is not
+   available.
+
+An attachment whose file fails is still a message: its thumbnail and caption stay.
+
+### 33.4 Resume
+
+An upload and a download go on from where they stopped. Neither starts again from 0
+while the relay holds the blob.
+
+| What happened                         | Upload                                                               | Download                                   |
+|---------------------------------------|----------------------------------------------------------------------|--------------------------------------------|
+| The connection ended                  | After the next LoggedIn and the steps of section 23.3: StartBlob for every upload, then PutBlob from the stored length of its answer | After the next LoggedIn: FetchBlob from h for every download |
+| The relay restarted                   | As above. The relay keeps every byte that a BlobStored reported      | As above                                   |
+| The client restarted                  | As above: the uploads are in the store                               | As above: the downloads are in the store   |
+| The blob expired or was lost         | NOT_FOUND to PutBlob, or a StartBlob answered with 0: the upload starts from 0 with the same bytes | NOT_FOUND: BLOB_GONE |
+| A Back off code                       | The same frame after the wait (section 23.5)                         | No such code for a FetchBlob               |
+| A LoggedIn with a `blob_max_bytes` of 0, or below B | Not sent: FILES_UNSUPPORTED or FILE_TOO_LARGE. The client deletes the upload | Ends with FILES_UNSUPPORTED; the downloaded bytes are deleted |
+
+An upload ends with the file sent or not sent with a result, and a download with the
+file received, BAD_BLOB or BLOB_GONE. While the client has no connection, a transfer
+waits and has not failed.
+
+### 33.5 What the user sees
+
+| State                  | Shown                                                                          |
+|------------------------|--------------------------------------------------------------------------------|
+| Sending                | The progress: the `stored_length` of the last BlobStored out of B              |
+| Sent                   | The file, once the message got Stored                                          |
+| Not sent               | The result: FILES_UNSUPPORTED, FILE_TOO_LARGE, a code of section 31.6 or the result of a START that failed; or that the user cancelled. The user can send the file again: that is a new blob with a new blob id, file key and nonce |
+| Offered                | The attachment without the file                                                |
+| Receiving              | The progress: h out of B                                                       |
+| Received               | The file                                                                       |
+| Could not be received  | BAD_BLOB                                                                       |
+| Not available          | BLOB_GONE                                                                      |
+
+### 33.6 Constants and local results
+
+| Name                  | Value     | Unit  | Meaning                                                           |
+|-----------------------|-----------|-------|-------------------------------------------------------------------|
+| MAX_FILE_BYTES        | 104857600 | bytes | The largest file, 100 MiB (section 29.2)                          |
+| FILE_PADDING_MIN      | 256       | bytes | The smallest padded length (section 29.2)                         |
+| STREAM_CHUNK_BYTES    | 65536     | bytes | The plaintext of one chunk of the blob cipher (section 29.4)      |
+| MAX_MEDIA_TYPE_BYTES  | 127       | bytes | The longest `media_type` a client sends                           |
+| MAX_FILE_NAME_BYTES   | 255       | bytes | The longest `file_name` a client sends                            |
+| MAX_THUMBNAIL_BYTES   | 16384     | bytes | The longest `thumbnail` a client sends                            |
+| MAX_CAPTION_BYTES     | 4096      | bytes | The longest `caption` a client sends                              |
+
+MAX_FILE_BYTES, FILE_PADDING_MIN and STREAM_CHUNK_BYTES are constants of end-to-end
+protocol version 1: two clients that differ in one of them disagree on which blobs open.
+The other four bound what a client sends.
+
+| Name              | Where                    | Meaning                                                                  |
+|-------------------|--------------------------|--------------------------------------------------------------------------|
+| FILES_UNSUPPORTED | Section 33.1             | The relay announced no blob frames                                       |
+| FILE_TOO_LARGE    | Section 33.1             | The file is longer than MAX_FILE_BYTES, or its blob is longer than the relay accepts |
+| BAD_BLOB          | Sections 29.7, 33.2 and 33.3 | The fetched bytes are not the blob of the attachment, or the relay reported a stored length above the length of the blob |
+| BLOB_GONE         | Section 33.3             | The relay holds no complete blob of the attachment for the client        |
+
+### 33.7 The store
+
+A client that implements part 3 keeps, besides what section 22.1 lists, its uploads with
+the bytes of their blobs until their message is committed or they are given up, its
+downloads with the bytes received so far, the attachments of the message log and the
+files it received. Section 22.3 holds for what this part deletes. A received file is kept
+in readable form, like the message log (threat model, "A thief of the device or of the
+data directory").
+
+## 34. The test vectors of the blob cipher
+
+The vectors of part 3 are the file `vectors/blob.json`, in the schema of section 15.2,
+written by `scripts/generate_vectors.py` with the code of part 3. `size`, `padded_length`
+and `blob_length` are numbers, `chunk_nonces` is an array of hex strings, and every other
+value is a hex string.
+
+| Operation      | Rule             | `inputs`                                | `intermediates`                            | `outputs`                        | `error`  |
+|----------------|------------------|-----------------------------------------|--------------------------------------------|----------------------------------|----------|
+| `blob-length`  | 29.2, 29.5       | `size`                                  |                                            | `padded_length`, `blob_length`   |          |
+| `blob-encrypt` | 29.1 to 29.6     | `file`, `file_key`, `nonce`             | `padded_length`, `payload_key`, `chunk_nonces` | `blob`, `digest`             |          |
+| `blob-open`    | 29.7             | `blob`, `file_key`, `size`, `digest`    | `payload_key`                              | `file`                           | BAD_BLOB |
+
+- `blob-length`: P and B of a size. The sizes include 0, 255, 256, 257, 65536, 65537,
+  2^E + 1 for every E from 8 to 26, MAX_FILE_BYTES and MAX_FILE_BYTES + 1.
+- `blob-encrypt`: `chunk_nonces` are the 12-byte nonces of section 29.4 in the order of
+  the chunks. The files include an empty file, a file of one chunk, a file whose padded
+  length is exactly 65536 bytes and a file of two chunks.
+- `blob-open`: a positive vector opens the blob of the `blob-encrypt` vector with the same
+  name after the operation, and its `file` is the `file` of that vector.
+- A negative vector of `blob-open` records no intermediate. The negative cases: one byte
+  changed in the nonce, in a ciphertext and in a tag; two chunks swapped; the last chunk
+  left out; a blob of two chunks whose first chunk was sealed as the last; a padding
+  byte that is not `00`, sealed under its key so that every tag verifies. Each of these
+  carries the digest of its own bytes, so that the failure comes from step 4 or 5 of
+  section 29.7 and not from the digest. Three more fail earlier: one byte appended, the
+  digest of another blob, and a `size` with another padded length.
 
 ## Appendix A. One key agreement and two messages in hex
 

@@ -19,6 +19,9 @@ protocol: a peer, the device with its store, and what the keys of a session cove
 - "The relay" in the lists below is whoever controls the relay. The rules of the protocol
   describe the relay of this repository, run unchanged; they bind that code and not the
   person who runs it.
+- Files rest on part 3 of the protocol, which is written before its code (protocol,
+  section 28.3). What this document says of files cites no test, and the relay of this
+  repository serves no file yet.
 
 ## The attackers
 
@@ -114,6 +117,15 @@ Whoever controls the relay learns all of this, with or without the rules of the 
   session, the ratchet public key and the two message counters of every message, and the
   length of a text in steps of 256 bytes. "What the relay sees of the end-to-end layer"
   has the full list.
+- For every file (protocol, part 3): the uploader and the recipient of its blob; the
+  length of the blob, which gives the size of the file up to its padding, one of 16 or 32
+  padded lengths between two powers of two and at most a sixteenth above the size for a
+  file of 256 bytes or more (protocol, section 29.2); when the upload started, how it
+  went on, paused and resumed, and when it was complete; which ranges the recipient
+  fetched and when, so when the recipient downloaded the file; and when the blob was
+  deleted and by which side.
+- Which message carries which file, by time: a sender sends the message of a file to the
+  recipient of the blob right after the blob is complete.
 
 The relay does not learn the content of a message: it holds no key that opens a payload
 (protocol, sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
@@ -144,6 +156,11 @@ What the relay of this repository writes down, run unchanged:
   No log line holds payload bytes or a pair of sender and recipient
   [test: tests/test_messages.py::test_send_to_an_identity_that_is_not_registered_answers_unknown_recipient]
   [test: tests/test_storage.py::test_failed_send_closes_with_1011_and_the_relay_serves_on].
+- A relay that serves files holds every blob in the same database, with its uploader,
+  recipient, blob id, length, bytes and the time of its last write, until the recipient
+  or the uploader deletes it or it expires, BLOB_TTL_SECONDS after its last write, 37 days
+  by default. "Deleted" means for a blob what it means for a message (protocol,
+  section 31.8).
 - Metrics are counters and gauges without a label that names an identity. They are served
   on a listener of their own, which is off unless it is configured, and never on the
   WebSocket port
@@ -211,6 +228,11 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   date. The signatures of a bundle prove in the same way that the identity published those
   keys.
 - Record everything in "What the relay learns" and keep it.
+- Withhold a blob, delete it, cut it, or serve other bytes, those of another blob
+  included; answer BlobStored for bytes it did not keep; refuse an upload with a false
+  QUOTA_FULL or BLOB_TOO_LARGE, or claim that it serves no blob frames. The sender then
+  reports the file as not sent, or the recipient as not received or not available
+  (protocol, section 33.5). Keep a blob after it was deleted, for as long as it likes.
 
 What it cannot do:
 
@@ -251,6 +273,11 @@ What it cannot do:
 - Make a client start a key agreement or delete a one-time prekey by delivering messages
   that fail: a failure starts nothing and deletes nothing (protocol, section 20.3)
   [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
+- Read a file, or its name, media type, thumbnail or caption: the key of a blob and those
+  fields travel only inside a message of the ratchet (protocol, section 32). Make a
+  client accept bytes that the sender did not encrypt as the file: the length, the
+  SHA-256 digest of the blob and the tag of every chunk refuse them, and a client shows
+  no byte of a file before all of them passed (protocol, section 29.7).
 
 ## Not protected
 
@@ -314,7 +341,16 @@ What it cannot do:
   ids of two fetches about how many were handed out in between, that is, how many
   sessions others started with that identity.
 - Lengths. The padding hides the length of a text inside a step of 256 bytes and no
-  further: the relay sees how many steps a message has.
+  further: the relay sees how many steps a message has. The padding of a file hides its
+  size inside one of 16 or 32 padded lengths per power of two and no further.
+- Blob storage. An identity holds blobs up to BLOB_QUOTA_BYTES at a time, but identities
+  are free: many of them fill the database with blobs to recipients they registered
+  themselves, and until those blobs are deleted or expire every upload and every Send
+  gets STORAGE_FULL. With the defaults the page ceiling holds about ten blobs of the
+  largest length.
+- Blob traffic. A PutBlob and a FetchBlob take no token (protocol, section 31.2): one
+  identity moves blob bytes as fast as the relay reads and writes them on its connection,
+  and a recipient can fetch the same blob again and again until it deletes it.
 - Notices of failure. Whoever controls the relay can make a client show that a message of
   a contact could not be read, with or without a real message behind it ("What the relay
   can do").
@@ -356,6 +392,12 @@ its id.
 - A peer that stops answering, loses its store or goes back to an older copy of it
   leaves messages that fail and sessions that only a reset repairs (protocol,
   section 20.6). The user sees the failures; the protocol does not say why they happen.
+- A file is whatever the peer sent. Its name, media type, size of an image, thumbnail and
+  caption are the peer's choice, and nothing binds them to the file: a thumbnail can show
+  another picture than the file. A client never lets the name choose a folder and never
+  opens or runs a received file by itself (protocol, section 32.2). A contact can send
+  files of up to MAX_FILE_BYTES each, as many as its quota at the relay allows; what a
+  client downloads without the user's request is the client's choice.
 - An identity that is not a contact is no peer. Its messages are dropped before a byte of
   them is parsed, shown nowhere and acked (protocol, section 20.3)
   [test: tests/client/test_session.py::test_stranger_is_acked_before_a_byte_is_parsed].
@@ -370,7 +412,9 @@ or a program that runs as the user.
 
 - Nothing is encrypted at rest. The data directory holds the seed of the identity, every
   private key, the state of every session and the text of every message that was sent
-  and received (protocol, section 22.1). Whoever can read it has all of that.
+  and received (protocol, section 22.1). Whoever can read it has all of that, and with a
+  client that implements part 3 also the files it received, the blobs of its unfinished
+  uploads and the key of every attachment in its message log (protocol, section 33.7).
 - The file modes are the whole protection: the directory is 0700, the file 0600, and the
   client of this repository refuses to start on wider modes
   [test: tests/client/test_client_store.py::test_start_is_refused_when_a_mode_gives_a_right_to_the_group_or_others]. That
@@ -436,6 +480,9 @@ What it does not cover, because it stays on disk:
 - The message log. The text of every message that was sent or received stays in the data
   directory in readable form. Forward secrecy protects recorded traffic, not the
   client's own copy.
+- Files. The key of a file is part of its message and stays in the message log of both
+  clients. Whoever keeps a copy of the blob, as a relay can after the deletion, and later
+  takes the data directory of either side opens the file.
 - Skipped message keys. The key of a message that has not arrived is kept until the
   message arrives or the key is purged, after 5 DH ratchet steps or when the session
   holds 2000 of them (protocol, section 17.8). A thief of the state opens those
@@ -551,6 +598,10 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
   256-byte blocks and nothing finer
   [test: tests/client/test_envelope.py::test_padding_adds_the_mark_and_zero_bytes_up_to_the_next_block]. A message with an initial header
   is longer by that header.
+- For a message with an attachment, the same: the `Content` is padded like a text, and
+  its number of 256-byte blocks shows the length of its name, thumbnail and caption in
+  that step. Which blob it names is sealed; the relay links the two by time ("What the
+  relay learns").
 
 The header is not encrypted, and hiding it is not part of this protocol (protocol,
 section 26). What the relay does not see is the sealed text: it holds no key of a session
