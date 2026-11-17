@@ -6,11 +6,29 @@ from pathlib import Path
 
 import pytest
 
-from sotto.client.cli import DEFAULT_RELAY, RECEIVED_FILES, _print_event, main, printable
+from sotto.client.cli import (
+    DEFAULT_RELAY,
+    RECEIVED_FILES,
+    CommandError,
+    _print_event,
+    describe_timer,
+    main,
+    parse_timer,
+    printable,
+)
 from sotto.client.envelope import MAX_AVATAR_BYTES
-from sotto.client.session import FileState, Received
+from sotto.client.session import FileState, Quoted, Received
 from sotto.client.store import Store
-from sotto.client.transport import FileUpdate, Incoming, is_loopback, server_name_of
+from sotto.client.transport import (
+    Event,
+    Expired,
+    FileUpdate,
+    Incoming,
+    Sent,
+    Written,
+    is_loopback,
+    server_name_of,
+)
 from sotto.crypto.identity import decode_user_id
 from sotto.proto.sotto_pb2 import Attachment, Profile
 
@@ -164,14 +182,14 @@ async def test_two_processes_chat_through_the_relay(relay_url: str, tmp_path: Pa
     bob_chat = await open_chat(bob, "alice", url)
     alice_chat = await open_chat(alice, "bob", url)
     await alice_chat.type("hello bob")
-    await bob_chat.expect("alice: hello bob")
+    await bob_chat.expect("#1 alice: hello bob")
     await bob_chat.type("hi alice")
-    await alice_chat.expect("bob: hi alice")
+    await alice_chat.expect("#2 bob: hi alice")
 
     await alice_chat.quit()
     await bob_chat.type("are you there?")
     alice_chat = await open_chat(alice, "bob", url)
-    await alice_chat.expect("bob: are you there?")
+    await alice_chat.expect("#3 bob: are you there?")
 
     await alice_chat.quit()
     await bob_chat.quit()
@@ -194,7 +212,7 @@ async def test_file_sent_by_one_process_is_saved_by_the_chat_of_the_other(
     sent = await sotto(
         alice, "send-file", "bob", str(photo), "--caption", "hi", "--relay", url
     )
-    await bob_chat.expect("alice: file photo.jpg, 150000 bytes: hi")
+    await bob_chat.expect("#1 alice: file photo.jpg, 150000 bytes: hi")
     saved = bob / RECEIVED_FILES / "photo.jpg"
     await bob_chat.expect(f"alice: photo.jpg saved as {saved}")
     await bob_chat.quit()
@@ -357,14 +375,14 @@ async def test_chat_prints_one_line_when_the_contact_profile_changes(
     bob_chat = await open_chat(bob, "alice", url)
     alice_chat = await open_chat(alice, "bob", url)
     await alice_chat.type("hello bob")
-    await bob_chat.expect("alice: hello bob")
+    await bob_chat.expect("#1 alice: hello bob")
     await bob_chat.expect('alice: profile "Alice A.", with an avatar')
     await alice_chat.quit()
     await sotto(alice, "profile", "set", "--name", "Alice B.")
     alice_chat = await open_chat(alice, "bob", url)
     await bob_chat.expect('alice: profile "Alice B.", with an avatar')
     await bob_chat.type("nice")
-    await alice_chat.expect("bob: nice")
+    await alice_chat.expect("#2 bob: nice")
     await alice_chat.quit()
     await bob_chat.quit()
     listed = await sotto(bob, "contacts")
@@ -372,3 +390,170 @@ async def test_chat_prints_one_line_when_the_contact_profile_changes(
 
     assert listed == f'alice {alice_id} profile "Alice B.", avatar received'
     assert written.read_bytes() == JPEG
+
+
+def test_chat_prints_numbers_marks_and_one_line_per_change(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sender = bytes(32)
+    names = {sender: "alice"}
+    quote = Quoted(number=3, text="\x1b[2Jquoted")
+    events: list[Event] = [
+        Written(contact=sender, number=4, text="hi", reply_to=None, expires_after=0),
+        Sent(number=4),
+        Incoming(
+            sender=sender,
+            received=Received(ack=True, text=None, result=None, marked=(4,), read=False),
+        ),
+        Incoming(
+            sender=sender,
+            received=Received(ack=True, text=None, result=None, marked=(4, 5), read=True),
+        ),
+        Incoming(
+            sender=sender,
+            received=Received(
+                ack=True,
+                text="yes\u202e",
+                result=None,
+                number=6,
+                quote=quote,
+                expires_after=60,
+            ),
+        ),
+        Incoming(
+            sender=sender,
+            received=Received(
+                ack=True,
+                text="ok",
+                result=None,
+                number=7,
+                quote=Quoted(number=None, text=None),
+            ),
+        ),
+        Incoming(
+            sender=sender,
+            received=Received(ack=True, text="\x07new", result=None, number=6, edited=True),
+        ),
+        Incoming(
+            sender=sender,
+            received=Received(ack=True, text=None, result=None, number=6, deleted=True),
+        ),
+        Incoming(
+            sender=sender, received=Received(ack=True, text=None, result=None, timer=300)
+        ),
+        Incoming(sender=sender, received=Received(ack=True, text=None, result=None, timer=0)),
+        Incoming(sender=sender, received=Received(ack=True, text=None, result=None)),
+        Expired(numbers=(4, 6)),
+    ]
+
+    for event in events:
+        _print_event(event, names, {})
+
+    assert capsys.readouterr().out.splitlines() == [
+        "#4 you: hi",
+        "#4 sent",
+        "#4 delivered",
+        "#4 read",
+        "#5 read",
+        '#6 alice (1m), replying to #3 "\\x1b[2Jquoted": yes\\u202e',
+        "#7 alice, replying to a message that is gone: ok",
+        "#6 alice edited: \\x07new",
+        "#6 alice deleted the message",
+        "alice set the timer: 5m",
+        "alice set the timer: off",
+        "#4 disappeared",
+        "#6 disappeared",
+    ]
+
+
+def test_timer_is_parsed_and_described() -> None:
+    assert [parse_timer(text) for text in ("off", "30s", "5m", "1h", "1d", "4w")] == [
+        0,
+        30,
+        300,
+        3600,
+        86400,
+        2419200,
+    ]
+    assert [describe_timer(seconds) for seconds in (0, 30, 90, 3600, 7200, 604800)] == [
+        "off",
+        "30s",
+        "90s",
+        "1h",
+        "2h",
+        "1w",
+    ]
+    for text in ("", "1", "h", "1y", "-1h", "1.5h"):
+        with pytest.raises(CommandError):
+            parse_timer(text)
+
+
+def test_read_receipts_are_shown_and_turned_off_and_on(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    alice = tmp_path / "alice"
+    run(capsys, alice, "init")
+
+    shown = run(capsys, alice, "read-receipts")
+    off = run(capsys, alice, "read-receipts", "off")
+    on = run(capsys, alice, "read-receipts", "on")
+
+    assert (shown, off, on) == (
+        "read receipts: on\n",
+        "read receipts: off\n",
+        "read receipts: on\n",
+    )
+
+
+def texts_in(data_directory: Path) -> list[str]:
+    store = Store(data_directory / "store.db")
+    rows = store.connection.execute("SELECT text FROM messages ORDER BY position").fetchall()
+    store.close()
+    return [text for (text,) in rows]
+
+
+@pytest.mark.stand
+async def test_two_processes_reply_edit_delete_see_the_marks_and_lose_a_timed_message(
+    relay_url: str, tmp_path: Path
+) -> None:
+    url = f"{relay_url}/ws"
+    alice, bob = tmp_path / "alice", tmp_path / "bob"
+    alice_id = await sotto(alice, "init")
+    bob_id = await sotto(bob, "init")
+    await sotto(alice, "add", "bob", bob_id)
+    await sotto(bob, "add", "alice", alice_id)
+    await sotto(bob, "read-receipts", "off")
+
+    bob_chat = await open_chat(bob, "alice", url)
+    alice_chat = await open_chat(alice, "bob", url)
+    await alice_chat.type("hello bob")
+    await alice_chat.expect("#1 you: hello bob")
+    await bob_chat.expect("#1 alice: hello bob")
+    await alice_chat.expect("#1 sent")
+    await alice_chat.expect("#1 delivered")
+    await sotto(bob, "read-receipts", "on")
+
+    await bob_chat.type("/reply 1 hi alice")
+    await bob_chat.expect("#2 you, replying to #1: hi alice")
+    await alice_chat.expect('#2 bob, replying to #1 "hello bob": hi alice')
+    await bob_chat.expect("#2 read")
+    await alice_chat.type("/edit 1 hello, bob")
+    await alice_chat.expect("#1 you edited: hello, bob")
+    await bob_chat.expect("#1 alice edited: hello, bob")
+    await alice_chat.type("/delete 1")
+    await alice_chat.expect("#1 deleted for both")
+    await bob_chat.expect("#1 alice deleted the message")
+
+    await bob_chat.type("/timer 2s")
+    await bob_chat.expect("timer: 2s")
+    await alice_chat.expect("bob set the timer: 2s")
+    await alice_chat.type("vanishing")
+    await alice_chat.expect("#3 you (2s): vanishing")
+    await bob_chat.expect("#3 alice (2s): vanishing")
+    await alice_chat.expect("#3 disappeared")
+    await bob_chat.expect("#3 disappeared")
+    await alice_chat.quit()
+    await bob_chat.quit()
+
+    assert texts_in(alice) == ["hi alice"]
+    assert texts_in(bob) == ["hi alice"]

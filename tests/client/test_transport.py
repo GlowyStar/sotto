@@ -22,6 +22,7 @@ from transport_harness import (
     kind_of,
     next_event,
     next_text,
+    receipt_of,
     running,
     tampering_proxy,
     texts_received,
@@ -73,8 +74,7 @@ async def test_two_clients_exchange_texts_in_both_directions(
         assert await next_text(bob_link) == (alice.identity_key, "hello bob")
         await bob_link.send_text(alice.identity_key, "hello alice")
         assert await next_text(alice_link) == (bob.identity_key, "hello alice")
-
-    assert alice.outbox() == bob.outbox() == []
+        await until(lambda: alice.outbox() == bob.outbox() == [])
 
 
 async def test_offline_peer_receives_after_it_starts(
@@ -172,7 +172,7 @@ async def test_connection_cut_between_deliver_and_ack_gives_one_text(
             await alice_link.send_text(bob.identity_key, "only once")
         assert await next_text(bob_link) == (alice.identity_key, "only once")
         copy = await next_event(bob_link, Incoming)
-        await until(lambda: messages_in(settings) == [])
+        await until(lambda: queued_for(settings, bob) == [])
 
     assert copy.received.result == "DUPLICATE"
     assert texts_received(bob) == ["only once"]
@@ -215,8 +215,17 @@ async def test_marker_text_is_in_no_frame_log_or_file_of_the_relay(
 
         async with running(bob, proxy_url) as bob_link:
             assert await next_text(bob_link) == (alice.identity_key, MARKER)
-            await until(lambda: messages_in(settings) == [])
+            await until(lambda: queued_for(settings, bob) == [])
     assert traces() == []
+
+
+def queued_for(settings: Settings, client: Client) -> list[bytes]:
+    """The ids of the messages that the relay holds for the client."""
+    return [
+        message_id
+        for _, recipient, message_id, _, _ in messages_in(settings)
+        if recipient == client.identity_key
+    ]
 
 
 def swap_the_sender(sender: bytes) -> Callable[[ServerFrame], None]:
@@ -267,6 +276,8 @@ async def test_tampered_deliver_gives_no_text_and_no_new_handshake(
             assert await next_text(bob_link) == (alice.identity_key, "first")
             await bob_link.send_text(alice.identity_key, "reply")
             assert await next_text(alice_link) == (bob.identity_key, "reply")
+            # The delivery receipt of the reply reaches Bob before any Deliver is changed.
+            await until(lambda: receipt_of(bob, "reply") == "delivered")
             sessions = (
                 len(alice.store.sessions(bob.identity_key)),
                 len(bob.store.sessions(alice.identity_key)),
@@ -275,6 +286,8 @@ async def test_tampered_deliver_gives_no_text_and_no_new_handshake(
             tampering_on = True
             await alice_link.send_text(bob.identity_key, "tampered")
             tampered = await next_event(bob_link, Incoming)
+            while tampered.received.result is None:
+                tampered = await next_event(bob_link, Incoming)
             tampering_on = False
             await alice_link.send_text(bob.identity_key, "untouched")
             assert await next_text(bob_link) == (alice.identity_key, "untouched")
@@ -571,21 +584,30 @@ async def test_steps_after_the_login_upload_once_then_send_the_outbox(
             assert await next_text(bob_link) == (alice.identity_key, "first")
             await bob_link.send_text(alice.identity_key, "reply")
             assert await next_text(alice_link) == (bob.identity_key, "reply")
+            await until(lambda: receipt_of(bob, "reply") == "delivered")
 
         clock.advance(SEEN_ID_SECONDS)
+        forgotten_before = clock.now
         alice.send_text(bob.identity_key, "second")
         async with running(alice, url):
             await until(lambda: alice.outbox() == [])
         async with running(alice, url):
             await asyncio.sleep(0.5)
 
-    assert proxy.kinds(1)[:4] == ["login", "upload_bundle", "fetch_bundle", "send"]
-    assert proxy.kinds(2) == ["login", "upload_bundle", "send"]
-    assert proxy.kinds(3) == ["login"]
+    # An Ack answers a Deliver, which can arrive at any time (section 23.3).
+    requests = {
+        number: [kind for kind in proxy.kinds(number) if kind != "ack"] for number in (1, 2, 3)
+    }
+    assert requests[1][:4] == ["login", "upload_bundle", "fetch_bundle", "send"]
+    assert requests[2] == ["login", "upload_bundle", "send"]
+    assert requests[3] == ["login"]
     first, rotated = uploads(proxy)
     assert (len(first.one_time_prekeys), len(rotated.one_time_prekeys)) == (100, 0)
     assert first.signed_prekey.id != rotated.signed_prekey.id
-    assert alice.store.connection.execute("SELECT count(*) FROM seen_ids").fetchone() == (0,)
+    seen_earlier = alice.store.connection.execute(
+        "SELECT count(*) FROM seen_ids WHERE seen_at < ?", (forgotten_before,)
+    )
+    assert seen_earlier.fetchone() == (0,)
 
     identity = alice.store.identity()
     assert identity is not None

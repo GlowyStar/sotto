@@ -79,6 +79,8 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
         "downloads",
         "files",
         "identity",
+        "message_numbers",
+        "message_states",
         "messages",
         "one_time_prekeys",
         "outbox",
@@ -88,7 +90,9 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
         "records",
         "seen_ids",
         "sessions",
+        "settings",
         "signed_prekeys",
+        "timers",
         "uploads",
     ]
     store.close()

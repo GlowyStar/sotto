@@ -26,7 +26,9 @@ from sotto.client.envelope import (
     MAX_FILE_NAME_BYTES,
     MAX_MEDIA_TYPE_BYTES,
     NotAnImageError,
+    cut_to,
     encode_text,
+    encode_timer,
 )
 from sotto.client.session import (
     BLOB_GONE,
@@ -86,6 +88,7 @@ from sotto.relay.frames import (
 from sotto.relay.server import CloseCode
 
 RELAY_PROTOCOL_VERSION = 1
+EXPIRY_CHECK_SECONDS = 1
 RETRY_MAX_SECONDS = 60
 FRAME_REFILL_SECONDS = 1
 NORMAL_CLOSURE = 1000
@@ -244,7 +247,43 @@ class TransferFailed:
     reason: str
 
 
-type Event = Connected | Incoming | Refused | Retrying | Stopped | FileUpdate | TransferFailed
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Written:
+    """An own text entered the log under `number`, before its Send left."""
+
+    contact: bytes
+    number: int
+    text: str
+    reply_to: int | None
+    expires_after: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Sent:
+    """The relay stored an own message of the log that no receipt has reached."""
+
+    number: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Expired:
+    """The timer of these messages ran out, and they are gone (section 39.6)."""
+
+    numbers: tuple[int, ...]
+
+
+type Event = (
+    Connected
+    | Incoming
+    | Refused
+    | Retrying
+    | Stopped
+    | FileUpdate
+    | TransferFailed
+    | Written
+    | Sent
+    | Expired
+)
 
 
 def even_jitter(upper: float) -> float:
@@ -480,7 +519,7 @@ class Transport:
         self._holders = 0
         self._requests: list[_Request] = []
         self._back_offs: set[asyncio.Task[None]] = set()
-        self._profile_sends: set[asyncio.Task[None]] = set()
+        self._owed_sends: set[asyncio.Task[None]] = set()
         self._transfers: dict[TransferKey, asyncio.Task[None]] = {}
         self._sequence = 0
         # A DeleteBlob sent on this connection, with the sequence of the last request
@@ -494,21 +533,30 @@ class Transport:
         """
         self.client.delete_expired_prekeys()
         attempt = 0
-        while True:
-            if attempt > 0:
-                wait = retry_seconds(attempt, jitter=self.jitter)
-                self.events.put_nowait(Retrying(seconds=wait))
-                await asyncio.sleep(wait)
+        # In one group, so that a failure of the expiry ends `run` instead of the expiry.
+        async with asyncio.TaskGroup() as tasks:
+            expiry = tasks.create_task(self._expire_periodically())
             try:
-                logged_in = await self._serve_connection()
-            except _StopError as stop:
-                self.events.put_nowait(Stopped(reason=str(stop)))
-                return
-            attempt = 1 if logged_in else attempt + 1
+                while True:
+                    if attempt > 0:
+                        wait = retry_seconds(attempt, jitter=self.jitter)
+                        self.events.put_nowait(Retrying(seconds=wait))
+                        await asyncio.sleep(wait)
+                    try:
+                        logged_in = await self._serve_connection()
+                    except _StopError as stop:
+                        self.events.put_nowait(Stopped(reason=str(stop)))
+                        return
+                    attempt = 1 if logged_in else attempt + 1
+            finally:
+                expiry.cancel()
 
-    async def send_text(self, contact: bytes, text: str) -> None:
-        """Commits a text to the outbox and sends it; a Send without a Stored is sent
-        again after the next login.
+    async def send_text(
+        self, contact: bytes, text: str, *, reply_to: int | None = None
+    ) -> None:
+        """Commits a text to the outbox, reports it as `Written` and sends it; a Send
+        without a Stored is sent again after the next login. `reply_to` is the number of
+        the message of the chat that the text quotes (section 39.2).
 
         A contact without a session gets its bundle fetched first, which waits for a login.
 
@@ -518,13 +566,65 @@ class Transport:
             CryptoError: `Client.send_text` failed with the result that it names.
         """
         encode_text(text)
-        bundle = None
-        if not self.client.has_session(contact):
-            bundle = await self.fetch_bundle(contact)
-        outgoing = self.client.send_text(contact, text, bundle=bundle)
+        bundle = await self._bundle_unless_in_session(contact)
+        outgoing = self.client.send_text(contact, text, bundle=bundle, reply_to=reply_to)
+        if outgoing.number is not None:
+            written = Written(
+                contact=contact,
+                number=outgoing.number,
+                text=text,
+                reply_to=reply_to,
+                expires_after=self.client.timer(contact),
+            )
+            self.events.put_nowait(written)
+        await self._send(outgoing)
+
+    async def edit(self, contact: bytes, number: int, text: str) -> None:
+        """Sends an edit of an own message (section 39.3).
+
+        Raises:
+            CryptoError: `Client.edit` refused it with the result that it names.
+            RefusedError: The relay refused the FetchBundle with a Stop.
+        """
+        bundle = await self._bundle_unless_in_session(contact)
+        await self._send(self.client.edit(contact, number, text, bundle=bundle))
+
+    async def delete(self, contact: bytes, number: int) -> None:
+        """Deletes an own message for both (section 39.4).
+
+        Raises:
+            CryptoError: `Client.delete` refused it with the result that it names.
+            RefusedError: The relay refused the FetchBundle with a Stop.
+        """
+        bundle = await self._bundle_unless_in_session(contact)
+        await self._send(self.client.delete(contact, number, bundle=bundle))
+
+    async def set_timer(self, contact: bytes, seconds: int) -> None:
+        """Sets the disappearing timer of the chat, 0 for none (section 39.6).
+
+        Raises:
+            BadTimerError: The seconds are above MAX_TIMER_SECONDS.
+            RefusedError: The relay refused the FetchBundle with a Stop.
+        """
+        encode_timer(seconds)
+        bundle = await self._bundle_unless_in_session(contact)
+        await self._send(self.client.set_timer(contact, seconds, bundle=bundle))
+
+    def mark_read(self, contact: bytes, number: int) -> None:
+        """The user has seen a message: its timer starts, and its read receipt goes out
+        once logged in unless read receipts are off (section 39.5)."""
+        self.client.mark_read(contact, [number])
+        self._send_owed_later()
+
+    async def _bundle_unless_in_session(self, contact: bytes) -> Bundle | None:
+        if self.client.has_session(contact):
+            return None
+        return await self.fetch_bundle(contact)
+
+    async def _send(self, outgoing: Outgoing) -> None:
         if self._ready.is_set():
             await self._request(_Request(frame=send_frame(outgoing)))
-        await self._send_owed_profiles()
+        await self._send_owed()
 
     async def send_file(self, contact: bytes, path: Path, *, caption: str = "") -> bytes:
         """Steps 1 and 2 of section 33.2 once logged in; the upload goes on in the
@@ -547,7 +647,7 @@ class Transport:
             contact,
             data,
             blob_max_bytes=self.blob_max_bytes,
-            file_name=_cut_to(path.name, MAX_FILE_NAME_BYTES),
+            file_name=cut_to(path.name, MAX_FILE_NAME_BYTES),
             media_type=media_type if len(media_type) <= MAX_MEDIA_TYPE_BYTES else "",
             caption=caption,
         )
@@ -560,7 +660,7 @@ class Transport:
         """L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left."""
         bundle = await self.fetch_bundle(contact)
         missing = self.client.start_session(contact, bundle)
-        await self._send_owed_profiles()
+        await self._send_owed()
         return missing
 
     async def fetch_bundle(self, contact: bytes) -> Bundle:
@@ -651,7 +751,7 @@ class Transport:
         self._ready.set()
         self.events.put_nowait(Connected())
         self._end_transfers_beyond_the_relay()
-        await self._send_owed_profiles()
+        await self._send_owed()
 
     async def _serve(self, connection: ClientConnection) -> None:
         while True:
@@ -691,9 +791,9 @@ class Transport:
             sender=deliver.sender, message_id=deliver.message_id, payload=deliver.payload
         )
         received = self.client.receive(delivered)
-        if received.profile is not None:
-            # Before the first await: the task of a replaced avatar must not write into
-            # the row that took its position.
+        if received.profile is not None or received.deleted:
+            # Before the first await: the task of a replaced avatar or of a deleted file
+            # must not write into the row that took its position.
             self._cancel_ended_downloads()
         if received.ack:
             reference = MessageRef(message_id=deliver.message_id, sender=deliver.sender)
@@ -701,13 +801,19 @@ class Transport:
                 ClientFrame(ack=Ack(messages=[reference])).SerializeToString()
             )
         self.events.put_nowait(Incoming(sender=deliver.sender, received=received))
-        # In a task, so that a held request never stops this loop from reading frames.
-        task = asyncio.create_task(self._send_owed_profiles())
-        self._profile_sends.add(task)
-        task.add_done_callback(self._profile_sends.discard)
+        self._send_owed_later()
+
+    def _send_owed_later(self) -> None:
+        """`_send_owed` in a task, so that a held request never stops the reading loop."""
+        task = asyncio.create_task(self._send_owed())
+        self._owed_sends.add(task)
+        task.add_done_callback(self._owed_sends.discard)
 
     def _confirm_stored(self, message_id: bytes) -> None:
+        number = self.client.sent_number(message_id)
         file = self.client.confirm_stored(message_id)
+        if number is not None:
+            self.events.put_nowait(Sent(number=number))
         if file is not None:
             self.events.put_nowait(_file_update(file, FileState.SENT))
 
@@ -830,6 +936,9 @@ class Transport:
         if connection is None or self.blob_max_bytes == 0:
             return
         for uploader, blob_id in self.client.blob_deletions():
+            # A connection that ended while a send waited takes no more of them.
+            if self._connection is not connection:
+                return
             if (uploader, blob_id) in self._deletions_sent:
                 continue
             self._deletions_sent[uploader, blob_id] = self._sequence
@@ -886,14 +995,28 @@ class Transport:
                 transfer.cancel()
                 del self._transfers[key]
 
-    async def _send_owed_profiles(self) -> None:
-        """Section 36.2 once logged in: the owed profiles go out as Sends or as avatar
-        uploads, and every transfer without a task gets one."""
+    async def _send_owed(self) -> None:
+        """Sections 36.2 and 39.5 once logged in: the owed profiles go out as Sends or as
+        avatar uploads and the owed receipts as Sends, every transfer without a task gets
+        one, and the saved DeleteBlob frames go out."""
         if not self._ready.is_set():
             return
         for outgoing in self.client.send_owed_profiles(blob_max_bytes=self.blob_max_bytes):
             await self._request(_Request(frame=send_frame(outgoing)))
+        for outgoing in self.client.send_owed_receipts():
+            await self._request(_Request(frame=send_frame(outgoing)))
         self._start_transfers()
+        await self._send_blob_deletions()
+
+    async def _expire_periodically(self) -> None:
+        """Removes the messages whose timer ran out, every EXPIRY_CHECK_SECONDS."""
+        while True:
+            await asyncio.sleep(EXPIRY_CHECK_SECONDS)
+            numbers = self.client.expire_messages()
+            if numbers:
+                self._cancel_ended_downloads()
+                self.events.put_nowait(Expired(numbers=tuple(numbers)))
+                await self._send_blob_deletions()
 
     def _track(self, key: TransferKey, transfer: Coroutine[None, None, None]) -> None:
         task = asyncio.create_task(_until_the_connection_ends(transfer))
@@ -952,7 +1075,7 @@ class Transport:
             await self._not_sent(upload, error.result)
             return
         await self._request(_Request(frame=send_frame(outgoing)))
-        await self._send_owed_profiles()
+        await self._send_owed()
 
     async def _not_sent(self, upload: UploadRow, result: str) -> None:
         self.client.give_up_upload(upload.blob_id)
@@ -1051,7 +1174,7 @@ class Transport:
 
     def _end_connection(self) -> None:
         """What section 21.4 and 23.5 ask when a connection ends with requests open."""
-        for task in self._back_offs | self._profile_sends:
+        for task in self._back_offs | self._owed_sends:
             task.cancel()
         for transfer in self._transfers.values():
             transfer.cancel()
@@ -1152,11 +1275,6 @@ def _file_update(
 def _download_key(file: FileRow) -> TransferKey:
     """A download by its blob: the position of a deleted file can be taken by another."""
     return ("download", file.contact + file.attachment.blob_id)
-
-
-def _cut_to(name: str, limit: int) -> str:
-    """The longest start of `name` that is at most `limit` bytes of UTF-8."""
-    return name.encode()[:limit].decode(errors="ignore")
 
 
 def _error_name(code: int) -> str:

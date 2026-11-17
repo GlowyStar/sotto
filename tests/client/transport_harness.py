@@ -131,8 +131,12 @@ async def next_event[E: Event](transport: Transport, kind: type[E]) -> E:
 
 
 async def next_text(transport: Transport) -> tuple[bytes, str | None]:
-    incoming = await next_event(transport, Incoming)
-    return incoming.sender, incoming.received.text
+    """The next Incoming that shows a text or a failure, past receipts and duplicates."""
+    while True:
+        incoming = await next_event(transport, Incoming)
+        received = incoming.received
+        if received.text is not None or received.result not in (None, "DUPLICATE"):
+            return incoming.sender, received.text
 
 
 async def until(condition: Callable[[], bool]) -> None:
@@ -156,6 +160,17 @@ def texts_received(client: Client) -> list[str]:
         "SELECT text FROM messages WHERE direction = 'in' ORDER BY rowid"
     ).fetchall()
     return [text for (text,) in rows]
+
+
+def receipt_of(client: Client, text: str) -> str | None:
+    """The receipt that reached the own message of the client with this text."""
+    row = client.store.connection.execute(
+        "SELECT s.receipt FROM messages m "
+        "JOIN message_states s USING (contact, direction, message_id) "
+        "WHERE m.direction = 'out' AND m.text = ?",
+        (text,),
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def kind_of(message: Message) -> str | None:

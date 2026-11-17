@@ -442,6 +442,7 @@ def test_receiver_applies_no_limit_to_a_text(
     text = "x" * (envelope.MAX_TEXT_BYTES * 2)
     with monkeypatch.context() as patch:
         patch.setattr(envelope, "MAX_TEXT_BYTES", len(text))
+        patch.setattr(envelope, "MAX_CONTENT_BYTES", len(text) + 4)
         delivered = send(relay, alice, bob, text)
 
     assert bob.receive(delivered).text == text
@@ -464,7 +465,7 @@ def test_message_without_a_text_saves_its_state_and_seen_id_and_logs_nothing(
     result: str,
 ) -> None:
     with monkeypatch.context() as patch:
-        patch.setattr(session, "encode_text", lambda text: plaintext)
+        patch.setattr(session, "encode_text", lambda text, **_: plaintext)
         delivered = send(relay, alice, bob, "never read")
 
     received = bob.receive(delivered)

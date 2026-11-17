@@ -20,10 +20,21 @@ from google.protobuf.message import Message as ProtoMessage
 
 from sotto.client.envelope import (
     MAX_AVATAR_BYTES,
+    MAX_CONTENT_BYTES,
     MAX_PROFILE_NAME_BYTES,
+    MAX_QUOTE_BYTES,
+    MAX_TEXT_BYTES,
     MAX_THUMBNAIL_BYTES,
+    MAX_TIMER_SECONDS,
     avatar_media_type,
+    encode_attachment,
+    encode_deletion,
+    encode_edit,
     encode_profile,
+    encode_receipt,
+    encode_text,
+    encode_timer,
+    open_content,
     pad,
     unpad,
 )
@@ -67,7 +78,16 @@ from sotto.crypto.ratchet import (
     kdf_rk,
 )
 from sotto.crypto.x3dh import KeyAgreement, dh, initiate, respond
-from sotto.proto.sotto_pb2 import Attachment, Content, Profile
+from sotto.proto.sotto_pb2 import (
+    Attachment,
+    Content,
+    Deletion,
+    Edit,
+    Profile,
+    Quote,
+    Receipt,
+    Timer,
+)
 
 type Fields = dict[str, str | int]
 type Vector = dict[str, str | Fields]
@@ -78,6 +98,7 @@ type BlobFields = dict[str, str | int | list[str]]
 type BlobVector = dict[str, str | BlobFields]
 type ProfileFields = dict[str, str | int | dict[str, str | int]]
 type ProfileVector = dict[str, str | ProfileFields]
+type ContentVector = dict[str, Any]
 
 VECTORS = Path(__file__).parent.parent / "vectors"
 SCHEMA = 1
@@ -1482,12 +1503,223 @@ def profile_vectors() -> list[ProfileVector]:
     return profile_encode_vectors() + profile_decode_vectors() + avatar_media_type_vectors()
 
 
+FIRST_ID = bytes(range(0x50, 0x60))
+SECOND_ID = bytes(range(0x60, 0x70))
+THIRD_ID = bytes(range(0x70, 0x80))
+HOUR = 3600
+WEEK = 604800
+# Field 15 of Edit and member 10 of Content, which no client of part 5 knows.
+UNKNOWN_EDIT_FIELD = bytes.fromhex("7a03") + b"new"
+UNKNOWN_MEMBER = bytes.fromhex("5200")
+
+
+def json_fields(message: ProtoMessage) -> dict[str, Any]:
+    """The fields of a message that are set: bytes as hex, a list of bytes as a list of hex,
+    a message as an object, numbers, booleans and strings as they are."""
+    fields: dict[str, Any] = {}
+    for descriptor, value in message.ListFields():
+        if isinstance(value, ProtoMessage):
+            fields[descriptor.name] = json_fields(value)
+        elif isinstance(value, bytes):
+            fields[descriptor.name] = value.hex()
+        elif isinstance(value, str | int):
+            fields[descriptor.name] = value
+        else:
+            fields[descriptor.name] = [item.hex() for item in value]
+    return fields
+
+
+def encoded(content: Content) -> bytes:
+    """The padded plaintext that the encoder of the member of `content` makes of it."""
+    quote = content.quote if content.HasField("quote") else None
+    match content.WhichOneof("body"):
+        case "text":
+            return encode_text(content.text, quote=quote, expires_after=content.expires_after)
+        case "attachment":
+            return encode_attachment(
+                content.attachment, quote=quote, expires_after=content.expires_after
+            )
+        case "edit":
+            return encode_edit(content.edit.message_id, content.edit.text)
+        case "deletion":
+            return encode_deletion(content.deletion.message_id)
+        case "receipt":
+            return encode_receipt(content.receipt.message_ids, read=content.receipt.read)
+        case "timer":
+            return encode_timer(content.timer.seconds)
+        case member:
+            raise AssertionError(f"no encoder of part 5 for {member}")
+
+
+def content_cases() -> dict[str, Content]:
+    """The contents of section 40 that a client sends."""
+    longest_edit = "x" * (MAX_CONTENT_BYTES - 26)
+    file = Attachment(
+        blob_id=AVATAR_BLOB_ID,
+        key=AVATAR_KEY,
+        size=150000,
+        digest=AVATAR_DIGEST,
+        media_type="image/jpeg",
+        file_name="photo.jpg",
+        caption="the view",
+    )
+    return {
+        "text-with-a-timer": Content(text="see you", expires_after=HOUR),
+        "reply-to-an-own-message": Content(
+            text="yes", quote=Quote(message_id=FIRST_ID, own=True, text="are you coming?")
+        ),
+        "reply-to-a-message-of-the-receiver": Content(
+            text="\u043d\u0435\u0442",
+            quote=Quote(
+                message_id=SECOND_ID,
+                text="\u0442\u044b \u043f\u0440\u0438\u0434\u0451\u0448\u044c?",
+            ),
+        ),
+        "reply-with-the-longest-quote": Content(
+            text="ok",
+            quote=Quote(message_id=FIRST_ID, text="\u00e9" * (MAX_QUOTE_BYTES // 2)),
+        ),
+        "reply-with-a-timer": Content(
+            text="later",
+            quote=Quote(message_id=THIRD_ID, own=True),
+            expires_after=WEEK,
+        ),
+        "file-reply-with-a-timer": Content(
+            attachment=file,
+            quote=Quote(message_id=SECOND_ID, text="send it"),
+            expires_after=30,
+        ),
+        "edit": Content(edit=Edit(message_id=FIRST_ID, text="see you at 8")),
+        "edit-to-an-empty-text": Content(edit=Edit(message_id=FIRST_ID)),
+        "longest-edit": Content(edit=Edit(message_id=FIRST_ID, text=longest_edit)),
+        "deletion": Content(deletion=Deletion(message_id=SECOND_ID)),
+        "delivery-receipt": Content(receipt=Receipt(message_ids=[FIRST_ID, SECOND_ID])),
+        "read-receipt": Content(receipt=Receipt(read=True, message_ids=[THIRD_ID])),
+        "timer-off": Content(timer=Timer()),
+        "timer-of-an-hour": Content(timer=Timer(seconds=HOUR)),
+        "longest-timer": Content(timer=Timer(seconds=MAX_TIMER_SECONDS)),
+    }
+
+
+def refused_content_cases() -> dict[str, Content]:
+    """The contents of section 40 that a client refuses to send."""
+    quote = Quote(message_id=FIRST_ID, text="a")
+    return {
+        "longest-text-with-a-quote": Content(text="x" * MAX_TEXT_BYTES, quote=quote),
+        "edit-too-long": Content(
+            edit=Edit(message_id=FIRST_ID, text="x" * (MAX_CONTENT_BYTES - 25))
+        ),
+        "timer-too-long": Content(timer=Timer(seconds=MAX_TIMER_SECONDS + 1)),
+        "text-with-a-timer-too-long": Content(text="hi", expires_after=MAX_TIMER_SECONDS + 1),
+    }
+
+
+def content_encode_vectors() -> list[ContentVector]:
+    vectors: list[ContentVector] = []
+    for case, content in content_cases().items():
+        plaintext = encoded(content)
+        vectors.append(
+            {
+                "name": f"content-encode-{case}",
+                "operation": "content-encode",
+                "inputs": json_fields(content),
+                "intermediates": {"content": unpad(plaintext).hex()},
+                "outputs": {"plaintext": plaintext.hex()},
+            }
+        )
+    for case, content in refused_content_cases().items():
+        try:
+            encoded(content)
+        except CryptoError as error:
+            vectors.append(
+                {
+                    "name": f"content-encode-{case}",
+                    "operation": "content-encode",
+                    "inputs": json_fields(content),
+                    "intermediates": {},
+                    "error": error.result,
+                }
+            )
+        else:
+            raise AssertionError(f"the encoder sends {case}")
+    return vectors
+
+
+def content_decode_vectors() -> list[ContentVector]:
+    vectors: list[ContentVector] = []
+    edit = Content(edit=Edit(message_id=FIRST_ID, text="new")).SerializeToString()
+    accepted = {case: content.SerializeToString() for case, content in content_cases().items()}
+    accepted |= {
+        "edit-with-a-quote-and-a-timer": Content(
+            edit=Edit(message_id=FIRST_ID, text="new"),
+            quote=Quote(message_id=SECOND_ID, text="old"),
+            expires_after=HOUR,
+        ).SerializeToString(),
+        "edit-with-an-unknown-field": edit[:1]
+        + bytes([edit[1] + len(UNKNOWN_EDIT_FIELD)])
+        + edit[2:]
+        + UNKNOWN_EDIT_FIELD,
+        "receipt-without-an-id": Content(receipt=Receipt()).SerializeToString(),
+    }
+    for case, serialized in accepted.items():
+        plaintext = pad(serialized)
+        vectors.append(
+            {
+                "name": f"content-decode-{case}",
+                "operation": "content-decode",
+                "inputs": {"plaintext": plaintext.hex()},
+                "intermediates": {"content": serialized.hex()},
+                "outputs": json_fields(open_content(plaintext)),
+            }
+        )
+
+    good_and_short = [FIRST_ID, bytes(15)]
+    refused = {
+        "quote-id-of-15-bytes": Content(text="hi", quote=Quote(message_id=bytes(15))),
+        "edit-id-of-17-bytes": Content(edit=Edit(message_id=bytes(17), text="new")),
+        "deletion-without-an-id": Content(deletion=Deletion()),
+        "receipt-with-an-id-of-15-bytes": Content(receipt=Receipt(message_ids=good_and_short)),
+        "timer-too-long": Content(timer=Timer(seconds=MAX_TIMER_SECONDS + 1)),
+        "text-with-a-timer-too-long": Content(text="hi", expires_after=MAX_TIMER_SECONDS + 1),
+    }
+    refused_bytes = {case: content.SerializeToString() for case, content in refused.items()}
+    refused_bytes |= {
+        "edit-text-not-utf-8": bytes.fromhex("2215" + "0a10" + FIRST_ID.hex() + "1201ff"),
+        "quote-text-not-utf-8": bytes.fromhex(
+            "0a0268694215" + "0a10" + FIRST_ID.hex() + "1a01ff"
+        ),
+    }
+    unknown = {
+        "unknown-member": UNKNOWN_MEMBER,
+        "quote-without-a-member": Content(
+            quote=Quote(message_id=FIRST_ID, text="hi")
+        ).SerializeToString(),
+    }
+    for results, error in ((refused_bytes, "BAD_CONTENT"), (unknown, "UNKNOWN_CONTENT")):
+        for case, serialized in results.items():
+            vectors.append(
+                {
+                    "name": f"content-decode-{case}",
+                    "operation": "content-decode",
+                    "inputs": {"plaintext": pad(serialized).hex()},
+                    "intermediates": {},
+                    "error": error,
+                }
+            )
+    return vectors
+
+
+def content_vectors() -> list[ContentVector]:
+    return content_encode_vectors() + content_decode_vectors()
+
+
 FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "identity.json": identity_vectors,
     "x3dh.json": x3dh_vectors,
     "ratchet.json": ratchet_vectors,
     "blob.json": blob_vectors,
     "profile.json": profile_vectors,
+    "content.json": content_vectors,
 }
 
 

@@ -22,6 +22,9 @@ protocol: a peer, the device with its store, and what the keys of a session cove
 - Files rest on part 3 of the protocol (section 28.3). The relay and the command-line
   client of this repository implement it, and what this document says of files cites
   tests like the rest.
+- Replies, edits, delete for both, receipts and the disappearing timer rest on part 5 of
+  the protocol (section 38). They are messages between the two clients and add nothing
+  that the relay reads; the command-line client implements them.
 
 ## The attackers
 
@@ -133,6 +136,15 @@ Whoever controls the relay learns all of this, with or without the rules of the 
   avatar as one picture. A new session is followed by a profile message, and an avatar
   blob, in both directions. Nothing of the name or the picture: the profile is sealed
   like a text and the picture like a file.
+- The messages of part 5 of the protocol, by their number and their timing. A client
+  answers the messages of the chat that it accepts with delivery receipts, so a short
+  message from the recipient to the sender follows its Delivers within moments: the
+  relay learns when the client of the recipient handled a message even without its Ack.
+  A read receipt follows when the user of the recipient has seen the message, so the
+  relay learns roughly when a user reads a chat, unless read receipts are off. An edit,
+  a deletion and a change of the timer look like short texts. Nothing of what they say,
+  which messages they name or what a timer is: they are sealed like a text. A message
+  that expires leaves no trace on the wire.
 
 The relay does not learn the content of a message: it holds no key that opens a payload
 (protocol, sections 16 to 18) [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
@@ -236,6 +248,11 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   date. The signatures of a bundle prove in the same way that the identity published those
   keys.
 - Record everything in "What the relay learns" and keep it.
+- Withhold or delay a receipt, an edit, a deletion or a change of the timer, as any
+  message. The sender then sees no delivered or read mark, and a deletion or a timer
+  reaches the peer late or never; a message whose deletion it withholds stays at the
+  peer. A delivered mark is the word of the client of the peer, not a proof of delivery
+  through the relay.
 - Withhold a blob, delete it, cut it, or serve other bytes, those of another blob
   included; answer BlobStored for bytes it did not keep; refuse an upload with a false
   QUOTA_FULL or BLOB_TOO_LARGE, or claim that it serves no blob frames. The sender then
@@ -287,6 +304,12 @@ What it cannot do:
 - Make a client start a key agreement or delete a one-time prekey by delivering messages
   that fail: a failure starts nothing and deletes nothing (protocol, section 20.3)
   [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
+- Make a receipt, an edit, a deletion or a change of the timer of its own. Each is a
+  message of the ratchet, and one that does not decrypt changes nothing (protocol,
+  section 39.5)
+  [test: tests/client/test_changes.py::test_receipt_that_does_not_decrypt_marks_nothing].
+  Move a change onto another message: the id that names the message is authenticated
+  with every message (protocol, section 39.1).
 - Read a file, or its name, media type, thumbnail or caption: the key of a blob and those
   fields travel only inside a message of the ratchet (protocol, section 32). Make a
   client accept bytes that the sender did not encrypt as the file: the length, the
@@ -301,8 +324,9 @@ What it cannot do:
 - Metadata. Everything in "What the relay learns" is known to whoever controls the
   relay: who talks to whom, when and how much.
 - Delivery. Nothing proves to a sender that a message reached its recipient: Stored says
-  that the relay stored it. The relay and everyone on the path can drop and delay
-  messages.
+  that the relay stored it, and a delivery receipt (protocol, section 39.5) is the word
+  of the client of the peer, which the relay can withhold. The relay and everyone on the
+  path can drop and delay messages.
 - Order and completeness. The relay can reorder messages and withhold some of them.
 - The link without TLS. The relay process has no TLS, and the stand of this repository
   has none either. On such a link a network attacker has the position of the relay.
@@ -388,6 +412,32 @@ its id.
 - Nothing protects a message from the peer who received it. The peer holds the
   plaintext. It can keep it, copy it and show it to anyone, and no rule of the protocol
   makes its client delete anything.
+- Delete for both and the disappearing timer are requests (protocol, sections 39.4 and
+  39.6). The client of the peer honours them when it implements part 5 and runs its code
+  as written; a client of an older version keeps a message with a timer and shows
+  nothing of a deletion, a changed client keeps everything, and the peer can have read,
+  copied or photographed the message before. Nothing tells the user whether the peer's
+  client honoured a request, and no text of this project says that a message is gone at
+  the peer.
+- A peer learns when the client of the user received each message of the chat: a
+  delivery receipt answers it, and delivery receipts cannot be turned off. It learns when
+  the user has seen a message, unless the user turned read receipts off (protocol,
+  section 39.5). With read receipts off, the peer sees delivered and never read.
+- A peer can change what it wrote: an edit replaces the text of its message at the
+  receiver, up to 10 times (protocol, section 39.3)
+  [test: tests/client/test_changes.py::test_edits_stop_after_max_edits_and_edit_seconds],
+  and the client keeps only the last text. A peer cannot edit or delete a message of the
+  user: a change names a message of its own sender only
+  [test: tests/client/test_changes.py::test_edit_replaces_the_text_at_both_sides_and_only_the_author_edits]
+  [test: tests/client/test_changes.py::test_only_the_author_deletes].
+- The text of a quote is the peer's choice. A client shows its own copy of the quoted
+  message when it has one, so a peer cannot put words into a quote of a message that the
+  user has (protocol, section 39.2)
+  [test: tests/client/test_changes.py::test_reply_carries_a_quote_that_shows_without_the_original].
+  A quote of a message that the user does not have shows what the peer wrote.
+- A peer can send edits and deletions of messages that never arrive. Each leaves a trace
+  of an id and a short text, forgotten after 37 days (protocol, section 39.7)
+  [test: tests/client/test_changes.py::test_traces_are_forgotten_with_the_seen_ids].
 - A peer cannot be told from the person the user has in mind by anything in the
   protocol: a contact is an id, and "The id and its channel" says what that rests on.
 - Two things that a peer can make a client keep are bounded: 3 sessions (protocol,
@@ -481,6 +531,15 @@ or a program that runs as the user.
   no write-ahead log, so a deleted key is in none of its files after the commit
   [test: tests/client/test_lifecycle.py::test_replaced_chain_keys_are_in_no_file_of_the_store]. The blocks of a removed journal file, a snapshot of the filesystem
   and a backup can still hold it.
+- A message that was deleted for both or that expired is, in the same way, in none of
+  the files of the store after the commit that removed it (protocol, sections 39.4 and
+  39.6)
+  [test: tests/client/test_changes.py::test_delete_for_both_removes_the_message_and_its_file_at_both_sides]
+  [test: tests/client/test_changes.py::test_expired_message_goes_after_a_restart_and_is_in_no_file_of_the_store].
+  A thief who copied the data directory before has it. A message is removed at its
+  moment only while the client runs or at its next start. The command-line client cannot
+  take back what it printed: the scrollback of the terminal keeps the text of a message
+  that was deleted or expired, and so does whatever the user copied out of it.
 - A data directory that is put back from an older copy is an older state of every
   session. The client then sends under chain keys it used before, and the peer refuses
   those messages; what it receives can fail as well. The random nonce of every message
@@ -637,6 +696,9 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
 - For a profile, the same: its `Content` is padded like a text. Its blocks show whether it
   carries a thumbnail, and roughly how large; the relay links a profile message to the
   blob of its avatar by time, as for a file.
+- For the messages of part 5, the same. A receipt of up to 13 ids fits one block of 256
+  bytes, so the blocks of a receipt show roughly how many messages it names; a reply
+  with a long quote is a block longer than its text alone.
 
 The header is not encrypted, and hiding it is not part of this protocol (protocol,
 section 26). What the relay does not see is the sealed text: it holds no key of a session

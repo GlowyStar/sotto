@@ -1,8 +1,10 @@
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from google.protobuf.descriptor_pb2 import FieldDescriptorProto
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
 from hypothesis import given
 from hypothesis import strategies as st
@@ -10,11 +12,15 @@ from hypothesis import strategies as st
 from sotto.client.envelope import (
     MAX_AVATAR_BYTES,
     MAX_CAPTION_BYTES,
+    MAX_CONTENT_BYTES,
     MAX_FILE_NAME_BYTES,
     MAX_MEDIA_TYPE_BYTES,
     MAX_PROFILE_NAME_BYTES,
+    MAX_QUOTE_BYTES,
+    MAX_RECEIPT_IDS,
     MAX_TEXT_BYTES,
     MAX_THUMBNAIL_BYTES,
+    MAX_TIMER_SECONDS,
     PADDING_BLOCK,
     AvatarTooLargeError,
     BadContentError,
@@ -28,13 +34,28 @@ from sotto.client.envelope import (
     avatar_media_type,
     decode_content,
     encode_attachment,
+    encode_deletion,
+    encode_edit,
     encode_profile,
+    encode_receipt,
     encode_text,
     pad,
     parse_envelope,
+    unpad,
 )
 from sotto.crypto.blob import MAX_FILE_BYTES
-from sotto.proto.sotto_pb2 import Attachment, Content, InitialHeader, PeerMessage, Profile
+from sotto.proto.sotto_pb2 import (
+    Attachment,
+    Content,
+    Deletion,
+    Edit,
+    InitialHeader,
+    PeerMessage,
+    Profile,
+    Quote,
+    Receipt,
+    Timer,
+)
 
 GOOD_HEADER = bytes(40)
 GOOD_CIPHERTEXT = bytes(284)
@@ -306,17 +327,22 @@ def test_longest_profile_is_the_content_of_section_35_4_and_decodes() -> None:
     assert decode_content(encode_profile(name, largest)) == profile
 
 
-def content_of_a_client_without_part_4() -> type[Message]:
-    """`Content` as a client of parts 1 to 3 has it: the members text and attachment."""
+OLDER_MEMBERS = (
+    ("text", 1, FieldDescriptorProto.TYPE_STRING),
+    ("attachment", 2, FieldDescriptorProto.TYPE_BYTES),
+    ("profile", 3, FieldDescriptorProto.TYPE_BYTES),
+)
+
+
+def content_of_a_client_without_part_4(parts: int = 3) -> type[Message]:
+    """`Content` as a client of parts 1 to 3 has it, the members text and attachment, or of
+    parts 1 to 4 with `parts` 4, which adds profile."""
     schema = descriptor_pb2.FileDescriptorProto(
         name="older.proto", package="older", syntax="proto3"
     )
     content = schema.message_type.add(name="Content")
     content.oneof_decl.add(name="body")
-    for name, number, kind in (
-        ("text", 1, FieldDescriptorProto.TYPE_STRING),
-        ("attachment", 2, FieldDescriptorProto.TYPE_BYTES),
-    ):
+    for name, number, kind in OLDER_MEMBERS[: parts - 1]:
         content.field.add(
             name=name,
             number=number,
@@ -336,3 +362,58 @@ def test_profile_is_unknown_content_to_a_client_without_part_4() -> None:
 
     assert older_content.FromString(profile).WhichOneof("body") is None
     assert older_content.FromString(text).WhichOneof("body") == "text"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        Content(edit=Edit(message_id=bytes(16), text="new")),
+        Content(deletion=Deletion(message_id=bytes(16))),
+        Content(receipt=Receipt(read=True, message_ids=[bytes(16)])),
+        Content(timer=Timer(seconds=3600)),
+    ],
+)
+def test_change_is_unknown_content_and_a_reply_a_text_to_a_client_without_part_5(
+    change: Content,
+) -> None:
+    older_content = content_of_a_client_without_part_4(parts=4)
+    quote = Quote(message_id=bytes(16), own=True, text="are you coming?")
+    reply = Content(text="yes", quote=quote, expires_after=3600).SerializeToString()
+
+    assert older_content.FromString(change.SerializeToString()).WhichOneof("body") is None
+    assert MessageToDict(older_content.FromString(reply)) == {"text": "yes"}
+
+
+def test_longest_contents_are_those_of_section_38_4() -> None:
+    longest_quote = Quote(
+        message_id=bytes(16), own=True, text="\u00e9" * (MAX_QUOTE_BYTES // 2)
+    )
+    longest_reply = "x" * 64732
+    receipt = Content(receipt=Receipt(read=True, message_ids=[bytes(16)] * MAX_RECEIPT_IDS))
+
+    assert MAX_CONTENT_BYTES == 65023
+    assert len(unpad(encode_edit(bytes(16), "x" * 64997))) == MAX_CONTENT_BYTES
+    with pytest.raises(TextTooLongError):
+        encode_edit(bytes(16), "x" * 64998)
+    reply = encode_text(longest_reply, quote=longest_quote, expires_after=MAX_TIMER_SECONDS)
+    assert len(unpad(reply)) == MAX_CONTENT_BYTES
+    with pytest.raises(TextTooLongError):
+        encode_text(longest_reply + "x", quote=longest_quote, expires_after=MAX_TIMER_SECONDS)
+    assert len(receipt.SerializeToString()) == 18006
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        lambda: encode_text("hi", quote=Quote(message_id=bytes(15))),
+        lambda: encode_text("hi", quote=Quote(message_id=bytes(16), text="x" * 257)),
+        lambda: encode_edit(bytes(17), "new"),
+        lambda: encode_deletion(b""),
+        lambda: encode_receipt([bytes(16)] * (MAX_RECEIPT_IDS + 1), read=False),
+    ],
+)
+def test_part_5_member_beyond_a_limit_of_section_38_2_is_not_encoded(
+    refused: Callable[[], bytes],
+) -> None:
+    with pytest.raises(ValueError):
+        refused()
