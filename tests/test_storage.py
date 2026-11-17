@@ -12,13 +12,13 @@ from typing import cast
 import pytest
 from relay_harness import (
     PATIENCE_SECONDS,
-    WINDOW_BYTES,
     Clock,
     OpenClient,
     RawClient,
     build_upload,
     messages_in,
     running_relay,
+    traces_in,
 )
 from websockets.asyncio.server import ServerConnection
 
@@ -44,8 +44,8 @@ from sotto.relay.storage import Storage
 # Sent by the WebSocket library when the handler of a connection raises.
 INTERNAL_ERROR = 1011
 PAGE_BYTES = 4096
-# The empty schema takes 8 pages and an upload of 100 one-time prekeys takes 3 or 4.
-FEW_PAGES = 12
+# The empty schema takes 12 pages and an upload of 100 one-time prekeys takes 3 or 4.
+FEW_PAGES = 16
 NOT_FOUND = ErrorCode.NOT_FOUND
 TTL_SECONDS = 100
 SWEEP_SECONDS = 0.01
@@ -57,18 +57,9 @@ def files_of(settings: Settings) -> list[str]:
     return sorted(path.name for path in settings.database.parent.iterdir())
 
 
-def traces_in(settings: Settings, send: Send) -> list[str]:
+def message_traces_in(settings: Settings, send: Send) -> list[str]:
     """Names the parts of the message that leave eight bytes in a row in a database file."""
-    files = b"".join(path.read_bytes() for path in settings.database.parent.iterdir())
-    parts = {"payload": send.payload, "message id": send.message_id}
-    return [
-        name
-        for name, part in parts.items()
-        if any(
-            part[start : start + WINDOW_BYTES] in files
-            for start in range(len(part) - WINDOW_BYTES + 1)
-        )
-    ]
+    return traces_in(settings, {"payload": send.payload, "message id": send.message_id})
 
 
 async def eventually(condition: Callable[[], bool]) -> None:
@@ -479,10 +470,14 @@ def test_sweep_deletes_a_message_once_its_ttl_has_passed(settings: Settings) -> 
     with closing(Storage(settings.database, max_pages=1000, clock=clock)) as storage:
         _, send = store_one_message(storage, 100)
         clock.now += TTL_SECONDS - 1
-        deleted_before_the_ttl = storage.sweep(ttl_seconds=TTL_SECONDS)
+        deleted_before_the_ttl = storage.sweep(
+            ttl_seconds=TTL_SECONDS, blob_ttl_seconds=TTL_SECONDS
+        ).messages
         rows_before_the_ttl = messages_in(settings)
         clock.now += 1
-        deleted_at_the_ttl = storage.sweep(ttl_seconds=TTL_SECONDS)
+        deleted_at_the_ttl = storage.sweep(
+            ttl_seconds=TTL_SECONDS, blob_ttl_seconds=TTL_SECONDS
+        ).messages
         rows_at_the_ttl = messages_in(settings)
         bundle = storage.fetch_bundle(send.recipient)
 
@@ -537,9 +532,12 @@ def test_acked_message_is_in_no_file_of_the_database_after_the_sweep(
         sender, send = store_one_message(storage, payload_length)
         pair = MessageRef(sender=sender, message_id=send.message_id)
         storage.delete_messages(send.recipient, [pair])
-        traces_before_the_sweep = traces_in(settings, send)
-        storage.sweep(ttl_seconds=settings.message_ttl_seconds)
-        traces_after_the_sweep = traces_in(settings, send)
+        traces_before_the_sweep = message_traces_in(settings, send)
+        storage.sweep(
+            ttl_seconds=settings.message_ttl_seconds,
+            blob_ttl_seconds=settings.blob_ttl_seconds,
+        )
+        traces_after_the_sweep = message_traces_in(settings, send)
         files = files_of(settings)
         log_bytes = settings.database.with_name("relay.db-wal").stat().st_size
 
@@ -557,10 +555,10 @@ def test_expired_message_is_in_no_file_of_the_database_after_the_sweep(
 
     with closing(Storage(settings.database, max_pages=1000, clock=clock)) as storage:
         _, send = store_one_message(storage, payload_length)
-        traces_before_the_sweep = traces_in(settings, send)
+        traces_before_the_sweep = message_traces_in(settings, send)
         clock.now += TTL_SECONDS
-        deleted = storage.sweep(ttl_seconds=TTL_SECONDS)
-        traces_after_the_sweep = traces_in(settings, send)
+        deleted = storage.sweep(ttl_seconds=TTL_SECONDS, blob_ttl_seconds=TTL_SECONDS).messages
+        traces_after_the_sweep = message_traces_in(settings, send)
         files = files_of(settings)
         log_bytes = settings.database.with_name("relay.db-wal").stat().st_size
 

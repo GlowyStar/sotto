@@ -19,9 +19,10 @@ protocol: a peer, the device with its store, and what the keys of a session cove
 - "The relay" in the lists below is whoever controls the relay. The rules of the protocol
   describe the relay of this repository, run unchanged; they bind that code and not the
   person who runs it.
-- Files rest on part 3 of the protocol, which is written before its code (protocol,
-  section 28.3). What this document says of files cites no test, and the relay of this
-  repository serves no file yet.
+- Files rest on part 3 of the protocol (section 28.3). The relay of this repository
+  serves its blob frames and what this document says of the relay and files cites tests;
+  the client half of part 3 is written before its code, and what this document says of
+  a client and files cites none.
 
 ## The attackers
 
@@ -159,8 +160,9 @@ What the relay of this repository writes down, run unchanged:
 - A relay that serves files holds every blob in the same database, with its uploader,
   recipient, blob id, length, bytes and the time of its last write, until the recipient
   or the uploader deletes it or it expires, BLOB_TTL_SECONDS after its last write, 37 days
-  by default. "Deleted" means for a blob what it means for a message (protocol,
-  section 31.8).
+  by default [test: tests/test_blobs.py::test_blob_expires_its_ttl_after_its_last_write_complete_or_not].
+  "Deleted" means for a blob what it means for a message (protocol, section 31.8)
+  [test: tests/test_blobs.py::test_deleted_blob_is_in_no_file_of_the_database_after_the_sweep].
 - Metrics are counters and gauges without a label that names an identity. They are served
   on a listener of their own, which is off unless it is configured, and never on the
   WebSocket port
@@ -308,7 +310,7 @@ What it cannot do:
   QUEUE_MAX_BYTES; with the defaults about 256 messages of the largest payload do. Until
   the recipient acks, every honest sender gets QUEUE_FULL.
 - The storage ceiling. Free identities can fill the database up to MAX_PAGES, with the
-  defaults about 64 full queues of identities they registered themselves. Until those
+  defaults about 512 full queues of identities they registered themselves. Until those
   messages are acked or expire, every Send and every upload gets STORAGE_FULL. Bundles
   count toward the ceiling as well, never expire, and no frame deletes one: a database
   filled with the bundles of free identities, each with ONE_TIME_PREKEY_CAP one-time
@@ -346,7 +348,7 @@ What it cannot do:
 - Blob storage. An identity holds blobs up to BLOB_QUOTA_BYTES at a time, but identities
   are free: many of them fill the database with blobs to recipients they registered
   themselves, and until those blobs are deleted or expire every upload and every Send
-  gets STORAGE_FULL. With the defaults the page ceiling holds about ten blobs of the
+  gets STORAGE_FULL. With the defaults the page ceiling holds about eighty blobs of the
   largest length.
 - Blob traffic. A PutBlob and a FetchBlob take no token (protocol, section 31.2): one
   identity moves blob bytes as fast as the relay reads and writes them on its connection,

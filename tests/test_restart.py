@@ -13,17 +13,26 @@ from sotto.crypto.identity import (
     sign_signed_prekey,
 )
 from sotto.proto.sotto_pb2 import (
+    BlobStored,
     Bundle,
     BundleStored,
+    ClientFrame,
+    DeleteBlob,
     Deliver,
+    Error,
+    ErrorCode,
+    FetchBlob,
     FetchBundle,
     OneTimePrekey,
+    PutBlob,
     Send,
     ServerFrame,
     SignedPrekey,
+    StartBlob,
     Stored,
     UploadBundle,
 )
+from sotto.relay.frames import BLOB_CHUNK_BYTES
 
 
 def fixed_key(label: str) -> bytes:
@@ -139,5 +148,105 @@ async def test_message_stored_before_the_restart_is_delivered(open_client: OpenC
             message_id=SEND.message_id,
             sender=derive_identity_key(SENDER_SEED),
             payload=SEND.payload,
+        )
+    )
+
+
+BLOB_RECIPIENT_SEED = fixed_key("blob recipient")
+BLOB_RECIPIENT_DH_KEY = derive_x25519_public_key(fixed_key("blob recipient identity-dh"))
+BLOB_RECIPIENT_PREKEY = derive_x25519_public_key(fixed_key("blob recipient signed-prekey"))
+BLOB_RECIPIENT_UPLOAD = UploadBundle(
+    identity_dh_key=BLOB_RECIPIENT_DH_KEY,
+    identity_dh_signature=sign_identity_dh_key(
+        BLOB_RECIPIENT_SEED, identity_dh_key=BLOB_RECIPIENT_DH_KEY
+    ),
+    signed_prekey=SignedPrekey(
+        id=1,
+        key=BLOB_RECIPIENT_PREKEY,
+        signature=sign_signed_prekey(BLOB_RECIPIENT_SEED, signed_prekey=BLOB_RECIPIENT_PREKEY),
+    ),
+)
+BLOB_UPLOADER_SEED = fixed_key("blob uploader")
+BLOB = hashlib.shake_256(b"sotto stand restart blob").digest(2 * BLOB_CHUNK_BYTES + 1000)
+START_BLOB = StartBlob(
+    blob_id=fixed_key("blob id")[:16],
+    recipient=derive_identity_key(BLOB_RECIPIENT_SEED),
+    length=len(BLOB),
+)
+PIECES = [
+    PutBlob(
+        blob_id=START_BLOB.blob_id,
+        offset=offset,
+        data=BLOB[offset : offset + BLOB_CHUNK_BYTES],
+    )
+    for offset in range(0, len(BLOB), BLOB_CHUNK_BYTES)
+]
+
+
+def blob_stored(stored_length: int) -> ServerFrame:
+    return ServerFrame(
+        blob_stored=BlobStored(blob_id=START_BLOB.blob_id, stored_length=stored_length)
+    )
+
+
+@pytest.mark.stand
+async def test_first_piece_of_the_fixed_blob_is_stored(
+    relay_url: str, open_client: OpenClient
+) -> None:
+    recipient = await open_client(relay_url)
+    await recipient.log_in(BLOB_RECIPIENT_SEED)
+    registered = await recipient.ask(BLOB_RECIPIENT_UPLOAD)
+    uploader = await open_client(relay_url)
+    await uploader.log_in(BLOB_UPLOADER_SEED)
+
+    started = await uploader.ask(START_BLOB)
+    first = await uploader.ask(PIECES[0])
+
+    assert registered.WhichOneof("frame") == "bundle_stored"
+    assert started == blob_stored(0)
+    assert first == blob_stored(BLOB_CHUNK_BYTES)
+
+
+@pytest.mark.stand_after_restart
+async def test_upload_of_the_fixed_blob_goes_on_after_the_restart(
+    open_client: OpenClient,
+) -> None:
+    stand_url = os.environ.get("RELAY_URL")
+    if stand_url is None:
+        pytest.skip("runs against the stand, after scripts/stand.sh restarted it")
+    uploader = await open_client(stand_url)
+    await uploader.log_in(BLOB_UPLOADER_SEED)
+    recipient = await open_client(stand_url)
+    await recipient.log_in(BLOB_RECIPIENT_SEED)
+    uploader_key = derive_identity_key(BLOB_UPLOADER_SEED)
+
+    resumed = await uploader.ask(START_BLOB)
+    rest = [await uploader.ask(piece) for piece in PIECES[1:]]
+    fetched = b""
+    for offset in range(0, len(BLOB), BLOB_CHUNK_BYTES):
+        fetch = FetchBlob(
+            blob_id=START_BLOB.blob_id,
+            uploader=uploader_key,
+            offset=offset,
+            length=BLOB_CHUNK_BYTES,
+        )
+        fetched += (await recipient.ask(fetch)).blob_data.data
+    delete = DeleteBlob(blob_id=START_BLOB.blob_id, uploader=uploader_key)
+    await recipient.send(ClientFrame(delete_blob=delete))
+    after_the_delete = await recipient.ask(
+        FetchBlob(
+            blob_id=START_BLOB.blob_id,
+            uploader=uploader_key,
+            offset=0,
+            length=BLOB_CHUNK_BYTES,
+        )
+    )
+
+    assert resumed == blob_stored(BLOB_CHUNK_BYTES)
+    assert rest[-1] == blob_stored(len(BLOB))
+    assert fetched == BLOB
+    assert after_the_delete == ServerFrame(
+        error=Error(
+            code=ErrorCode.NOT_FOUND, blob_id=START_BLOB.blob_id, identity=uploader_key
         )
     )

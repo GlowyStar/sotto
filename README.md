@@ -20,8 +20,8 @@ opens one.
   holds three parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
-  resumable uploads and downloads through the relay and the attachment of a message; no
-  code implements it yet. [docs/threat-model.md](docs/threat-model.md)
+  resumable uploads and downloads through the relay and the attachment of a message; the
+  relay serves its blob frames, and the client half is not written yet. [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
   [what the relay can do](docs/threat-model.md#what-the-relay-can-do) and what is
@@ -136,8 +136,9 @@ The relay keeps its whole state in one SQLite file, the path in `RELAY_DATABASE`
 has no default. It opens the file in write-ahead mode, so a `-wal` and a `-shm` file sit
 next to it while it runs, and it removes the two on an orderly stop. Keep the three on a
 directory of their own: the image keeps them in `/data`, which `compose.yaml` mounts as the
-named volume `relay-data`. `RELAY_MAX_PAGES` caps the file, 262144 pages of 4096 bytes by
-default; an upload or a message into a full database is refused and the relay stays up.
+named volume `relay-data`. `RELAY_MAX_PAGES` caps the file, 2097152 pages of 4096 bytes (8 GiB) by
+default; an upload, a message or a blob into a full database is refused and the relay
+stays up.
 `RELAY_ONE_TIME_PREKEY_CAP`, 100 by default, caps the one-time prekeys kept per identity.
 
 The relay keeps a registered identity and its bundle with no expiry. It keeps a message
@@ -155,19 +156,23 @@ The limits of `docs/protocol.md`, section 12, are settings with the defaults of 
 |--------------------------------|----------|----------------------------------------------------|
 | `RELAY_QUEUE_MAX_MESSAGES`     | 1000     | messages queued for one recipient                  |
 | `RELAY_QUEUE_MAX_BYTES`        | 16777216 | payload bytes queued for one recipient             |
-| `RELAY_FRAME_BUCKET_SIZE`      | 60       | Send, UploadBundle and FetchBundle frames of one identity in a burst |
+| `RELAY_FRAME_BUCKET_SIZE`      | 60       | Send, UploadBundle, FetchBundle and StartBlob frames of one identity in a burst |
 | `RELAY_FRAME_REFILL_SECONDS`   | 1        | the time in which one frame token returns          |
 | `RELAY_HANDOUT_BUCKET_SIZE`    | 20       | one-time prekeys of one identity handed out in a burst |
 | `RELAY_HANDOUT_REFILL_SECONDS` | 300      | the time in which one handout token returns        |
+| `RELAY_BLOB_MAX_BYTES`         | 104883216 | the largest blob, announced in LoggedIn           |
+| `RELAY_BLOB_QUOTA_BYTES`       | 268435456 | blob bytes held for one uploader                  |
+| `RELAY_BLOB_TTL_SECONDS`       | 3196800  | the time after its last write at which a blob expires |
 
-A Send into a full queue gets `QUEUE_FULL`, a frame over its bucket gets `RATE_LIMITED`
-and the connection stays open, and a fetch over the handout bucket gets the bundle without
+A Send into a full queue gets `QUEUE_FULL`, a StartBlob over the quota gets `QUOTA_FULL`,
+a frame over its bucket gets `RATE_LIMITED` and the connection stays open, and a fetch over the handout bucket gets the bundle without
 a one-time prekey. The buckets live in the memory of the process: a restart fills them.
 
 `RELAY_METRICS_PORT` turns on a second listener, on `RELAY_HOST`, that answers `/metrics`
 with totals of the process in the Prometheus text format: open connections, logins, frames
 by type and answer, messages stored, delivered, acked and expired, bundle fetches with and
-without a one-time prekey, refusals by limit and the size of the database. No value names
+without a one-time prekey, blobs started, completed, deleted and expired, blob bytes
+stored, fetched and held, refusals by limit and the size of the database. No value names
 an identity, but the counts of traffic are metadata: keep the port private. A reverse
 proxy in front of the relay forwards the WebSocket port only, and `compose.yaml` publishes
 the metrics port on `127.0.0.1` only. The WebSocket port answers `404` for `/metrics`. The
@@ -193,10 +198,11 @@ the committed files differ.
 `scripts/stand.sh <project>` builds the image, starts the relay with Docker Compose under
 that project name and runs the tests marked `stand` against it. It restarts the relay
 and runs the tests marked `stand_after_restart`, which fetch a bundle uploaded and receive
-a message sent before the restart. It then checks that the
+a message sent before the restart, and finish an upload of a blob that the restart cut in
+the middle. It then checks that the
 container runs as a non-root user and exits with 0 on stop, and removes the stand.
 Before the restart it reads `/metrics` on `127.0.0.1` and checks that a stored message
-was counted. `RELAY_PORT` moves the published port off 8765, and `RELAY_METRICS_PORT`
+and a started blob were counted. `RELAY_PORT` moves the published port off 8765, and `RELAY_METRICS_PORT`
 moves the published metrics port off `RELAY_PORT` plus 1000.
 
 ## License
