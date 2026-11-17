@@ -10,18 +10,41 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 
 from sotto.client.envelope import (
+    BLOB_ID_LENGTH,
     VERSION,
     BadContentError,
     BadPaddingError,
     UnknownContentError,
-    decode_text,
+    decode_content,
+    encode_attachment,
     encode_text,
     parse_envelope,
 )
-from sotto.client.store import Identity, OutboxRow, Store, StoredSession, StoredSignedPrekey
+from sotto.client.files import save_file
+from sotto.client.store import (
+    FileRow,
+    Identity,
+    OutboxRow,
+    Store,
+    StoredSession,
+    StoredSignedPrekey,
+    UploadRow,
+)
 from sotto.crypto import ratchet, x3dh
+from sotto.crypto.blob import (
+    BLOB_NONCE_LENGTH,
+    FILE_KEY_LENGTH,
+    MAX_FILE_BYTES,
+    BadBlobError,
+    blob_length,
+    digest_of,
+    encrypt_blob,
+    open_blob,
+)
 from sotto.crypto.identity import (
     KEY_LENGTH,
     NONCE_LENGTH,
@@ -41,7 +64,7 @@ from sotto.crypto.identity import (
 )
 from sotto.crypto.ratchet import MESSAGE_NONCE_LENGTH, DecryptFailedError, RatchetState
 from sotto.crypto.x3dh import BadInitialHeaderError
-from sotto.proto.sotto_pb2 import InitialHeader, Login, PeerMessage
+from sotto.proto.sotto_pb2 import Attachment, InitialHeader, Login, PeerMessage
 
 MESSAGE_ID_LENGTH = 16
 SEEN_ID_SECONDS = 3196800
@@ -50,6 +73,7 @@ SIGNED_PREKEY_GRACE_SECONDS = 3196800
 ONE_TIME_PREKEY_REFILL_BELOW = 50
 ONE_TIME_PREKEY_CAP = 100
 ONE_TIME_PREKEY_HELD_MAX = 1000
+BLOB_GONE = "BLOB_GONE"
 
 type RandomBytes = Callable[[int], bytes]
 type Clock = Callable[[], float]
@@ -79,6 +103,27 @@ class UnknownOneTimePrekeyError(CryptoError):
     result = "UNKNOWN_ONE_TIME_PREKEY"
 
 
+class FilesUnsupportedError(CryptoError):
+    result = "FILES_UNSUPPORTED"
+
+
+class FileTooLargeError(CryptoError):
+    result = "FILE_TOO_LARGE"
+
+
+class FileState(StrEnum):
+    """The states of a file of section 33.5, as the store keeps them."""
+
+    SENDING = "sending"
+    SENT = "sent"
+    NOT_SENT = "not sent"
+    OFFERED = "offered"
+    RECEIVING = "receiving"
+    RECEIVED = "received"
+    NOT_RECEIVED = "could not be received"
+    NOT_AVAILABLE = "not available"
+
+
 class OwnIdentityError(ValueError):
     """The id of the client's own identity is never a contact (section 16.1)."""
 
@@ -94,7 +139,8 @@ class Delivered:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Received:
-    """What a Deliver gives: a text to show, or the named result of section 24.2.
+    """What a Deliver gives: a text or an attachment to show, or the named result of
+    section 24.2.
 
     `missing` is the GAP of section 20.3: the messages of the sender that can never be read,
     counted by the skipped keys that this message removed without use.
@@ -104,6 +150,7 @@ class Received:
     text: str | None
     result: str | None
     missing: int = 0
+    attachment: Attachment | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -113,6 +160,15 @@ class Outgoing:
     message_id: bytes
     recipient: bytes
     payload: bytes
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Sealed:
+    """A message encrypted on the head session of a contact, not yet committed."""
+
+    outgoing: Outgoing
+    session_id: int
+    state: RatchetState
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -327,38 +383,159 @@ class Client:
             CryptoError: START failed with the result that it names.
             ValueError: The contact has no session and no bundle was given.
         """
-        padded_plaintext = encode_text(text)
+        sealed = self._seal(contact, encode_text(text), bundle)
+        message_id = sealed.outgoing.message_id
+        with self.store.transaction():
+            self._commit_sealed(sealed)
+            self.store.log_message(contact, direction="out", message_id=message_id, text=text)
+        return sealed.outgoing
+
+    def check_file(self, contact: bytes, size: int, *, blob_max_bytes: int) -> None:
+        """The checks of section 33.1, in their order.
+
+        Raises:
+            NotAContactError: The identity is not a contact.
+            FilesUnsupportedError: The relay announced no blob frames.
+            FileTooLargeError: The file or its blob is longer than the limits allow.
+        """
         if not self.store.is_contact(contact):
             raise NotAContactError("the identity is not a contact")
-        if not self.has_session(contact):
-            if bundle is None:
-                raise ValueError("a contact without a session needs a fetched bundle")
-            self.start_session(contact, bundle)
+        if blob_max_bytes == 0:
+            raise FilesUnsupportedError("the relay announced no blob frames")
+        is_above_the_largest_file = size > MAX_FILE_BYTES
+        is_above_the_relay = blob_length(size) > blob_max_bytes
+        if is_above_the_largest_file or is_above_the_relay:
+            raise FileTooLargeError(f"a file of {size} bytes is above the limits")
 
-        session = self.store.sessions(contact)[0]
-        message_id = self.random_bytes(MESSAGE_ID_LENGTH)
-        encrypted = ratchet.encrypt(
-            session.state,
-            padded_plaintext,
-            associated_data=session.associated_data + message_id,
-            nonce=self.random_bytes(MESSAGE_NONCE_LENGTH),
+    def start_upload(
+        self,
+        contact: bytes,
+        file: bytes,
+        *,
+        blob_max_bytes: int,
+        file_name: str = "",
+        media_type: str = "",
+        caption: str = "",
+    ) -> UploadRow:
+        """Steps 1 and 2 of section 33.2: the checks, the blob and the upload, committed.
+
+        Raises:
+            NotAContactError, FilesUnsupportedError, FileTooLargeError: A check of 33.1.
+            ValueError: A name, media type or caption is beyond its limit of 32.1.
+        """
+        self.check_file(contact, len(file), blob_max_bytes=blob_max_bytes)
+        blob_id = self.random_bytes(BLOB_ID_LENGTH)
+        file_key = self.random_bytes(FILE_KEY_LENGTH)
+        blob = encrypt_blob(
+            file, file_key=file_key, nonce=self.random_bytes(BLOB_NONCE_LENGTH)
         )
-        envelope = PeerMessage(
-            version=VERSION, header=encrypted.header, ciphertext=encrypted.ciphertext
+        attachment = Attachment(
+            blob_id=blob_id,
+            key=file_key,
+            size=len(file),
+            digest=digest_of(blob),
+            media_type=media_type,
+            file_name=file_name,
+            caption=caption,
         )
-        if session.initial_header is not None:
-            envelope.initial_header.MergeFromString(session.initial_header)
-        outgoing = Outgoing(
-            message_id=message_id, recipient=contact, payload=envelope.SerializeToString()
-        )
+        encode_attachment(attachment)
 
         with self.store.transaction():
-            self.store.advance_session(session.session_id, encrypted.state)
-            self.store.add_to_outbox(
-                OutboxRow(message_id=message_id, recipient=contact, payload=outgoing.payload)
+            self.store.add_upload(blob_id, contact=contact, attachment=attachment, blob=blob)
+        return UploadRow(
+            blob_id=blob_id, contact=contact, attachment=attachment, length=len(blob)
+        )
+
+    def uploads(self) -> list[UploadRow]:
+        return self.store.uploads()
+
+    def read_upload(self, blob_id: bytes, offset: int, length: int) -> bytes:
+        return self.store.read_upload(blob_id, offset, length)
+
+    def send_attachment(self, upload: UploadRow, *, bundle: Bundle | None = None) -> Outgoing:
+        """Step 5 of section 33.2: SEND of the attachment, which deletes the upload.
+
+        Raises:
+            NotAContactError: The identity is no longer a contact.
+            CryptoError: START failed with the result that it names.
+            ValueError: The contact has no session and no bundle was given.
+        """
+        sealed = self._seal(upload.contact, encode_attachment(upload.attachment), bundle)
+        with self.store.transaction():
+            self._commit_sealed(sealed)
+            self.store.delete_upload(upload.blob_id)
+            self.store.add_file(
+                upload.contact,
+                incoming=False,
+                message_id=sealed.outgoing.message_id,
+                attachment=upload.attachment,
+                state=FileState.SENDING,
             )
-            self.store.log_message(contact, direction="out", message_id=message_id, text=text)
-        return outgoing
+        return sealed.outgoing
+
+    def give_up_upload(self, blob_id: bytes) -> None:
+        """Deletes an upload that is not sent and saves the DeleteBlob of its blob."""
+        with self.store.transaction():
+            self.store.delete_upload(blob_id)
+            self.store.add_blob_deletion(self.identity_key, blob_id)
+
+    def downloads(self) -> list[FileRow]:
+        """The received files whose blob is not downloaded yet, offered or receiving."""
+        waiting = (FileState.OFFERED, FileState.RECEIVING)
+        return [row for row in self.store.files() if row.incoming and row.state in waiting]
+
+    def begin_download(self, position: int) -> None:
+        """Makes room for the blob of a received file in the store (section 33.3)."""
+        file = self._file(position)
+        with self.store.transaction():
+            length = blob_length(file.attachment.size)
+            self.store.begin_download(position, FileState.RECEIVING, length)
+
+    def save_download_piece(self, position: int, data: bytes) -> None:
+        """Saves bytes of a blob at its held length together with the new length."""
+        with self.store.transaction():
+            self.store.add_download_piece(position, data)
+
+    def finish_download(self, position: int, folder: Path) -> Path:
+        """Step 4 of section 33.3: opens the blob, writes the file into the folder, drops
+        the downloaded bytes and saves the DeleteBlob of the blob.
+
+        Raises:
+            BadBlobError: The blob does not open (section 29.7); nothing is written.
+        """
+        file = self._file(position)
+        attachment = file.attachment
+        data = open_blob(
+            self.store.downloaded(position),
+            file_key=attachment.key,
+            size=attachment.size,
+            digest=attachment.digest,
+        )
+        path = save_file(folder, attachment.file_name, data)
+        with self.store.transaction():
+            self.store.set_file_state(position, FileState.RECEIVED, saved_as=str(path))
+            self.store.add_blob_deletion(file.contact, attachment.blob_id)
+        return path
+
+    def fail_download(self, position: int, result: str) -> FileState:
+        """Steps 5 and 6 of section 33.3: drops the downloaded bytes, and a BAD_BLOB also
+        saves the DeleteBlob of the blob; returns the state that the file takes."""
+        file = self._file(position)
+        state = FileState.NOT_AVAILABLE if result == BLOB_GONE else FileState.NOT_RECEIVED
+        with self.store.transaction():
+            self.store.set_file_state(position, state)
+            if result == BadBlobError.result:
+                self.store.add_blob_deletion(file.contact, file.attachment.blob_id)
+        return state
+
+    def blob_deletions(self) -> list[tuple[bytes, bytes]]:
+        """The DeleteBlob frames still to send, as (uploader, blob id)."""
+        return self.store.blob_deletions()
+
+    def confirm_blob_deletion(self, uploader: bytes, blob_id: bytes) -> None:
+        """Forgets a DeleteBlob that the relay handled (section 33.2, last paragraph)."""
+        with self.store.transaction():
+            self.store.delete_blob_deletion(uploader, blob_id)
 
     def outbox(self) -> list[Outgoing]:
         """The Sends that the relay has not confirmed, to be sent again as they are."""
@@ -367,15 +544,27 @@ class Client:
             for row in self.store.outbox()
         ]
 
-    def confirm_stored(self, message_id: bytes) -> None:
-        """Removes the outbox row of a Send that the relay answered with Stored."""
+    def confirm_stored(self, message_id: bytes) -> FileRow | None:
+        """Removes the outbox row of a Send that the relay answered with Stored; a file
+        that the message carries counts as sent (section 33.2, step 6) and is returned."""
+        file = self.store.file_of_message(message_id)
         with self.store.transaction():
             self.store.remove_from_outbox(message_id)
+            if file is not None:
+                self.store.set_file_state(file.position, FileState.SENT)
+        return file
 
-    def drop_refused_send(self, message_id: bytes) -> None:
-        """Removes the outbox row of a Send that the relay refused with an action Stop."""
+    def drop_refused_send(self, message_id: bytes) -> FileRow | None:
+        """Removes the outbox row of a Send that the relay refused with an action Stop; a
+        file that the message carries is not sent, and the DeleteBlob of its blob is saved
+        (section 33.2). The file is returned."""
+        file = self.store.file_of_message(message_id)
         with self.store.transaction():
             self.store.remove_from_outbox(message_id)
+            if file is not None:
+                self.store.set_file_state(file.position, FileState.NOT_SENT)
+                self.store.add_blob_deletion(self.identity_key, file.attachment.blob_id)
+        return file
 
     def receive(self, delivered: Delivered) -> Received:
         """Runs the row of section 20.2 that a Deliver falls into.
@@ -464,7 +653,7 @@ class Client:
             signed_prekey_private_key=signed_prekey_private_key,
         )
         decrypted = self._decrypt_state(state, agreement.associated_data, delivered, envelope)
-        text, result = _read_content(decrypted.padded_plaintext)
+        text, attachment, result = _read_content(decrypted.padded_plaintext)
 
         with self.store.transaction():
             session_id = self.store.add_session(
@@ -484,25 +673,98 @@ class Client:
                 self.store.delete_one_time_prekey(one_time_prekey_id)
             if pin is None:
                 self.store.set_pin(delivered.sender, initial_header.identity_dh_key)
-            self._save_received(delivered, text)
-        return Received(ack=True, text=text, result=result, missing=decrypted.purged + dropped)
+            self._save_received(delivered, text, attachment)
+        return Received(
+            ack=True,
+            text=text,
+            result=result,
+            missing=decrypted.purged + dropped,
+            attachment=attachment,
+        )
 
     def _accept(
         self, delivered: Delivered, session: StoredSession, decrypted: ratchet.Decrypted
     ) -> Received:
         """ACCEPT of section 20.3."""
-        text, result = _read_content(decrypted.padded_plaintext)
+        text, attachment, result = _read_content(decrypted.padded_plaintext)
         with self.store.transaction():
             self.store.accept_on_session(session.session_id, decrypted.state)
-            self._save_received(delivered, text)
-        return Received(ack=True, text=text, result=result, missing=decrypted.purged)
+            self._save_received(delivered, text, attachment)
+        return Received(
+            ack=True,
+            text=text,
+            result=result,
+            missing=decrypted.purged,
+            attachment=attachment,
+        )
 
-    def _save_received(self, delivered: Delivered, text: str | None) -> None:
+    def _save_received(
+        self, delivered: Delivered, text: str | None, attachment: Attachment | None
+    ) -> None:
         self.store.add_seen_id(delivered.sender, delivered.message_id, seen_at=self.now())
         if text is not None:
             self.store.log_message(
                 delivered.sender, direction="in", message_id=delivered.message_id, text=text
             )
+        if attachment is not None:
+            self.store.add_file(
+                delivered.sender,
+                incoming=True,
+                message_id=delivered.message_id,
+                attachment=attachment,
+                state=FileState.OFFERED,
+            )
+
+    def _seal(self, contact: bytes, padded_plaintext: bytes, bundle: Bundle | None) -> _Sealed:
+        """L1 of section 20.2 up to the commit: START when the contact has no session.
+
+        Raises:
+            NotAContactError: The identity is not a contact.
+            CryptoError: START failed with the result that it names.
+            ValueError: The contact has no session and no bundle was given.
+        """
+        if not self.store.is_contact(contact):
+            raise NotAContactError("the identity is not a contact")
+        if not self.has_session(contact):
+            if bundle is None:
+                raise ValueError("a contact without a session needs a fetched bundle")
+            self.start_session(contact, bundle)
+
+        session = self.store.sessions(contact)[0]
+        message_id = self.random_bytes(MESSAGE_ID_LENGTH)
+        encrypted = ratchet.encrypt(
+            session.state,
+            padded_plaintext,
+            associated_data=session.associated_data + message_id,
+            nonce=self.random_bytes(MESSAGE_NONCE_LENGTH),
+        )
+        envelope = PeerMessage(
+            version=VERSION, header=encrypted.header, ciphertext=encrypted.ciphertext
+        )
+        if session.initial_header is not None:
+            envelope.initial_header.MergeFromString(session.initial_header)
+        outgoing = Outgoing(
+            message_id=message_id, recipient=contact, payload=envelope.SerializeToString()
+        )
+        return _Sealed(outgoing=outgoing, session_id=session.session_id, state=encrypted.state)
+
+    def _commit_sealed(self, sealed: _Sealed) -> None:
+        """The chain advance and the outbox row of SEND, inside the caller's transaction."""
+        outgoing = sealed.outgoing
+        self.store.advance_session(sealed.session_id, sealed.state)
+        self.store.add_to_outbox(
+            OutboxRow(
+                message_id=outgoing.message_id,
+                recipient=outgoing.recipient,
+                payload=outgoing.payload,
+            )
+        )
+
+    def _file(self, position: int) -> FileRow:
+        file = self.store.file(position)
+        if file is None:
+            raise ValueError(f"the store holds no file at position {position}")
+        return file
 
     def _decrypt(
         self, session: StoredSession, delivered: Delivered, envelope: PeerMessage
@@ -597,9 +859,15 @@ def _check_initial_header(
         raise IdentityKeyMismatchError("the initial header carries another X25519 key")
 
 
-def _read_content(padded_plaintext: bytes) -> tuple[str | None, str | None]:
-    """The text of a message that decrypted, or the result that it has none (20.3)."""
+def _read_content(
+    padded_plaintext: bytes,
+) -> tuple[str | None, Attachment | None, str | None]:
+    """The text or the attachment of a message that decrypted, or the result that it has
+    neither (20.3)."""
     try:
-        return decode_text(padded_plaintext), None
+        content = decode_content(padded_plaintext)
     except (BadPaddingError, BadContentError, UnknownContentError) as error:
-        return None, error.result
+        return None, None, error.result
+    if isinstance(content, str):
+        return content, None, None
+    return None, content, None

@@ -19,10 +19,9 @@ protocol: a peer, the device with its store, and what the keys of a session cove
 - "The relay" in the lists below is whoever controls the relay. The rules of the protocol
   describe the relay of this repository, run unchanged; they bind that code and not the
   person who runs it.
-- Files rest on part 3 of the protocol (section 28.3). The relay of this repository
-  serves its blob frames and what this document says of the relay and files cites tests;
-  the client half of part 3 is written before its code, and what this document says of
-  a client and files cites none.
+- Files rest on part 3 of the protocol (section 28.3). The relay and the command-line
+  client of this repository implement it, and what this document says of files cites
+  tests like the rest.
 
 ## The attackers
 
@@ -234,7 +233,13 @@ Whoever controls the relay can do all of this, and no rule of the protocol stops
   included; answer BlobStored for bytes it did not keep; refuse an upload with a false
   QUOTA_FULL or BLOB_TOO_LARGE, or claim that it serves no blob frames. The sender then
   reports the file as not sent, or the recipient as not received or not available
-  (protocol, section 33.5). Keep a blob after it was deleted, for as long as it likes.
+  (protocol, section 33.5)
+  [test: tests/client/test_files.py::test_refused_upload_is_not_sent_and_its_blob_is_deleted]
+  [test: tests/client/test_files.py::test_stored_length_above_the_blob_ends_the_upload_as_bad_blob]
+  [test: tests/client/test_files.py::test_altered_or_truncated_blob_could_not_be_received_and_writes_nothing]
+  [test: tests/client/test_files.py::test_expired_blob_is_not_available_and_its_message_stays]
+  [test: tests/client/test_files.py::test_transfers_end_when_a_later_login_announces_no_blobs]. Keep a blob after it
+  was deleted, for as long as it likes.
 
 What it cannot do:
 
@@ -279,7 +284,10 @@ What it cannot do:
   fields travel only inside a message of the ratchet (protocol, section 32). Make a
   client accept bytes that the sender did not encrypt as the file: the length, the
   SHA-256 digest of the blob and the tag of every chunk refuse them, and a client shows
-  no byte of a file before all of them passed (protocol, section 29.7).
+  no byte of a file before all of them passed (protocol, section 29.7)
+  [test: tests/client/test_files.py::test_altered_or_truncated_blob_could_not_be_received_and_writes_nothing]
+  [test: tests/client/test_files.py::test_blob_whose_chunk_does_not_open_under_its_digest_writes_nothing]
+  [test: tests/crypto/test_blob_vectors.py::test_negative_vectors_raise_their_named_error].
 
 ## Not protected
 
@@ -396,8 +404,10 @@ its id.
   section 20.6). The user sees the failures; the protocol does not say why they happen.
 - A file is whatever the peer sent. Its name, media type, size of an image, thumbnail and
   caption are the peer's choice, and nothing binds them to the file: a thumbnail can show
-  another picture than the file. A client never lets the name choose a folder and never
-  opens or runs a received file by itself (protocol, section 32.2). A contact can send
+  another picture than the file. A client never lets the name choose a folder or write
+  over a file (protocol, section 32.2)
+  [test: tests/client/test_files.py::test_received_name_never_picks_a_folder_or_overwrites_a_file], and the client of
+  this repository opens and runs no received file at all. A contact can send
   files of up to MAX_FILE_BYTES each, as many as its quota at the relay allows; what a
   client downloads without the user's request is the client's choice.
 - An identity that is not a contact is no peer. Its messages are dropped before a byte of

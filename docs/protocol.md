@@ -36,9 +36,8 @@ the attachment of a message and the rules of a client around them (section 28).
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee of parts 1 and 2 carries a citation (section 2.6), which names the test
-  that holds it, and so does every rule of the relay in part 3. The rules of a client in
-  part 3 are written before their code and carry none (section 28.3).
+- Every guarantee of parts 1, 2 and 3 carries a citation (section 2.6), which names the
+  test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
 
@@ -1746,8 +1745,10 @@ of their objects
 [test: tests/crypto/test_identity_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document].
 The second is `vectors/x3dh.json`, whose operations section 15.6 names, and the third
 `vectors/ratchet.json`, whose operations section 15.7 names. Section 24.3 says what the
-vectors of the key agreement and of the ratchet record. Part 3 adds a fourth file,
-`vectors/blob.json`, with its code; section 34 names its operations.
+vectors of the key agreement and of the ratchet record. The fourth is `vectors/blob.json`
+of part 3, whose operations section 34 names
+[test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_blob_vectors.py::test_negative_vectors_raise_their_named_error].
 
 ### 15.2 The schema of a vector file
 
@@ -3663,11 +3664,10 @@ Part 3 changes neither version number of section 1.3.
 
 ### 28.3 Status of part 3
 
-The relay of this repository serves the blob frames, and the rules of the relay in
-sections 30 and 31 carry citations like the rules of part 1. The rest of part 3, the blob
-cipher, the attachment and the rules of a client (sections 29 and 32 to 34), is written
-before its code: it carries no citation (section 1.2), and no test of this repository runs
-the blob cipher or an attachment.
+The relay of this repository serves the blob frames (sections 30 and 31), and its
+command-line client implements the blob cipher, the attachment and the rules of a client
+(sections 29 and 32 to 34). Every rule of part 3 carries a citation like the rules of
+parts 1 and 2 (section 1.2).
 
 ### 28.4 Terms
 
@@ -3692,8 +3692,10 @@ age header. The file is padded before it is encrypted (section 29.2). Section 25
 every difference from the age format with its reason.
 
 An encryption takes the file, a file key of 16 random bytes and a nonce of 16 random
-bytes. A client makes a new file key and a new nonce for every blob. It MUST NOT use a
-file key or a nonce for a second blob, the same file sent again included.
+bytes [test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte]. A client makes a new file key
+and a new nonce for every blob. It MUST NOT use a file key or a nonce for a second blob,
+the same file sent again included
+[test: tests/client/test_files.py::test_same_file_sent_twice_gets_a_new_blob_id_key_and_nonce].
 
 ### 29.2 Padding
 
@@ -3709,7 +3711,9 @@ m = 2^z - 1
 P = (L + m) AND NOT m
 ```
 
-The plaintext M of the cipher is the file followed by P - size bytes `00`.
+The plaintext M of the cipher is the file followed by P - size bytes `00`
+[test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_blob.py::test_padded_lengths_are_the_table_of_section_29_2].
 
 | `size`    | P         |
 |-----------|-----------|
@@ -3724,15 +3728,17 @@ The plaintext M of the cipher is the file followed by P - size bytes `00`.
 
 - P is at least 256 and never less than `size`. For a file of 256 bytes or more, P - size
   is less than size / 16: the last z bits of P are zero, and z is less than E by S, which
-  is at least 4.
+  is at least 4 [test: tests/crypto/test_blob.py::test_padding_is_at_least_the_minimum_and_below_a_sixteenth].
 - Between 2^E and 2^(E+1) lie 2^S padded lengths: 16 for E from 8 to 15, 32 for E from
   16 to 26. The relay learns which of them a file has and nothing finer.
 - MAX_FILE_BYTES, 104857600, is its own padded length, and the next size gives 106954752:
-  a file of more than MAX_FILE_BYTES is not sent (section 33.1).
+  a file of more than MAX_FILE_BYTES is not sent (section 33.1)
+  [test: tests/crypto/test_blob.py::test_file_above_the_largest_is_not_encrypted].
 
 ### 29.3 The payload key
 
-The payload key is one call of HKDF (RFC 5869):
+The payload key is one call of HKDF (RFC 5869)
+[test: tests/crypto/test_blob_vectors.py::test_intermediates_are_the_values_of_the_core]:
 
 | Parameter          | Value                                              |
 |--------------------|----------------------------------------------------|
@@ -3751,7 +3757,8 @@ with `derive(file_key)` in the Python package cryptography and
 M is cut into chunks of STREAM_CHUNK_BYTES, 65536 bytes. Chunk i, counted from 0, is the
 bytes 65536 * i to 65536 * (i + 1) - 1 of M. There are n = ceil(P / 65536) chunks, and the
 last one, number n - 1, holds what is left: 1 to 65536 bytes. M has at least 256 bytes,
-so no chunk is empty.
+so no chunk is empty [test: tests/crypto/test_blob_vectors.py::test_intermediates_are_the_values_of_the_core]
+[test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte].
 
 Chunk i is sealed with ChaCha20-Poly1305 (RFC 8439 section 2.8) under the payload key,
 with no associated data, and with this nonce of 12 bytes:
@@ -3775,7 +3782,8 @@ package cryptography and `ChaChaPoly.seal(_:using:nonce:)` in CryptoKit, whose
 | 16 + 65552 * i      | 65552             | Sealed chunk i, for every chunk but the last |
 | 16 + 65552 * (n - 1) | 16 + the length of the last chunk | Sealed chunk n - 1        |
 
-The length of the blob is B = 16 + P + 16 * n.
+The length of the blob is B = 16 + P + 16 * n
+[test: tests/crypto/test_blob.py::test_blob_lengths_are_the_table_of_section_29_5].
 
 | `size`    | P         | n    | B         |
 |-----------|-----------|------|-----------|
@@ -3788,13 +3796,16 @@ The length of the blob is B = 16 + P + 16 * n.
 
 The digest of a blob is SHA-256 (RFC 6234) of its B bytes, 32 bytes. The calls are
 `hashlib.sha256` of the Python standard library and `SHA256.hash(data:)` in CryptoKit.
-The digest travels in the attachment, inside a message of the ratchet (section 32).
+The digest travels in the attachment, inside a message of the ratchet (section 32)
+[test: tests/crypto/test_blob_vectors.py::test_positive_vectors_replay_byte_for_byte].
 
 ### 29.7 Opening a blob
 
 A client opens a blob from the bytes it fetched and the `key`, `size` and `digest` of the
 attachment. The opening succeeds when all six steps hold. When one fails, the result is
-BAD_BLOB, whichever step a client runs first:
+BAD_BLOB, whichever step a client runs first
+[test: tests/crypto/test_blob_vectors.py::test_negative_vectors_raise_their_named_error]
+[test: tests/crypto/test_blob_vectors.py::test_negative_vector_at_the_chunks_has_its_length_and_its_own_digest]:
 
 1. The number of bytes is B for the P of `size` (sections 29.2 and 29.5).
 2. SHA-256 of the bytes is `digest`.
@@ -3806,7 +3817,9 @@ BAD_BLOB, whichever step a client runs first:
 6. The file is the first `size` bytes of M.
 
 A client MAY open chunks as they arrive, as the age format allows, but it shows and saves
-no byte as the file before all six steps passed. A blob that fails leaves nothing.
+no byte as the file before all six steps passed. A blob that fails leaves nothing
+[test: tests/client/test_files.py::test_altered_or_truncated_blob_could_not_be_received_and_writes_nothing]
+[test: tests/client/test_files.py::test_blob_whose_chunk_does_not_open_under_its_digest_writes_nothing].
 
 What the steps catch. The relay holds no key, so it cannot make a chunk that opens. A
 chunk that is dropped, repeated, moved or cut fails at its nonce and its tag, and a blob
@@ -4164,14 +4177,17 @@ The `Attachment` message is listed in section 19.1. It is the `attachment` membe
 
 - The uploader of the blob is the `sender` of the Deliver that carries the attachment,
   and no field names it, for the reason of section 16.7. A client fetches the blob with
-  that `sender` as `uploader`.
-- The key of a blob travels only in this message.
+  that `sender` as `uploader`
+  [test: tests/client/test_files.py::test_file_of_four_pieces_is_received_byte_for_byte_and_its_blob_is_deleted].
+- The key of a blob travels only in this message. A client sends no field beyond its
+  limit [test: tests/client/test_envelope.py::test_attachment_beyond_a_limit_of_section_32_1_is_not_encoded].
 
 ### 32.2 The receiver's checks
 
 After a message decrypted and its plaintext parsed as a `Content` with an `attachment`
 (section 19.5), the result is BAD_CONTENT when `blob_id` is not 16 bytes, `key` is not 16
-bytes, `digest` is not 32 bytes or `size` is more than MAX_FILE_BYTES. The strings and the
+bytes, `digest` is not 32 bytes or `size` is more than MAX_FILE_BYTES
+[test: tests/client/test_envelope.py::test_received_attachment_that_breaks_section_32_2_is_bad_content]. The strings and the
 thumbnail have no limit of the receiver's own: the largest frame bounds them, as it bounds
 a text (section 19.7).
 
@@ -4182,20 +4198,26 @@ the name, the size of the image, the thumbnail or the caption to the file:
   folder that it chose, under a name of at most MAX_FILE_NAME_BYTES bytes that holds no
   `/`, no `\`, no byte `00`, no C0 or C1 control character and no bidirectional control
   character (the characters that section 19.5 escapes) and that is neither empty nor `.`
-  nor `..`. A name that breaks this is replaced by a name of the client's own.
+  nor `..`. A name that breaks this is replaced by a name of the client's own
+  [test: tests/client/test_received_files.py::test_name_that_breaks_section_32_2_is_replaced]
+  [test: tests/client/test_received_files.py::test_name_within_section_32_2_is_kept]
+  [test: tests/client/test_files.py::test_received_name_never_picks_a_folder_or_overwrites_a_file].
 - A client never writes a received file over a file that is already there. When the
-  name is taken, it writes the file under another name.
+  name is taken, it writes the file under another name
+  [test: tests/client/test_received_files.py::test_saved_file_takes_a_free_name_and_never_follows_a_link]
+  [test: tests/client/test_files.py::test_received_name_never_picks_a_folder_or_overwrites_a_file].
 - A client does not open or run a received file by itself, whatever its media type or
   name. It opens a file only when the user asks.
 - The thumbnail can show another picture than the file. A thumbnail that does not decode
   as a JPEG image is not shown.
 - `file_name`, `media_type` and `caption` are texts of the peer (section 19.5). The
-  command-line client escapes their control characters as it does for a text.
+  command-line client escapes their control characters as it does for a text
+  [test: tests/client/test_cli.py::test_peer_file_name_and_caption_are_printed_with_control_characters_escaped].
 
 ### 32.3 Lengths
 
 The longest attachment within the limits of section 32.1 makes a `Content` of 20965
-bytes, far below the 65023 bytes of the longest text (section 19.7). It so fits a message
+bytes [test: tests/client/test_envelope.py::test_longest_attachment_is_the_content_of_section_32_3_and_decodes], far below the 65023 bytes of the longest text (section 19.7). It so fits a message
 whatever the state of the session.
 
 | Part                                                          | Bytes |
@@ -4216,7 +4238,10 @@ whatever the state of the session.
 ### 33.1 Before a file is sent
 
 A client runs these checks before it makes a key or a blob. The first that fails ends
-the sending with its result, and nothing else is done:
+the sending with its result, and nothing else is done
+[test: tests/client/test_files.py::test_checks_before_a_file_run_in_the_order_of_section_33_1]
+[test: tests/client/test_files.py::test_file_too_large_is_not_sent_and_sends_no_blob_frame]
+[test: tests/client/test_files.py::test_relay_that_announces_no_blobs_gets_no_blob_frame]:
 
 1. The identity is a contact. Otherwise the result is NOT_A_CONTACT, as for a text
    (section 20.2, L1).
@@ -4236,32 +4261,37 @@ section 32.1.
    saves an upload: the blob id, the contact, the bytes of the blob and the fields of the
    attachment. From then on it sends those bytes. It never reads the file again and never
    encrypts it a second time, so a file that changes or goes away does not change the
-   upload.
+   upload [test: tests/client/test_files.py::test_client_restarted_in_the_middle_of_an_upload_and_of_a_download].
 3. It sends StartBlob with the blob id, the contact and B. The BlobStored gives the
    stored length s.
 4. While s is less than B, it sends PutBlob with `offset` s and the next bytes of the
    blob, BLOB_CHUNK_BYTES or fewer, and takes the `stored_length` of each BlobStored as
    the new s. A BlobStored with a smaller length than the client expected means that a
-   PutBlob stored nothing, and the client goes on from that length.
+   PutBlob stored nothing, and the client goes on from that length
+   [test: tests/client/test_files.py::test_upload_cut_in_the_middle_goes_on_from_the_stored_length].
 5. When a BlobStored says that s is B, the client sends the message: the action SEND of
    section 20.3 with a `Content` whose `attachment` holds the fields of the upload, after
    START when the contact has no session (section 20.2, L1). The transaction of SEND also
-   deletes the upload with its bytes.
+   deletes the upload with its bytes [test: tests/client/test_files.py::test_file_of_four_pieces_is_received_byte_for_byte_and_its_blob_is_deleted].
 6. The file counts as sent when the relay answers the Send of the message with Stored
-   (section 22.2).
+   (section 22.2) [test: tests/client/test_files.py::test_file_of_four_pieces_is_received_byte_for_byte_and_its_blob_is_deleted].
 
 The answers to the blob frames:
 
 - RATE_LIMITED and STORAGE_FULL: the client sends the frame again after the wait of Back
   off (section 23.5).
 - NOT_FOUND to a PutBlob: the blob expired or was lost at the relay. The client goes back
-  to step 3, and the upload starts again from 0 with the same bytes and the same blob id.
+  to step 3, and the upload starts again from 0 with the same bytes and the same blob id
+  [test: tests/client/test_files.py::test_put_answered_not_found_starts_the_upload_again]
+  [test: tests/client/test_files.py::test_upload_whose_blob_expired_starts_again_from_0_with_the_same_blob].
 - UNKNOWN_RECIPIENT, QUOTA_FULL, BLOB_TOO_LARGE or a code the client does not know, and a
   START that fails: the file is not sent. The client deletes the upload, sends DeleteBlob
-  for the blob and reports the result. No message is sent.
+  for the blob and reports the result. No message is sent
+  [test: tests/client/test_files.py::test_refused_upload_is_not_sent_and_its_blob_is_deleted].
 - A user who cancels the sending before step 5 ends it in the same way, without a result.
 - When the Send of the message of a file ends with an Error whose action is Stop
-  (section 22.2), the client sends DeleteBlob for its blob.
+  (section 22.2), the client sends DeleteBlob for its blob
+  [test: tests/client/test_files.py::test_refused_message_of_a_file_deletes_its_blob].
 - While a frame waits after RATE_LIMITED or STORAGE_FULL, the client SHOULD hold back its
   StartBlob and PutBlob frames as well, as section 23.5 says for the other frames.
 - After an Error whose action is Back off, the BlobStored answers to the PutBlob frames
@@ -4269,45 +4299,63 @@ The answers to the blob frames:
   sends nothing for them: after the wait it sends the refused frame again and goes on
   from its answer.
 - A BlobStored whose `stored_length` is more than B ends the upload as not sent with the
-  result BAD_BLOB, and the client sends DeleteBlob.
+  result BAD_BLOB, and the client sends DeleteBlob
+  [test: tests/client/test_files.py::test_stored_length_above_the_blob_ends_the_upload_as_bad_blob].
 
 A client saves every DeleteBlob that it has to send and sends it again after every login
 until the relay answered a frame that the client sent after it on one connection: the
 relay handles the frames of a connection in order (section 7.4), and a DeleteBlob has no
-answer of its own.
+answer of its own
+[test: tests/client/test_files.py::test_delete_blob_is_sent_again_after_a_login_until_a_later_frame_is_answered].
 
 ### 33.3 Receiving
 
 1. A Deliver whose `Content` holds an `attachment` is an ACCEPT or an ACCEPT-NEW of
    section 20.3: the client saves the attachment with the message in the transaction of
    section 22.2 and acks after the commit. It shows the attachment at once: the
-   thumbnail, the name, the size and the caption.
+   thumbnail, the name, the size and the caption [test: tests/client/test_files.py::test_file_of_four_pieces_is_received_byte_for_byte_and_its_blob_is_deleted]
+   [test: tests/client/test_cli.py::test_file_sent_by_one_process_is_saved_by_the_chat_of_the_other].
 2. The client downloads the blob by itself or when the user asks; which is its own
    choice. A download holds the bytes of the blob received so far, h of them. The client
    sends FetchBlob with the `sender` of the Deliver as `uploader`, the `blob_id`, `offset`
    h and a `length` of BLOB_CHUNK_BYTES or fewer. Several FetchBlob frames on the way ask
    for ranges that follow each other without a gap. The client writes the `data` of each
    BlobData at h and saves the new h together with those bytes; it counts no byte that
-   it has not saved.
+   it has not saved [test: tests/client/test_files.py::test_download_cut_in_the_middle_goes_on_from_the_bytes_it_holds].
 3. A BlobData ends the download with BAD_BLOB when its `blob_id`, `uploader` or `offset`
    is not that of the FetchBlob it answers (section 7.4), when its `offset` is not h,
    when its `data` is longer than the `length` asked for or would end past B, and when
-   its `data` is shorter than asked for although it ends before B.
+   its `data` is shorter than asked for although it ends before B
+   [test: tests/client/test_files.py::test_altered_or_truncated_blob_could_not_be_received_and_writes_nothing].
 4. When h is B, the client opens the blob (section 29.7). When the opening succeeds, it
    saves the file and deletes the downloaded bytes in one transaction, and then sends
-   DeleteBlob. The file counts as received.
+   DeleteBlob. The file counts as received [test: tests/client/test_files.py::test_file_of_four_pieces_is_received_byte_for_byte_and_its_blob_is_deleted].
 5. With BAD_BLOB the client deletes the downloaded bytes, reports that the file could not
-   be received and sends DeleteBlob.
+   be received and sends DeleteBlob
+   [test: tests/client/test_files.py::test_altered_or_truncated_blob_could_not_be_received_and_writes_nothing].
 6. With NOT_FOUND the result is BLOB_GONE: the blob expired, was deleted or was never
    complete. The client deletes the downloaded bytes and reports that the file is not
-   available.
+   available [test: tests/client/test_files.py::test_expired_blob_is_not_available_and_its_message_stays].
 
-An attachment whose file fails is still a message: its thumbnail and caption stay.
+An attachment whose file fails is still a message: its thumbnail and caption stay
+[test: tests/client/test_files.py::test_expired_blob_is_not_available_and_its_message_stays].
+
+The client of this repository writes the file before the transaction of step 4. A client
+that stops between the two opens the blob again at its next start and writes it a second
+time under a free name: the file is never lost, and it can be there twice. A file that
+cannot be written, into a full disk or a folder it may not write, leaves no part of it
+behind and keeps the downloaded bytes, and the next login opens the blob again
+[test: tests/client/test_files.py::test_file_that_cannot_be_written_keeps_its_bytes_for_the_next_login].
 
 ### 33.4 Resume
 
 An upload and a download go on from where they stopped. Neither starts again from 0
-while the relay holds the blob.
+while the relay holds the blob
+[test: tests/client/test_files.py::test_upload_cut_in_the_middle_goes_on_from_the_stored_length]
+[test: tests/client/test_files.py::test_download_cut_in_the_middle_goes_on_from_the_bytes_it_holds]
+[test: tests/client/test_files.py::test_relay_restarted_in_the_middle_of_an_upload_and_of_a_download]
+[test: tests/client/test_files.py::test_client_restarted_in_the_middle_of_an_upload_and_of_a_download]
+[test: tests/client/test_files.py::test_file_half_uploaded_before_the_restart_is_sent_and_received_whole].
 
 | What happened                         | Upload                                                               | Download                                   |
 |---------------------------------------|----------------------------------------------------------------------|--------------------------------------------|
@@ -4318,9 +4366,14 @@ while the relay holds the blob.
 | A Back off code                       | The same frame after the wait (section 23.5)                         | No such code for a FetchBlob               |
 | A LoggedIn with a `blob_max_bytes` of 0, or below B | Not sent: FILES_UNSUPPORTED or FILE_TOO_LARGE. The client deletes the upload | Ends with FILES_UNSUPPORTED; the downloaded bytes are deleted |
 
+A LoggedIn with a `blob_max_bytes` of 0 ends the transfers as the last row says
+[test: tests/client/test_files.py::test_transfers_end_when_a_later_login_announces_no_blobs]. A download ends with
+FILES_UNSUPPORTED only on a `blob_max_bytes` of 0: a lower one bounds the blobs that the
+relay takes, not those it holds.
+
 An upload ends with the file sent or not sent with a result, and a download with the
-file received, BAD_BLOB or BLOB_GONE. While the client has no connection, a transfer
-waits and has not failed.
+file received, BAD_BLOB, BLOB_GONE or FILES_UNSUPPORTED. While the client has no
+connection, a transfer waits and has not failed.
 
 ### 33.5 What the user sees
 
@@ -4363,14 +4416,16 @@ The other four bound what a client sends.
 A client that implements part 3 keeps, besides what section 22.1 lists, its uploads with
 the bytes of their blobs until their message is committed or they are given up, its
 downloads with the bytes received so far, the attachments of the message log and the
-files it received. Section 22.3 holds for what this part deletes. A received file is kept
+files it received [test: tests/client/test_client_store.py::test_store_holds_what_section_22_1_lists]. Section 22.3 holds for what this part deletes. A received file is kept
 in readable form, like the message log (threat model, "A thief of the device or of the
 data directory").
 
 ## 34. The test vectors of the blob cipher
 
 The vectors of part 3 are the file `vectors/blob.json`, in the schema of section 15.2,
-written by `scripts/generate_vectors.py` with the code of part 3. `size`, `padded_length`
+written by `scripts/generate_vectors.py` with the code of part 3
+[test: tests/crypto/test_blob_vectors.py::test_vector_file_follows_the_schema]
+[test: tests/crypto/test_blob_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]. `size`, `padded_length`
 and `blob_length` are numbers, `chunk_nonces` is an array of hex strings, and every other
 value is a hex string.
 
@@ -4386,14 +4441,17 @@ value is a hex string.
   the chunks. The files include an empty file, a file of one chunk, a file whose padded
   length is exactly 65536 bytes and a file of two chunks.
 - `blob-open`: a positive vector opens the blob of the `blob-encrypt` vector with the same
-  name after the operation, and its `file` is the `file` of that vector.
+  name after the operation, and its `file` is the `file` of that vector
+  [test: tests/crypto/test_blob_vectors.py::test_each_positive_open_opens_the_blob_of_its_encryption].
 - A negative vector of `blob-open` records no intermediate. The negative cases: one byte
   changed in the nonce, in a ciphertext and in a tag; two chunks swapped; the last chunk
   left out; a blob of two chunks whose first chunk was sealed as the last; a padding
   byte that is not `00`, sealed under its key so that every tag verifies. Each of these
   carries the digest of its own bytes, so that the failure comes from step 4 or 5 of
   section 29.7 and not from the digest. Three more fail earlier: one byte appended, the
-  digest of another blob, and a `size` with another padded length.
+  digest of another blob, and a `size` with another padded length
+  [test: tests/crypto/test_blob_vectors.py::test_vectors_cover_the_sizes_files_and_cases_of_section_34]
+  [test: tests/crypto/test_blob_vectors.py::test_negative_vector_at_the_chunks_has_its_length_and_its_own_digest].
 
 ## Appendix A. One key agreement and two messages in hex
 

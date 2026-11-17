@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import sqlite3
 from collections.abc import AsyncIterator, Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -15,6 +14,7 @@ from relay_harness import (
     Clock,
     OpenClient,
     RawClient,
+    blobs_in,
     build_upload,
     frame_of,
     running_relay,
@@ -137,15 +137,6 @@ async def upload_blob(pair: Pair, length: int = BLOB_LENGTH) -> tuple[StartBlob,
     answers = await put_all(pair.uploader, pieces_of(start, blob))
     assert answers[-1] == stored(start.blob_id, length)
     return start, blob
-
-
-def blobs_in(settings: Settings) -> list[tuple[bytes, int, int]]:
-    """Reads the blob id, length and stored length of every blob from the file."""
-    with closing(sqlite3.connect(settings.database)) as database:
-        rows = database.execute(
-            "SELECT blob_id, length, stored_length FROM blobs ORDER BY position"
-        ).fetchall()
-    return rows
 
 
 async def eventually(condition: Callable[[], bool]) -> None:

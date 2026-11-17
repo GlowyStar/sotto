@@ -1,6 +1,6 @@
 import logging
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -10,6 +10,8 @@ from hypothesis import settings as hypothesis_settings
 from relay_harness import OpenClient, RawClient, Wire, find_leaks, receive_frame, running_relay
 from websockets.asyncio.client import connect
 
+from sotto.client.session import Client
+from sotto.client.store import Store
 from sotto.relay.settings import Settings
 from sotto.relay.storage import Storage
 
@@ -91,3 +93,18 @@ async def open_client(wire: Wire) -> AsyncIterator[OpenClient]:
             return RawClient(websocket, hello, server_name, wire)
 
         yield open_raw_client
+
+
+@pytest.fixture
+def make_client(tmp_path: Path) -> Iterator[Callable[[str], Client]]:
+    """Opens the client of a name under the test folder; a second call is a restart."""
+    stores: list[Store] = []
+
+    def open_client(name: str) -> Client:
+        store = Store(tmp_path / name / "store.db")
+        stores.append(store)
+        return Client(store)
+
+    yield open_client
+    for store in stores:
+        store.close()

@@ -8,11 +8,27 @@ The written file is committed with that change. From the first tag that holds a 
 file, a vector is only ever added, at the end of its list (section 15.4).
 """
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+from sotto.crypto.blob import (
+    BLOB_NONCE_LENGTH,
+    MAX_FILE_BYTES,
+    SEALED_CHUNK_BYTES,
+    STREAM_CHUNK_BYTES,
+    blob_length,
+    chunk_count,
+    chunk_nonces,
+    digest_of,
+    encrypt_blob,
+    padded_length,
+    payload_key,
+)
 from sotto.crypto.identity import (
     Bundle,
     CryptoError,
@@ -46,6 +62,8 @@ type Vector = dict[str, str | Fields]
 type Entry = dict[str, str | int]
 type RatchetFields = dict[str, str | int | list[Entry]]
 type RatchetVector = dict[str, str | RatchetFields]
+type BlobFields = dict[str, str | int | list[str]]
+type BlobVector = dict[str, str | BlobFields]
 
 VECTORS = Path(__file__).parent.parent / "vectors"
 SCHEMA = 1
@@ -1109,10 +1127,169 @@ def ratchet_vectors() -> list[RatchetVector]:
     return talk.vectors
 
 
+BLOB_FILE_KEY = bytes(range(0xA0, 0xB0))
+BLOB_NONCE = bytes(range(0xB0, 0xC0))
+BLOB_FILES = {"empty": 0, "one-chunk": 1000, "one-full-chunk": 65000, "two-chunks": 65537}
+
+
+def blob_file(case: str, size: int) -> bytes:
+    return hashlib.shake_256(f"sotto blob vector {case}".encode()).digest(size)
+
+
+def seal_chunks(chunks: Sequence[bytes], nonces: Sequence[bytes], *, nonce: bytes) -> bytes:
+    """Seals chunks under the payload key of BLOB_FILE_KEY with the nonces given."""
+    cipher = ChaCha20Poly1305(payload_key(BLOB_FILE_KEY, nonce))
+    sealed = [
+        cipher.encrypt(chunk_nonce, chunk, None)
+        for chunk, chunk_nonce in zip(chunks, nonces, strict=True)
+    ]
+    return nonce + b"".join(sealed)
+
+
+def chunks_of(plaintext: bytes) -> list[bytes]:
+    return [
+        plaintext[start : start + STREAM_CHUNK_BYTES]
+        for start in range(0, len(plaintext), STREAM_CHUNK_BYTES)
+    ]
+
+
+def blob_open_inputs(blob: bytes, size: int, digest: bytes | None = None) -> BlobFields:
+    """The inputs of blob-open; the digest is that of the blob unless one is given."""
+    return {
+        "blob": blob.hex(),
+        "file_key": BLOB_FILE_KEY.hex(),
+        "size": size,
+        "digest": (digest or digest_of(blob)).hex(),
+    }
+
+
+def refused_blob(case: str, inputs: BlobFields) -> BlobVector:
+    return {
+        "name": f"blob-open-{case}",
+        "operation": "blob-open",
+        "inputs": inputs,
+        "intermediates": {},
+        "error": "BAD_BLOB",
+    }
+
+
+def blob_length_vectors() -> list[BlobVector]:
+    exponents = [2**exponent + 1 for exponent in range(8, 27)]
+    sizes = dict.fromkeys(
+        [0, 255, 256, 257, 65536, 65537, *exponents, MAX_FILE_BYTES, MAX_FILE_BYTES + 1]
+    )
+    return [
+        {
+            "name": f"blob-length-{size}",
+            "operation": "blob-length",
+            "inputs": {"size": size},
+            "intermediates": {},
+            "outputs": {
+                "padded_length": padded_length(size),
+                "blob_length": blob_length(size),
+            },
+        }
+        for size in sizes
+    ]
+
+
+def blob_cipher_vectors() -> list[BlobVector]:
+    vectors: list[BlobVector] = []
+    for case, size in BLOB_FILES.items():
+        file = blob_file(case, size)
+        blob = encrypt_blob(file, file_key=BLOB_FILE_KEY, nonce=BLOB_NONCE)
+        key = payload_key(BLOB_FILE_KEY, BLOB_NONCE)
+        vectors.append(
+            {
+                "name": f"blob-encrypt-{case}",
+                "operation": "blob-encrypt",
+                "inputs": {
+                    "file": file.hex(),
+                    "file_key": BLOB_FILE_KEY.hex(),
+                    "nonce": BLOB_NONCE.hex(),
+                },
+                "intermediates": {
+                    "padded_length": padded_length(size),
+                    "payload_key": key.hex(),
+                    "chunk_nonces": [nonce.hex() for nonce in chunk_nonces(chunk_count(size))],
+                },
+                "outputs": {"blob": blob.hex(), "digest": digest_of(blob).hex()},
+            }
+        )
+        vectors.append(
+            {
+                "name": f"blob-open-{case}",
+                "operation": "blob-open",
+                "inputs": blob_open_inputs(blob, size),
+                "intermediates": {"payload_key": key.hex()},
+                "outputs": {"file": file.hex()},
+            }
+        )
+    return vectors + refused_blob_vectors()
+
+
+def refused_blob_vectors() -> list[BlobVector]:
+    small_size = BLOB_FILES["one-chunk"]
+    small = encrypt_blob(
+        blob_file("one-chunk", small_size), file_key=BLOB_FILE_KEY, nonce=BLOB_NONCE
+    )
+    two_size = BLOB_FILES["two-chunks"]
+    two_file = blob_file("two-chunks", two_size)
+    two = encrypt_blob(two_file, file_key=BLOB_FILE_KEY, nonce=BLOB_NONCE)
+    first_chunk = slice(BLOB_NONCE_LENGTH, BLOB_NONCE_LENGTH + SEALED_CHUNK_BYTES)
+    second_chunk = slice(first_chunk.stop, None)
+    plaintext = two_file.ljust(padded_length(two_size), b"\x00")
+    last_flags = [nonce[:-1] + b"\x01" for nonce in chunk_nonces(2)]
+    nonzero_padding = blob_file("one-chunk", small_size).ljust(
+        padded_length(small_size) - 1, b"\x00"
+    )
+
+    at_steps_4_and_5 = {
+        "nonce-changed": (with_flipped_byte(small, 0), small_size),
+        "ciphertext-changed": (with_flipped_byte(small, BLOB_NONCE_LENGTH), small_size),
+        "tag-changed": (with_flipped_byte(small, len(small) - 1), small_size),
+        "chunks-swapped": (BLOB_NONCE + two[second_chunk] + two[first_chunk], two_size),
+        "first-chunk-sealed-as-the-last": (
+            seal_chunks(chunks_of(plaintext), last_flags, nonce=BLOB_NONCE),
+            two_size,
+        ),
+        "padding-not-zero": (
+            seal_chunks([nonzero_padding + b"\x01"], chunk_nonces(1), nonce=BLOB_NONCE),
+            small_size,
+        ),
+    }
+    vectors = [
+        refused_blob(case, blob_open_inputs(blob, size))
+        for case, (blob, size) in at_steps_4_and_5.items()
+    ]
+    # Without its last chunk the blob has the length of a padded size of one chunk, so
+    # that it fails at the flag of its last chunk and not at its length.
+    vectors.append(
+        refused_blob(
+            "last-chunk-left-out",
+            blob_open_inputs(two[: second_chunk.start], STREAM_CHUNK_BYTES),
+        )
+    )
+    vectors += [
+        refused_blob("byte-appended", blob_open_inputs(small + b"\x00", small_size)),
+        refused_blob(
+            "digest-of-another-blob",
+            blob_open_inputs(small, small_size, digest=digest_of(two)),
+        ),
+        refused_blob("size-of-another-padded-length", blob_open_inputs(small, 2000)),
+    ]
+    return vectors
+
+
+def blob_vectors() -> list[BlobVector]:
+    return blob_length_vectors() + blob_cipher_vectors()
+
+
 FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "identity.json": identity_vectors,
     "x3dh.json": x3dh_vectors,
     "ratchet.json": ratchet_vectors,
+    "blob.json": blob_vectors,
 }
 
 

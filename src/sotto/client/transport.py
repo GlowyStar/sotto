@@ -8,40 +8,62 @@ it answers. The SQLite work of `Client` runs on the thread of the event loop.
 
 import asyncio
 import ipaddress
+import mimetypes
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from google.protobuf.message import DecodeError
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from sotto.client.envelope import encode_text
-from sotto.client.session import Client, Delivered, Outgoing, PrekeyUpload, Received
+from sotto.client.envelope import MAX_FILE_NAME_BYTES, MAX_MEDIA_TYPE_BYTES, encode_text
+from sotto.client.session import (
+    BLOB_GONE,
+    Client,
+    Delivered,
+    FileState,
+    FilesUnsupportedError,
+    FileTooLargeError,
+    Outgoing,
+    PrekeyUpload,
+    Received,
+)
+from sotto.client.store import FileRow, UploadRow
+from sotto.crypto.blob import BadBlobError, blob_length
 from sotto.crypto.identity import (
     KEY_LENGTH,
     NONCE_LENGTH,
     SIGNATURE_LENGTH,
     Bundle,
+    CryptoError,
     OneTimePrekey,
     SignedPrekey,
 )
 from sotto.proto.sotto_pb2 import (
     Ack,
+    Attachment,
+    BlobData,
+    BlobStored,
     BundleStored,
     ClientFrame,
+    DeleteBlob,
     Deliver,
     ErrorCode,
+    FetchBlob,
     FetchBundle,
     Hello,
     LoggedIn,
     MessageRef,
+    PutBlob,
     Send,
     ServerFrame,
+    StartBlob,
     Stored,
     UploadBundle,
 )
@@ -49,7 +71,13 @@ from sotto.proto.sotto_pb2 import Bundle as BundleFrame
 from sotto.proto.sotto_pb2 import Error as ErrorFrame
 from sotto.proto.sotto_pb2 import OneTimePrekey as OneTimePrekeyFrame
 from sotto.proto.sotto_pb2 import SignedPrekey as SignedPrekeyFrame
-from sotto.relay.frames import MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, MESSAGE_ID_LENGTH
+from sotto.relay.frames import (
+    BLOB_CHUNK_BYTES,
+    BLOB_ID_LENGTH,
+    MAX_FRAME_BYTES,
+    MAX_PAYLOAD_BYTES,
+    MESSAGE_ID_LENGTH,
+)
 from sotto.relay.server import CloseCode
 
 RELAY_PROTOCOL_VERSION = 1
@@ -75,10 +103,25 @@ BACK_OFF_CODES = frozenset(
 )
 # The frame bucket and the page ceiling are shared by every request (section 23.5).
 HOLDING_CODES = frozenset({ErrorCode.STORAGE_FULL, ErrorCode.RATE_LIMITED})
+SENDS = frozenset({"send"})
+BUNDLE_UPLOADS = frozenset({"upload_bundle"})
+BUNDLE_FETCHES = frozenset({"fetch_bundle"})
+BLOB_WRITES = frozenset({"start_blob", "put_blob"})
+BLOB_READS = frozenset({"fetch_blob"})
 
 type ServerMessage = (
-    Hello | LoggedIn | BundleStored | BundleFrame | Stored | Deliver | ErrorFrame
+    Hello
+    | LoggedIn
+    | BundleStored
+    | BundleFrame
+    | Stored
+    | Deliver
+    | ErrorFrame
+    | BlobStored
+    | BlobData
 )
+type BlobReply = BlobStored | BlobData | ErrorFrame
+type TransferKey = tuple[str, bytes | int]
 type Jitter = Callable[[float], float]
 
 _system_random = secrets.SystemRandom()
@@ -168,7 +211,33 @@ class Stopped:
     reason: str
 
 
-type Event = Connected | Incoming | Refused | Retrying | Stopped
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FileUpdate:
+    """A file of section 33.5 changed its state or its progress.
+
+    `contact` is the recipient of a file being sent and the sender of a received one;
+    `file_name` is the name in the attachment, a text of the peer for a received file.
+    `done` out of `total` bytes of the blob are stored at the relay or downloaded.
+    """
+
+    contact: bytes
+    blob_id: bytes
+    file_name: str
+    state: FileState
+    done: int = 0
+    total: int = 0
+    result: str | None = None
+    path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TransferFailed:
+    """A transfer stopped on a local failure; the next login starts it again."""
+
+    reason: str
+
+
+type Event = Connected | Incoming | Refused | Retrying | Stopped | FileUpdate | TransferFailed
 
 
 def even_jitter(upper: float) -> float:
@@ -281,6 +350,12 @@ def read_server_frame(message: bytes) -> ServerMessage:
         case "error":
             _check_error(envelope.error)
             return envelope.error
+        case "blob_stored":
+            _require_length("blob_id", envelope.blob_stored.blob_id, BLOB_ID_LENGTH)
+            return envelope.blob_stored
+        case "blob_data":
+            _check_blob_data(envelope.blob_data)
+            return envelope.blob_data
         case _:
             raise MalformedFrameError("no frame of the schema is set")
 
@@ -327,24 +402,36 @@ def send_frame(outgoing: Outgoing) -> ClientFrame:
 
 @dataclass(slots=True, kw_only=True)
 class _Request:
-    """A frame that waits for its answer on the connection that sent it."""
+    """A frame that waits for its answer on the connection that sent it.
+
+    `sequence` counts the requests of the client in the order they left.
+    """
 
     frame: ClientFrame
     upload: PrekeyUpload | None = None
     bundle: asyncio.Future[Bundle] | None = None
+    reply: asyncio.Future[BlobReply] | None = None
+    sequence: int = 0
     refusals: int = 0
     waiting: bool = False
     holds_others: bool = False
 
-    def answers_to(self, kind: str, key: bytes) -> bool:
-        match self.frame.WhichOneof("frame"):
+    def answers_to(self, kinds: frozenset[str], key: bytes) -> bool:
+        frame = self.frame
+        match frame.WhichOneof("frame"):
             case "send":
-                own_key = self.frame.send.message_id
+                own_key = frame.send.message_id
             case "fetch_bundle":
-                own_key = self.frame.fetch_bundle.identity
+                own_key = frame.fetch_bundle.identity
+            case "start_blob":
+                own_key = frame.start_blob.blob_id
+            case "put_blob":
+                own_key = frame.put_blob.blob_id
+            case "fetch_blob":
+                own_key = frame.fetch_blob.blob_id + frame.fetch_blob.uploader
             case _:
                 own_key = b""
-        return self.frame.WhichOneof("frame") == kind and own_key == key
+        return frame.WhichOneof("frame") in kinds and own_key == key
 
 
 class Transport:
@@ -355,6 +442,8 @@ class Transport:
         url: The URL of the relay, dialed as given (section 23.1).
         insecure: The override that allows a ws URL to a host that is not a loopback host.
         jitter: Chooses a number evenly between 0 and its argument (sections 23.4, 23.5).
+        received_files: The folder for received files; every offered file is downloaded
+            into it by itself (section 33.3). None leaves offered files offered.
 
     Raises:
         UrlRefusedError: The URL is not dialed; nothing else ran.
@@ -367,11 +456,14 @@ class Transport:
         *,
         insecure: bool = False,
         jitter: Jitter = even_jitter,
+        received_files: Path | None = None,
     ) -> None:
         self.server_name = server_name_of(url, insecure=insecure)
         self.client = client
         self.url = url
         self.jitter = jitter
+        self.received_files = received_files
+        self.blob_max_bytes = 0
         self.events: asyncio.Queue[Event] = asyncio.Queue()
         self._connection: ClientConnection | None = None
         # Set once the steps of section 23.3 are done: no Send of the user precedes them.
@@ -381,6 +473,11 @@ class Transport:
         self._holders = 0
         self._requests: list[_Request] = []
         self._back_offs: set[asyncio.Task[None]] = set()
+        self._transfers: dict[TransferKey, asyncio.Task[None]] = {}
+        self._sequence = 0
+        # A DeleteBlob sent on this connection, with the sequence of the last request
+        # that left before it: an answer to a later request confirms it.
+        self._deletions_sent: dict[tuple[bytes, bytes], int] = {}
 
     async def run(self) -> None:
         """Serves connections until an action Stop, which it puts as `Stopped` in `events`.
@@ -420,6 +517,36 @@ class Transport:
         if self._ready.is_set():
             await self._request(_Request(frame=send_frame(outgoing)))
 
+    async def send_file(self, contact: bytes, path: Path, *, caption: str = "") -> bytes:
+        """Steps 1 and 2 of section 33.2 once logged in; the upload goes on in the
+        background and reports itself as FileUpdate events.
+
+        Returns:
+            The blob id that the FileUpdate events of the file name.
+
+        Raises:
+            NotAContactError, FilesUnsupportedError, FileTooLargeError: A check of 33.1.
+            OSError: The file cannot be read.
+            ValueError: The caption is longer than MAX_CAPTION_BYTES.
+        """
+        await self._ready.wait()
+        size = (await asyncio.to_thread(path.stat)).st_size
+        self.client.check_file(contact, size, blob_max_bytes=self.blob_max_bytes)
+        data = await asyncio.to_thread(path.read_bytes)
+        media_type = mimetypes.guess_type(path.name)[0] or ""
+        upload = self.client.start_upload(
+            contact,
+            data,
+            blob_max_bytes=self.blob_max_bytes,
+            file_name=_cut_to(path.name, MAX_FILE_NAME_BYTES),
+            media_type=media_type if len(media_type) <= MAX_MEDIA_TYPE_BYTES else "",
+            caption=caption,
+        )
+        self._report_upload(upload, FileState.SENDING)
+        if self._ready.is_set():
+            self._start_transfers()
+        return upload.blob_id
+
     async def reset_session(self, contact: bytes) -> int:
         """L2 of section 20.6 with a fresh bundle; returns the GAP of the session that left."""
         bundle = await self.fetch_bundle(contact)
@@ -454,9 +581,9 @@ class Transport:
                 self.url, proxy=None, max_size=MAX_FRAME_BYTES, compression=None
             ) as connection:
                 try:
-                    one_time_prekey_count = await self._log_in(connection)
+                    logged_in_frame = await self._log_in(connection)
                     logged_in = True
-                    await self._after_login(one_time_prekey_count)
+                    await self._after_login(logged_in_frame)
                     await self._serve(connection)
                 except _ViolationError as violation:
                     await connection.close(violation.code)
@@ -471,8 +598,8 @@ class Transport:
             self._end_connection()
         return logged_in
 
-    async def _log_in(self, connection: ClientConnection) -> int:
-        """Hello, Login and LoggedIn of section 8.1; returns the count of the LoggedIn."""
+    async def _log_in(self, connection: ClientConnection) -> LoggedIn:
+        """Hello, Login and LoggedIn of section 8.1; returns the LoggedIn."""
         try:
             hello = read_server_frame(await _receive_binary(connection))
         except UnknownVersionError as unknown:
@@ -492,11 +619,13 @@ class Transport:
             raise _ViolationError(CloseCode.PROTOCOL_VIOLATION)
 
         self._connection = connection
-        return logged_in.one_time_prekey_count
+        self.blob_max_bytes = logged_in.blob_max_bytes
+        return logged_in
 
-    async def _after_login(self, one_time_prekey_count: int) -> None:
-        """The three steps of section 23.3."""
-        upload = self.client.prepare_upload(one_time_prekey_count)
+    async def _after_login(self, logged_in: LoggedIn) -> None:
+        """The three steps of section 23.3, then the transfers of section 33.4."""
+        await self._send_blob_deletions()
+        upload = self.client.prepare_upload(logged_in.one_time_prekey_count)
         if upload is not None:
             frame = ClientFrame(upload_bundle=upload_frame(upload))
             await self._request(_Request(frame=frame, upload=upload))
@@ -510,6 +639,8 @@ class Transport:
         self.client.forget_seen_ids()
         self._ready.set()
         self.events.put_nowait(Connected())
+        self._end_transfers_beyond_the_relay()
+        self._start_transfers()
 
     async def _serve(self, connection: ClientConnection) -> None:
         while True:
@@ -518,18 +649,29 @@ class Transport:
                 case Deliver():
                     await self._deliver(connection, frame)
                 case Stored():
-                    if self._take("send", frame.message_id) is not None:
-                        self.client.confirm_stored(frame.message_id)
+                    if self._take(SENDS, frame.message_id) is not None:
+                        self._confirm_stored(frame.message_id)
                 case BundleStored():
-                    request = self._take("upload_bundle", b"")
+                    request = self._take(BUNDLE_UPLOADS, b"")
                     if request is not None and request.upload is not None:
                         self.client.confirm_upload(request.upload)
                 case BundleFrame():
-                    request = self._take("fetch_bundle", frame.identity)
+                    request = self._take(BUNDLE_FETCHES, frame.identity)
                     if request is not None and request.bundle is not None:
                         _resolve(request.bundle, bundle_of(frame))
+                case BlobStored():
+                    request = self._take(BLOB_WRITES, frame.blob_id)
+                    if request is not None and request.reply is not None:
+                        _resolve(request.reply, frame)
+                case BlobData():
+                    # A FetchBlob gets its answer in the order of the frames (section 7.4),
+                    # so a BlobData that names another blob answers the oldest one.
+                    request = self._take(BLOB_READS, frame.blob_id + frame.uploader)
+                    request = request or self._take_oldest(BLOB_READS)
+                    if request is not None and request.reply is not None:
+                        _resolve(request.reply, frame)
                 case ErrorFrame():
-                    self._refused(connection, frame)
+                    await self._refused(connection, frame)
                 case _:
                     raise _ViolationError(CloseCode.PROTOCOL_VIOLATION)
 
@@ -544,15 +686,25 @@ class Transport:
                 ClientFrame(ack=Ack(messages=[reference])).SerializeToString()
             )
         self.events.put_nowait(Incoming(sender=deliver.sender, received=received))
+        if received.attachment is not None:
+            self._start_transfers()
 
-    def _refused(self, connection: ClientConnection, error: ErrorFrame) -> None:
-        kind = "upload_bundle"
+    def _confirm_stored(self, message_id: bytes) -> None:
+        file = self.client.confirm_stored(message_id)
+        if file is not None:
+            self.events.put_nowait(_file_update(file, FileState.SENT))
+
+    async def _refused(self, connection: ClientConnection, error: ErrorFrame) -> None:
+        kinds, ref = BUNDLE_UPLOADS, b""
         if error.message_id:
-            kind = "send"
+            kinds, ref = SENDS, error.message_id
+        elif error.blob_id and error.identity:
+            kinds, ref = BLOB_READS, error.blob_id + error.identity
+        elif error.blob_id:
+            kinds, ref = BLOB_WRITES, error.blob_id
         elif error.identity:
-            kind = "fetch_bundle"
-        ref = error.message_id or error.identity
-        request = self._first(kind, ref)
+            kinds, ref = BUNDLE_FETCHES, error.identity
+        request = self._first(kinds, ref)
         if request is None:
             return
 
@@ -562,16 +714,22 @@ class Transport:
             return
 
         self._requests.remove(request)
+        self._answered(request)
         result = _error_name(error.code)
         if request.bundle is not None:
             _resolve(request.bundle, RefusedError(result))
+        elif request.reply is not None:
+            _resolve(request.reply, error)
         elif request.upload is not None:
             self.events.put_nowait(Refused(result=result, contact=None))
         else:
-            self.client.drop_refused_send(ref)
+            file = self.client.drop_refused_send(ref)
             self.events.put_nowait(
                 Refused(result=result, contact=request.frame.send.recipient)
             )
+            if file is not None:
+                self.events.put_nowait(_file_update(file, FileState.NOT_SENT, result=result))
+                await self._send_blob_deletions()
 
     def _back_off(self, connection: ClientConnection, request: _Request) -> None:
         request.refusals += 1
@@ -587,6 +745,7 @@ class Transport:
         try:
             await asyncio.sleep(back_off_seconds(request.refusals, jitter=self.jitter))
             request.waiting = False
+            request.sequence = self._next_sequence()
             with suppress(ConnectionClosed):
                 await connection.send(request.frame.SerializeToString())
         finally:
@@ -603,34 +762,258 @@ class Transport:
         if connection is None:
             return False
         # Listed before it leaves, so that its answer always finds it.
+        request.sequence = self._next_sequence()
         self._requests.append(request)
         with suppress(ConnectionClosed):
             await connection.send(request.frame.SerializeToString())
         return True
 
-    def _first(self, kind: str, key: bytes) -> _Request | None:
+    def _first(self, kinds: frozenset[str], key: bytes) -> _Request | None:
         for request in self._requests:
-            if request.answers_to(kind, key) and not request.waiting:
+            if request.answers_to(kinds, key) and not request.waiting:
                 return request
         return None
 
-    def _take(self, kind: str, key: bytes) -> _Request | None:
+    def _take(self, kinds: frozenset[str], key: bytes) -> _Request | None:
         """Removes the request that an answer matches; None means the answer is ignored."""
-        request = self._first(kind, key)
+        request = self._first(kinds, key)
         if request is not None:
             self._requests.remove(request)
+            self._answered(request)
         return request
+
+    def _take_oldest(self, kinds: frozenset[str]) -> _Request | None:
+        for request in self._requests:
+            if request.frame.WhichOneof("frame") in kinds and not request.waiting:
+                self._requests.remove(request)
+                self._answered(request)
+                return request
+        return None
+
+    def _next_sequence(self) -> int:
+        self._sequence += 1
+        return self._sequence
+
+    def _answered(self, request: _Request) -> None:
+        """Forgets the DeleteBlob frames that left before the request: the relay handled
+        them, as it handles the frames of a connection in order (section 33.2)."""
+        handled = [
+            deletion
+            for deletion, sent_after in self._deletions_sent.items()
+            if request.sequence > sent_after
+        ]
+        for uploader, blob_id in handled:
+            del self._deletions_sent[uploader, blob_id]
+            self.client.confirm_blob_deletion(uploader, blob_id)
+
+    async def _send_blob_deletions(self) -> None:
+        """Sends the saved DeleteBlob frames that this connection has not sent; none to a
+        relay without blob frames (section 30.1)."""
+        connection = self._connection
+        if connection is None or self.blob_max_bytes == 0:
+            return
+        for uploader, blob_id in self.client.blob_deletions():
+            if (uploader, blob_id) in self._deletions_sent:
+                continue
+            self._deletions_sent[uploader, blob_id] = self._sequence
+            frame = ClientFrame(delete_blob=DeleteBlob(blob_id=blob_id, uploader=uploader))
+            with suppress(ConnectionClosed):
+                await connection.send(frame.SerializeToString())
+
+    def _end_transfers_beyond_the_relay(self) -> None:
+        """The last row of the table of section 33.4, after a LoggedIn."""
+        for upload in self.client.uploads():
+            result = None
+            if self.blob_max_bytes == 0:
+                result = FilesUnsupportedError.result
+            elif upload.length > self.blob_max_bytes:
+                result = FileTooLargeError.result
+            if result is not None:
+                self.client.give_up_upload(upload.blob_id)
+                self._report_upload(upload, FileState.NOT_SENT, result=result)
+
+        if self.blob_max_bytes == 0 and self.received_files is not None:
+            result = FilesUnsupportedError.result
+            for file in self.client.downloads():
+                state = self.client.fail_download(file.position, result)
+                self.events.put_nowait(_file_update(file, state, result=result))
+
+    def _start_transfers(self) -> None:
+        """Starts a task for every upload and download of the store that has none."""
+        if self.blob_max_bytes == 0:
+            return
+        for upload in self.client.uploads():
+            key: TransferKey = ("upload", upload.blob_id)
+            if key not in self._transfers:
+                self._track(key, self._upload(upload))
+        folder = self.received_files
+        if folder is None:
+            return
+        for file in self.client.downloads():
+            key = ("download", file.position)
+            if key not in self._transfers:
+                self._track(key, self._download(file, folder))
+
+    def _track(self, key: TransferKey, transfer: Coroutine[None, None, None]) -> None:
+        task = asyncio.create_task(_until_the_connection_ends(transfer))
+        self._transfers[key] = task
+
+        def forget(done: asyncio.Task[None]) -> None:
+            if self._transfers.get(key) is done:
+                del self._transfers[key]
+            if not done.cancelled() and (error := done.exception()) is not None:
+                self.events.put_nowait(TransferFailed(reason=repr(error)))
+
+        task.add_done_callback(forget)
+
+    async def _upload(self, upload: UploadRow) -> None:
+        """Steps 3 to 5 of section 33.2. A connection that ends cancels the task, and the
+        next login starts it again from the stored length (section 33.4)."""
+        start = StartBlob(
+            blob_id=upload.blob_id, recipient=upload.contact, length=upload.length
+        )
+        reply = await self._write_blob(ClientFrame(start_blob=start))
+        sent_a_piece = False
+        while True:
+            if isinstance(reply, ErrorFrame):
+                if sent_a_piece and reply.code == ErrorCode.NOT_FOUND:
+                    sent_a_piece = False
+                    reply = await self._write_blob(ClientFrame(start_blob=start))
+                    continue
+                await self._not_sent(upload, _error_name(reply.code))
+                return
+
+            stored = reply.stored_length
+            if stored > upload.length:
+                await self._not_sent(upload, BadBlobError.result)
+                return
+            self._report_upload(upload, FileState.SENDING, done=stored)
+            if stored == upload.length:
+                break
+            piece = self.client.read_upload(upload.blob_id, stored, BLOB_CHUNK_BYTES)
+            put = PutBlob(blob_id=upload.blob_id, offset=stored, data=piece)
+            reply = await self._write_blob(ClientFrame(put_blob=put))
+            sent_a_piece = True
+
+        await self._send_attachment(upload)
+
+    async def _send_attachment(self, upload: UploadRow) -> None:
+        """Step 5 of section 33.2: the message of the file, after START when needed."""
+        bundle = None
+        try:
+            if not self.client.has_session(upload.contact):
+                bundle = await self.fetch_bundle(upload.contact)
+            outgoing = self.client.send_attachment(upload, bundle=bundle)
+        except (RefusedError, CryptoError) as error:
+            await self._not_sent(upload, error.result)
+            return
+        await self._request(_Request(frame=send_frame(outgoing)))
+
+    async def _not_sent(self, upload: UploadRow, result: str) -> None:
+        self.client.give_up_upload(upload.blob_id)
+        self._report_upload(upload, FileState.NOT_SENT, result=result)
+        await self._send_blob_deletions()
+
+    def _report_upload(
+        self, upload: UploadRow, state: FileState, *, done: int = 0, result: str | None = None
+    ) -> None:
+        self.events.put_nowait(
+            FileUpdate(
+                contact=upload.contact,
+                blob_id=upload.blob_id,
+                file_name=upload.attachment.file_name,
+                state=state,
+                done=done,
+                total=upload.length,
+                result=result,
+            )
+        )
+
+    async def _download(self, file: FileRow, folder: Path) -> None:
+        """Steps 2 to 6 of section 33.3 from the bytes the store holds."""
+        attachment = file.attachment
+        length = blob_length(attachment.size)
+        held = file.held
+        self.client.begin_download(file.position)
+        while held < length:
+            asked = min(BLOB_CHUNK_BYTES, length - held)
+            fetch = FetchBlob(
+                blob_id=attachment.blob_id, uploader=file.contact, offset=held, length=asked
+            )
+            reply = await self._read_blob(ClientFrame(fetch_blob=fetch))
+            if isinstance(reply, ErrorFrame):
+                await self._not_received(file, BLOB_GONE)
+                return
+
+            is_another_range = reply.offset != held or reply.blob_id != attachment.blob_id
+            is_of_another_uploader = reply.uploader != file.contact
+            is_not_the_length_asked = len(reply.data) != asked
+            if is_another_range or is_of_another_uploader or is_not_the_length_asked:
+                await self._not_received(file, BadBlobError.result)
+                return
+            self.client.save_download_piece(file.position, reply.data)
+            held += len(reply.data)
+            self.events.put_nowait(
+                _file_update(file, FileState.RECEIVING, done=held, total=length)
+            )
+
+        try:
+            path = self.client.finish_download(file.position, folder)
+        except BadBlobError as error:
+            await self._not_received(file, error.result)
+            return
+        except OSError as error:
+            failure = f"cannot write into {folder}: {error.strerror}"
+            self.events.put_nowait(TransferFailed(reason=failure))
+            return
+        self.events.put_nowait(_file_update(file, FileState.RECEIVED, path=path))
+        await self._send_blob_deletions()
+
+    async def _not_received(self, file: FileRow, result: str) -> None:
+        state = self.client.fail_download(file.position, result)
+        self.events.put_nowait(_file_update(file, state, result=result))
+        await self._send_blob_deletions()
+
+    async def _write_blob(self, frame: ClientFrame) -> BlobStored | ErrorFrame:
+        reply = await self._ask_blob(frame)
+        if isinstance(reply, BlobData):
+            raise TypeError("a BlobData answers no StartBlob or PutBlob")
+        return reply
+
+    async def _read_blob(self, frame: ClientFrame) -> BlobData | ErrorFrame:
+        reply = await self._ask_blob(frame)
+        if isinstance(reply, BlobStored):
+            raise TypeError("a BlobStored answers no FetchBlob")
+        return reply
+
+    async def _ask_blob(self, frame: ClientFrame) -> BlobReply:
+        """Sends a blob frame and waits for its answer; an Error with an action Back off is
+        handled by the frame being sent again, so only a Stop comes back as an Error.
+
+        Raises:
+            _ConnectionLostError: There is no connection, or it ended before the answer.
+        """
+        reply: asyncio.Future[BlobReply] = asyncio.get_running_loop().create_future()
+        if not await self._request(_Request(frame=frame, reply=reply)):
+            raise _ConnectionLostError
+        return await reply
 
     def _end_connection(self) -> None:
         """What section 21.4 and 23.5 ask when a connection ends with requests open."""
         for task in self._back_offs:
             task.cancel()
+        for transfer in self._transfers.values():
+            transfer.cancel()
+        self._transfers.clear()
         for request in self._requests:
             if request.upload is not None and request.waiting:
                 self.client.drop_refused_upload(request.upload)
             if request.bundle is not None:
                 _resolve(request.bundle, _ConnectionLostError())
+            if request.reply is not None:
+                _resolve(request.reply, _ConnectionLostError())
         self._requests.clear()
+        self._deletions_sent.clear()
         self._connection = None
         self._ready.clear()
         self._holders = 0
@@ -678,8 +1061,45 @@ def _check_deliver(deliver: Deliver) -> None:
 def _check_error(error: ErrorFrame) -> None:
     _require_length("message_id", error.message_id, 0, MESSAGE_ID_LENGTH)
     _require_length("identity", error.identity, 0, KEY_LENGTH)
+    _require_length("blob_id", error.blob_id, 0, BLOB_ID_LENGTH)
     if error.message_id and error.identity:
         raise MalformedFrameError("the error names a Send and a FetchBundle")
+    if error.message_id and error.blob_id:
+        raise MalformedFrameError("the error names a Send and a blob")
+
+
+def _check_blob_data(data: BlobData) -> None:
+    _require_length("blob_id", data.blob_id, BLOB_ID_LENGTH)
+    _require_length("uploader", data.uploader, KEY_LENGTH)
+    if len(data.data) > BLOB_CHUNK_BYTES:
+        raise MalformedFrameError(f"data is {len(data.data)} bytes, above {BLOB_CHUNK_BYTES}")
+
+
+def _file_update(
+    file: FileRow,
+    state: FileState,
+    *,
+    done: int = 0,
+    total: int = 0,
+    result: str | None = None,
+    path: Path | None = None,
+) -> FileUpdate:
+    attachment: Attachment = file.attachment
+    return FileUpdate(
+        contact=file.contact,
+        blob_id=attachment.blob_id,
+        file_name=attachment.file_name,
+        state=state,
+        done=done,
+        total=total,
+        result=result,
+        path=path,
+    )
+
+
+def _cut_to(name: str, limit: int) -> str:
+    """The longest start of `name` that is at most `limit` bytes of UTF-8."""
+    return name.encode()[:limit].decode(errors="ignore")
 
 
 def _error_name(code: int) -> str:
@@ -694,7 +1114,13 @@ def _require_length(field: str, value: bytes, *lengths: int) -> None:
         raise MalformedFrameError(f"{field} is {len(value)} bytes long, not {lengths}")
 
 
-def _resolve(future: asyncio.Future[Bundle], outcome: Bundle | Exception) -> None:
+async def _until_the_connection_ends(transfer: Coroutine[None, None, None]) -> None:
+    """Runs a transfer; the next login starts it again when its connection is lost."""
+    with suppress(_ConnectionLostError):
+        await transfer
+
+
+def _resolve[T](future: asyncio.Future[T], outcome: T | Exception) -> None:
     """Settles a fetch whose caller still waits; a cancelled caller gets nothing."""
     if future.done():
         return

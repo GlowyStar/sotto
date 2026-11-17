@@ -3,7 +3,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from sotto.client.envelope import (
+    MAX_CAPTION_BYTES,
+    MAX_FILE_NAME_BYTES,
+    MAX_MEDIA_TYPE_BYTES,
     MAX_TEXT_BYTES,
+    MAX_THUMBNAIL_BYTES,
     PADDING_BLOCK,
     BadContentError,
     BadEnvelopeError,
@@ -11,12 +15,14 @@ from sotto.client.envelope import (
     TextTooLongError,
     UnknownContentError,
     UnsupportedVersionError,
-    decode_text,
+    decode_content,
+    encode_attachment,
     encode_text,
     pad,
     parse_envelope,
 )
-from sotto.proto.sotto_pb2 import Content, InitialHeader, PeerMessage
+from sotto.crypto.blob import MAX_FILE_BYTES
+from sotto.proto.sotto_pb2 import Attachment, Content, InitialHeader, PeerMessage
 
 GOOD_HEADER = bytes(40)
 GOOD_CIPHERTEXT = bytes(284)
@@ -50,26 +56,26 @@ def test_receiver_takes_the_content_in_front_of_the_mark_behind_any_zero_bytes(
     text = content.decode("latin-1")
     padded = encode_text(text) + bytes(extra_zeros)
 
-    assert decode_text(padded) == text
+    assert decode_content(padded) == text
 
 
 @pytest.mark.parametrize("padded", [b"", bytes(256), b"\x0a\x00\x81" + bytes(253)])
 def test_plaintext_without_padding_is_bad_padding(padded: bytes) -> None:
     with pytest.raises(BadPaddingError):
-        decode_text(padded)
+        decode_content(padded)
 
 
 def test_content_that_does_not_parse_or_is_not_utf8_is_bad_content() -> None:
     for content in (b"\x0a\x05ab", b"\x0a\x02\xff\xfe"):
         with pytest.raises(BadContentError):
-            decode_text(pad(content))
+            decode_content(pad(content))
 
 
 def test_content_without_a_known_member_is_unknown_content() -> None:
     unknown_member = b"\x1a\x01x"
     for content in (Content().SerializeToString(), unknown_member):
         with pytest.raises(UnknownContentError):
-            decode_text(pad(content))
+            decode_content(pad(content))
 
 
 def test_largest_text_fills_254_blocks_and_one_byte_more_is_refused() -> None:
@@ -138,3 +144,62 @@ def test_other_version_is_read_before_any_other_rule(version: int) -> None:
 def test_field_that_breaks_its_length_is_bad_envelope(fields: dict[str, object]) -> None:
     with pytest.raises(BadEnvelopeError):
         parse_envelope(envelope(**fields))
+
+
+def longest_attachment() -> Attachment:
+    return Attachment(
+        blob_id=bytes(16),
+        key=bytes(16),
+        size=MAX_FILE_BYTES,
+        digest=bytes(32),
+        media_type="m" * MAX_MEDIA_TYPE_BYTES,
+        file_name="n" * MAX_FILE_NAME_BYTES,
+        width=2**32 - 1,
+        height=2**32 - 1,
+        thumbnail=bytes(MAX_THUMBNAIL_BYTES),
+        caption="c" * MAX_CAPTION_BYTES,
+    )
+
+
+def test_longest_attachment_is_the_content_of_section_32_3_and_decodes() -> None:
+    attachment = longest_attachment()
+
+    assert len(Content(attachment=attachment).SerializeToString()) == 20965
+    assert decode_content(encode_attachment(attachment)) == attachment
+
+
+@pytest.mark.parametrize(
+    "field", ["media_type", "file_name", "thumbnail", "caption", "size", "blob_id"]
+)
+def test_attachment_beyond_a_limit_of_section_32_1_is_not_encoded(field: str) -> None:
+    attachment = longest_attachment()
+    match field:
+        case "size":
+            attachment.size += 1
+        case "thumbnail" | "blob_id":
+            setattr(attachment, field, getattr(attachment, field) + b"x")
+        case _:
+            setattr(attachment, field, getattr(attachment, field) + "x")
+
+    with pytest.raises(ValueError, match="limit"):
+        encode_attachment(attachment)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"blob_id": bytes(15)},
+        {"key": bytes(17)},
+        {"digest": bytes(31)},
+        {"size": MAX_FILE_BYTES + 1},
+    ],
+)
+def test_received_attachment_that_breaks_section_32_2_is_bad_content(
+    change: dict[str, bytes | int],
+) -> None:
+    attachment = Attachment(blob_id=bytes(16), key=bytes(16), digest=bytes(32))
+    for field, value in change.items():
+        setattr(attachment, field, value)
+
+    with pytest.raises(BadContentError):
+        decode_content(pad(Content(attachment=attachment).SerializeToString()))

@@ -2,15 +2,27 @@
 
 from google.protobuf.message import DecodeError
 
+from sotto.crypto.blob import DIGEST_LENGTH, FILE_KEY_LENGTH, MAX_FILE_BYTES
 from sotto.crypto.identity import KEY_LENGTH, SIGNATURE_LENGTH, CryptoError
 from sotto.crypto.ratchet import HEADER_LENGTH, MESSAGE_NONCE_LENGTH, TAG_LENGTH
-from sotto.proto.sotto_pb2 import Content, PeerMessage
+from sotto.proto.sotto_pb2 import Attachment, Content, PeerMessage
 
 VERSION = 1
 PADDING_BLOCK = 256
 MAX_TEXT_BYTES = 65019
 PADDING_MARK = b"\x80"
 SEALING_OVERHEAD = MESSAGE_NONCE_LENGTH + TAG_LENGTH
+BLOB_ID_LENGTH = 16
+MAX_MEDIA_TYPE_BYTES = 127
+MAX_FILE_NAME_BYTES = 255
+MAX_THUMBNAIL_BYTES = 16384
+MAX_CAPTION_BYTES = 4096
+BIDI_CONTROLS = frozenset(
+    chr(code)
+    for code in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
+ESCAPED_ABOVE_C1 = BIDI_CONTROLS | LINE_SEPARATORS
 
 
 class UnsupportedVersionError(CryptoError):
@@ -67,12 +79,35 @@ def encode_text(text: str) -> bytes:
     return pad(Content(text=text).SerializeToString())
 
 
-def decode_text(padded: bytes) -> str:
-    """Returns the text of a padded plaintext by sections 19.5 and 19.6.
+def encode_attachment(attachment: Attachment) -> bytes:
+    """Returns the padded plaintext of an attachment that the client filled (section 32.1).
+
+    Raises:
+        ValueError: A field is beyond its limit of section 32.1.
+    """
+    breaks_a_limit = (
+        len(attachment.blob_id) != BLOB_ID_LENGTH
+        or len(attachment.key) != FILE_KEY_LENGTH
+        or len(attachment.digest) != DIGEST_LENGTH
+        or attachment.size > MAX_FILE_BYTES
+        or len(attachment.media_type.encode()) > MAX_MEDIA_TYPE_BYTES
+        or len(attachment.file_name.encode()) > MAX_FILE_NAME_BYTES
+        or len(attachment.thumbnail) > MAX_THUMBNAIL_BYTES
+        or len(attachment.caption.encode()) > MAX_CAPTION_BYTES
+    )
+    if breaks_a_limit:
+        raise ValueError("a field of the attachment is beyond its limit of section 32.1")
+    return pad(Content(attachment=attachment).SerializeToString())
+
+
+def decode_content(padded: bytes) -> str | Attachment:
+    """Returns the text or the attachment of a padded plaintext by sections 19.5, 19.6
+    and 32.2.
 
     Raises:
         BadPaddingError: The plaintext has no padding.
-        BadContentError: The content does not parse, a text that is not UTF-8 included.
+        BadContentError: The content does not parse, a text that is not UTF-8 included, or
+            an attachment breaks a length of section 32.2.
         UnknownContentError: The content sets no member that this client knows.
     """
     try:
@@ -80,9 +115,30 @@ def decode_text(padded: bytes) -> str:
     except DecodeError as error:
         raise BadContentError("the plaintext is not a Content") from error
 
-    if content.WhichOneof("body") != "text":
-        raise UnknownContentError("the Content sets no member that this client knows")
-    return content.text
+    match content.WhichOneof("body"):
+        case "text":
+            return content.text
+        case "attachment":
+            _check_attachment(content.attachment)
+            return content.attachment
+        case _:
+            raise UnknownContentError("the Content sets no member that this client knows")
+
+
+def is_control(character: str) -> bool:
+    """A character that section 19.5 escapes: C0, DEL, C1, bidi controls, line separators."""
+    code = ord(character)
+    is_c0_or_del = code < 0x20 or code == 0x7F
+    is_c1 = 0x80 <= code <= 0x9F
+    return is_c0_or_del or is_c1 or character in ESCAPED_ABOVE_C1
+
+
+def _check_attachment(attachment: Attachment) -> None:
+    lengths = (len(attachment.blob_id), len(attachment.key), len(attachment.digest))
+    if lengths != (BLOB_ID_LENGTH, FILE_KEY_LENGTH, DIGEST_LENGTH):
+        raise BadContentError("a field of the attachment breaks its length")
+    if attachment.size > MAX_FILE_BYTES:
+        raise BadContentError(f"the attachment names a file above {MAX_FILE_BYTES} bytes")
 
 
 def parse_envelope(payload: bytes) -> PeerMessage:

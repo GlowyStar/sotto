@@ -8,11 +8,14 @@ export RELAY_PORT="${RELAY_PORT:-8765}"
 export RELAY_METRICS_PORT="${RELAY_METRICS_PORT:-$((RELAY_PORT + 1000))}"
 export RELAY_URL="ws://127.0.0.1:${RELAY_PORT}"
 compose=(docker compose -p "$project")
+SOTTO_STAND_CLIENTS="$(mktemp -d)"
+export SOTTO_STAND_CLIENTS
 
 finish() {
     status=$?
     [ "$status" -eq 0 ] || "${compose[@]}" logs --no-color || true
     "${compose[@]}" down -v
+    rm -rf "$SOTTO_STAND_CLIENTS"
     exit "$status"
 }
 trap finish EXIT
