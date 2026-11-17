@@ -1,7 +1,8 @@
 """The command line of the client: `sotto`, one data directory per identity.
 
 Peer text reaches the terminal only through `printable`. No command takes the seed as an
-argument or prints it (docs/protocol.md, section 22.4).
+argument or prints it (docs/protocol.md, section 22.4). Received files go into the folder
+`received` of the data directory (section 32.2).
 """
 
 import argparse
@@ -13,17 +14,19 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-from sotto.client.envelope import TextTooLongError
-from sotto.client.session import Client, OwnIdentityError
+from sotto.client.envelope import TextTooLongError, is_control
+from sotto.client.session import Client, FileState, OwnIdentityError
 from sotto.client.store import Store, StoreModeError
 from sotto.client.transport import (
     Connected,
     Event,
+    FileUpdate,
     Incoming,
     Refused,
     RefusedError,
     Retrying,
     Stopped,
+    TransferFailed,
     Transport,
     UrlRefusedError,
 )
@@ -32,14 +35,12 @@ from sotto.crypto.identity import CryptoError, encode_user_id
 DEFAULT_RELAY = "ws://127.0.0.1:8765/ws"
 DEFAULT_DATA_DIRECTORY = Path.home() / ".sotto"
 STORE_NAME = "store.db"
+RECEIVED_FILES = "received"
+PROGRESS_STEPS = 10
+SENDING_ENDS = frozenset({FileState.SENT, FileState.NOT_SENT})
 QUIT = "/quit"
 QUIT_GRACE_SECONDS = 2
 CONTACT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
-BIDI_CONTROLS = frozenset(
-    chr(code)
-    for code in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A))
-)
-LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
 SILENT_RESULTS = frozenset({"DUPLICATE", "NOT_A_CONTACT"})
 
 
@@ -96,6 +97,15 @@ def _parser() -> argparse.ArgumentParser:
     reset.add_argument("name", help="the local name of the contact")
     _add_relay_options(reset)
     reset.set_defaults(command=_reset)
+
+    send_file = commands.add_parser(
+        "send-file", help="send a file to a contact and wait until it is sent or not sent"
+    )
+    send_file.add_argument("name", help="the local name of the contact")
+    send_file.add_argument("path", type=Path, help="the file, up to 100 MiB")
+    send_file.add_argument("--caption", default="", help="a text shown with the file")
+    _add_relay_options(send_file)
+    send_file.set_defaults(command=_send_file)
     return parser
 
 
@@ -159,6 +169,15 @@ def _chat(arguments: argparse.Namespace) -> int:
         return asyncio.run(_run_chat(transport, contact))
 
 
+def _send_file(arguments: argparse.Namespace) -> int:
+    with _client(arguments) as client:
+        contact = _contact_named(client, arguments.name)
+        transport = _transport(client, arguments)
+        return asyncio.run(
+            _run_send_file(transport, contact, arguments.path, arguments.caption)
+        )
+
+
 def _reset(arguments: argparse.Namespace) -> int:
     with _client(arguments) as client:
         contact = _contact_named(client, arguments.name)
@@ -185,6 +204,44 @@ async def _run_chat(transport: Transport, contact: bytes) -> int:
             task.cancel()
     _print_waiting_events(transport, names)
     return 1 if stopped else 0
+
+
+async def _run_send_file(
+    transport: Transport, contact: bytes, path: Path, caption: str
+) -> int:
+    """Sends a file and prints the events until it is sent or not sent. A file whose
+    sending stops with the command goes on at the next `chat` or `send-file`."""
+    names = _names(transport.client)
+    progress: dict[bytes, int] = {}
+    connection = asyncio.create_task(transport.run())
+    sending = asyncio.create_task(transport.send_file(contact, path, caption=caption))
+    try:
+        await asyncio.wait({connection, sending}, return_when="FIRST_COMPLETED")
+        if not sending.done():
+            _print_waiting_events(transport, names)
+            return 1
+        try:
+            blob_id = sending.result()
+        except CryptoError as error:
+            raise CommandError(f"not sent: {error.result}") from error
+        except OSError as error:
+            raise CommandError(f"cannot read {path}: {error.strerror}") from error
+        except ValueError as error:
+            raise CommandError("not sent: the caption is too long") from error
+
+        while True:
+            event = await transport.events.get()
+            _print_event(event, names, progress)
+            if isinstance(event, Stopped | TransferFailed):
+                return 1
+            if not isinstance(event, FileUpdate) or event.blob_id != blob_id:
+                continue
+            if event.state in SENDING_ENDS:
+                return 0 if event.state == FileState.SENT else 1
+    finally:
+        connection.cancel()
+        sending.cancel()
+        await asyncio.wait({connection, sending})
 
 
 async def _run_reset(transport: Transport, contact: bytes, name: str) -> int:
@@ -228,16 +285,18 @@ async def _send_lines(
 
 
 async def _print_events(transport: Transport, names: dict[bytes, str]) -> None:
+    progress: dict[bytes, int] = {}
     while True:
-        _print_event(await transport.events.get(), names)
+        _print_event(await transport.events.get(), names, progress)
 
 
 def _print_waiting_events(transport: Transport, names: dict[bytes, str]) -> None:
     while not transport.events.empty():
-        _print_event(transport.events.get_nowait(), names)
+        _print_event(transport.events.get_nowait(), names, {})
 
 
-def _print_event(event: Event, names: dict[bytes, str]) -> None:
+def _print_event(event: Event, names: dict[bytes, str], progress: dict[bytes, int]) -> None:
+    """Prints an event; `progress` keeps the tenth of each transfer last printed."""
     match event:
         case Connected():
             _say("connected")
@@ -247,6 +306,13 @@ def _print_event(event: Event, names: dict[bytes, str]) -> None:
                 _say(f"{name}: {received.missing} earlier messages can never be read")
             if received.text is not None:
                 _say(f"{name}: {printable(received.text)}")
+            elif received.attachment is not None:
+                attachment = received.attachment
+                caption = f": {printable(attachment.caption)}" if attachment.caption else ""
+                _say(
+                    f"{name}: file {printable(attachment.file_name)}, "
+                    f"{attachment.size} bytes{caption}"
+                )
             elif received.result not in SILENT_RESULTS:
                 _say(f"{name}: a message could not be read ({received.result})")
         case Refused(result=result, contact=None):
@@ -258,6 +324,30 @@ def _print_event(event: Event, names: dict[bytes, str]) -> None:
             _say(f"not connected; next attempt in {seconds:.0f} s")
         case Stopped(reason=reason):
             _say(f"stopped: {reason}")
+        case TransferFailed(reason=reason):
+            _say(f"a transfer stopped and goes on after the next login: {reason}")
+        case FileUpdate():
+            _print_file_update(
+                event, names.get(event.contact) or encode_user_id(event.contact), progress
+            )
+
+
+def _print_file_update(update: FileUpdate, name: str, progress: dict[bytes, int]) -> None:
+    file_name = printable(update.file_name)
+    match update.state:
+        case FileState.SENDING | FileState.RECEIVING:
+            tenth = PROGRESS_STEPS * update.done // max(update.total, 1)
+            if progress.get(update.blob_id) == tenth:
+                return
+            progress[update.blob_id] = tenth
+            percent = 100 * tenth // PROGRESS_STEPS
+            _say(f"{update.state} {file_name}, {name}: {percent}%")
+        case FileState.RECEIVED:
+            _say(f"{name}: {file_name} saved as {printable(str(update.path))}")
+        case FileState.SENT:
+            _say(f"sent {file_name} to {name}")
+        case _:
+            _say(f"{update.state}: {file_name}, {name} ({update.result})")
 
 
 def _say(line: str) -> None:
@@ -311,7 +401,12 @@ def _open_store(path: Path) -> Store:
 
 def _transport(client: Client, arguments: argparse.Namespace) -> Transport:
     try:
-        return Transport(client, arguments.relay, insecure=arguments.insecure)
+        return Transport(
+            client,
+            arguments.relay,
+            insecure=arguments.insecure,
+            received_files=arguments.data_dir / RECEIVED_FILES,
+        )
     except UrlRefusedError as error:
         raise CommandError(f"the relay URL is refused: {error}") from error
 
@@ -328,11 +423,9 @@ def _contact_named(client: Client, name: str) -> bytes:
 
 
 def _escape(character: str) -> str:
+    if not is_control(character):
+        return character
     code = ord(character)
-    is_c0_or_del = code < 0x20 or code == 0x7F
-    is_c1 = 0x80 <= code <= 0x9F
-    if is_c0_or_del or is_c1:
+    if code <= 0xFF:
         return f"\\x{code:02x}"
-    if character in BIDI_CONTROLS or character in LINE_SEPARATORS:
-        return f"\\u{code:04x}"
-    return character
+    return f"\\u{code:04x}"

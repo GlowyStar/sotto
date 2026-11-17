@@ -86,6 +86,15 @@ def messages_in(settings: Settings) -> list[tuple[bytes, bytes, bytes, bytes, in
     return rows
 
 
+def blobs_in(settings: Settings) -> list[tuple[bytes, int, int]]:
+    """Reads the blob id, length and stored length of every blob from the file."""
+    with closing(sqlite3.connect(settings.database)) as database:
+        rows = database.execute(
+            "SELECT blob_id, length, stored_length FROM blobs ORDER BY position"
+        ).fetchall()
+    return rows
+
+
 def traces_in(settings: Settings, parts: Mapping[str, bytes]) -> list[str]:
     """Names the parts that leave eight bytes in a row in a file of the database."""
     files = b"".join(path.read_bytes() for path in settings.database.parent.iterdir())

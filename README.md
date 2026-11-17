@@ -12,6 +12,11 @@ opens one.
   `sotto` encrypts every text end to end (the key agreement and the Double Ratchet of
   part 2 of the protocol), and the text is in no frame, log line or file of the relay
   [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
+  Files of up to 100 MiB go the same way: encrypted on the sender's device, uploaded in
+  pieces that resume where a broken connection or a restart left them, and saved whole
+  or reported as not sent
+  [test: tests/client/test_files.py::test_upload_cut_in_the_middle_goes_on_from_the_stored_length]
+  [test: tests/client/test_files.py::test_download_cut_in_the_middle_goes_on_from_the_bytes_it_holds].
   The relay logs a connection in by a signature over its own challenge, stores and hands
   out prekey bundles, and keeps a message until its recipient acks it or it expires; it
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
@@ -20,8 +25,8 @@ opens one.
   holds three parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
-  resumable uploads and downloads through the relay and the attachment of a message; the
-  relay serves its blob frames, and the client half is not written yet. [docs/threat-model.md](docs/threat-model.md)
+  resumable uploads and downloads through the relay and the attachment of a message.
+  [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
   [what the relay can do](docs/threat-model.md#what-the-relay-can-do) and what is
@@ -86,6 +91,17 @@ Python 3.14 and Docker.
    `alice: <the line>`. `/quit` or the end of input leaves the chat; what the other side
    sends meanwhile waits at the relay and is printed by the next `chat`.
 
+   Send a file from a third terminal while Bob's chat runs:
+
+   ```sh
+   uv run sotto --data-dir alice send-file bob photo.jpg --caption "the view"
+   ```
+
+   It prints the progress and `sent photo.jpg to bob`. Bob's chat shows the file, its
+   size and caption, downloads it into `bob/received/` and prints where it was saved. A
+   received name never picks another folder and never replaces a file there. A
+   `send-file` stopped halfway goes on at the next `chat` or `send-file` of Alice.
+
 5. Stop the relay and delete its data: `docker compose down -v`.
 
 Without `--data-dir` the identity lives in `~/.sotto`. `sotto contacts` lists the
@@ -101,8 +117,9 @@ What the alpha does not do yet:
   is dialed as `wss://`.
 - The data directory is not encrypted: whoever can read it holds the identity, the keys
   and the message log.
-- One device per identity, one-to-one chats, text only. No groups, no files, no
-  history view and no notice that a message was delivered or read.
+- One device per identity, one-to-one chats, texts and files. No groups, no thumbnails
+  from the command line, no history view and no notice that a message was delivered or
+  read.
 - Nothing checks that an id belongs to the person you think; ids are compared out of
   band, by you.
 - No security audit.

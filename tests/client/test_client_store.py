@@ -74,7 +74,10 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
     ).fetchall()
 
     assert sorted(name for (name,) in tables) == [
+        "blob_deletions",
         "contacts",
+        "downloads",
+        "files",
         "identity",
         "messages",
         "one_time_prekeys",
@@ -83,5 +86,6 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
         "seen_ids",
         "sessions",
         "signed_prekeys",
+        "uploads",
     ]
     store.close()

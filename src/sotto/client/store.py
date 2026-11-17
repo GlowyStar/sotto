@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from sotto.crypto.ratchet import RatchetState, SkippedKey
+from sotto.proto.sotto_pb2 import Attachment
 
 DIRECTORY_MODE = 0o700
 FILE_MODE = 0o600
@@ -96,6 +97,41 @@ TABLES = (
         text TEXT NOT NULL
     ) STRICT
     """,
+    """
+    CREATE TABLE IF NOT EXISTS uploads (
+        position INTEGER PRIMARY KEY,
+        blob_id BLOB NOT NULL UNIQUE,
+        contact BLOB NOT NULL,
+        attachment BLOB NOT NULL,
+        blob BLOB NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS files (
+        position INTEGER PRIMARY KEY,
+        contact BLOB NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        message_id BLOB NOT NULL,
+        attachment BLOB NOT NULL,
+        state TEXT NOT NULL,
+        held INTEGER NOT NULL DEFAULT 0,
+        saved_as TEXT
+    ) STRICT
+    """,
+    # Apart from `files`, so that counting a piece in `held` does not rewrite the blob.
+    """
+    CREATE TABLE IF NOT EXISTS downloads (
+        position INTEGER PRIMARY KEY,
+        bytes BLOB NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS blob_deletions (
+        uploader BLOB NOT NULL,
+        blob_id BLOB NOT NULL,
+        PRIMARY KEY (uploader, blob_id)
+    ) STRICT, WITHOUT ROWID
+    """,
 )
 
 ADD_SESSION = """
@@ -159,6 +195,19 @@ DELETE_LOWEST_ONE_TIME_PREKEYS = """
     )
 """
 
+READ_FILES = """
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    FROM files ORDER BY position
+"""
+READ_FILE = """
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    FROM files WHERE position = ?
+"""
+READ_FILE_OF_MESSAGE = """
+    SELECT position, contact, direction, message_id, attachment, state, held, saved_as
+    FROM files WHERE direction = 'out' AND message_id = ?
+"""
+
 
 class StoreModeError(Exception):
     """The directory or the file of the store gives a right to the group or to others."""
@@ -198,6 +247,28 @@ class OutboxRow:
     message_id: bytes
     recipient: bytes
     payload: bytes
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UploadRow:
+    blob_id: bytes
+    contact: bytes
+    attachment: Attachment
+    length: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FileRow:
+    """An attachment of the message log, sent or received."""
+
+    position: int
+    contact: bytes
+    incoming: bool
+    message_id: bytes
+    attachment: Attachment
+    state: str
+    held: int
+    saved_as: str | None
 
 
 class Store:
@@ -465,6 +536,130 @@ class Store:
             (contact, direction, message_id, text),
         )
 
+    def uploads(self) -> list[UploadRow]:
+        rows = self.connection.execute(
+            "SELECT blob_id, contact, attachment, length(blob) FROM uploads ORDER BY position"
+        ).fetchall()
+        return [
+            UploadRow(
+                blob_id=blob_id,
+                contact=contact,
+                attachment=Attachment.FromString(attachment),
+                length=length,
+            )
+            for blob_id, contact, attachment, length in rows
+        ]
+
+    def read_upload(self, blob_id: bytes, offset: int, length: int) -> bytes:
+        """Bytes of the blob of an upload, read by range without loading the whole blob."""
+        (position,) = self.connection.execute(
+            "SELECT position FROM uploads WHERE blob_id = ?", (blob_id,)
+        ).fetchone()
+        with self.connection.blobopen("uploads", "blob", position, readonly=True) as blob:
+            blob.seek(offset)
+            return blob.read(length)
+
+    def add_upload(
+        self, blob_id: bytes, *, contact: bytes, attachment: Attachment, blob: bytes
+    ) -> None:
+        self._change(
+            "INSERT INTO uploads (blob_id, contact, attachment, blob) VALUES (?, ?, ?, ?)",
+            (blob_id, contact, attachment.SerializeToString(), blob),
+        )
+
+    def delete_upload(self, blob_id: bytes) -> None:
+        self._change("DELETE FROM uploads WHERE blob_id = ?", (blob_id,))
+
+    def files(self) -> list[FileRow]:
+        return [_file(row) for row in self.connection.execute(READ_FILES).fetchall()]
+
+    def file(self, position: int) -> FileRow | None:
+        row = self.connection.execute(READ_FILE, (position,)).fetchone()
+        return None if row is None else _file(row)
+
+    def file_of_message(self, message_id: bytes) -> FileRow | None:
+        """The file that a message of the client's own carries, if it carries one."""
+        row = self.connection.execute(READ_FILE_OF_MESSAGE, (message_id,)).fetchone()
+        return None if row is None else _file(row)
+
+    def add_file(
+        self,
+        contact: bytes,
+        *,
+        incoming: bool,
+        message_id: bytes,
+        attachment: Attachment,
+        state: str,
+    ) -> None:
+        self._change(
+            "INSERT INTO files (contact, direction, message_id, attachment, state) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                contact,
+                "in" if incoming else "out",
+                message_id,
+                attachment.SerializeToString(),
+                state,
+            ),
+        )
+
+    def set_file_state(
+        self, position: int, state: str, *, saved_as: str | None = None
+    ) -> None:
+        """Sets the state of a file and drops its downloaded bytes."""
+        self._change(
+            "UPDATE files SET state = ?, saved_as = ?, held = 0 WHERE position = ?",
+            (state, saved_as, position),
+        )
+        self._change("DELETE FROM downloads WHERE position = ?", (position,))
+
+    def begin_download(self, position: int, state: str, length: int) -> None:
+        """Makes room for the `length` bytes of a download, unless it has its room."""
+        self._change("UPDATE files SET state = ? WHERE position = ?", (state, position))
+        self._change(
+            "INSERT INTO downloads VALUES (?, zeroblob(?)) ON CONFLICT DO NOTHING",
+            (position, length),
+        )
+
+    def add_download_piece(self, position: int, data: bytes) -> None:
+        """Writes `data` at the held length of a download and counts it as held."""
+        if not self.connection.in_transaction:
+            raise RuntimeError("a write of the store runs outside a transaction")
+
+        (held,) = self.connection.execute(
+            "SELECT held FROM files WHERE position = ?", (position,)
+        ).fetchone()
+        with self.connection.blobopen("downloads", "bytes", position) as blob:
+            blob.seek(held)
+            blob.write(data)
+        self._change(
+            "UPDATE files SET held = held + ? WHERE position = ?", (len(data), position)
+        )
+
+    def downloaded(self, position: int) -> bytes:
+        (data,) = self.connection.execute(
+            "SELECT bytes FROM downloads WHERE position = ?", (position,)
+        ).fetchone()
+        return bytes(data)
+
+    def blob_deletions(self) -> list[tuple[bytes, bytes]]:
+        """The DeleteBlob frames to send, as (uploader, blob id)."""
+        return self.connection.execute(
+            "SELECT uploader, blob_id FROM blob_deletions ORDER BY uploader, blob_id"
+        ).fetchall()
+
+    def add_blob_deletion(self, uploader: bytes, blob_id: bytes) -> None:
+        self._change(
+            "INSERT INTO blob_deletions VALUES (?, ?) ON CONFLICT DO NOTHING",
+            (uploader, blob_id),
+        )
+
+    def delete_blob_deletion(self, uploader: bytes, blob_id: bytes) -> None:
+        self._change(
+            "DELETE FROM blob_deletions WHERE uploader = ? AND blob_id = ?",
+            (uploader, blob_id),
+        )
+
     def _change(self, statement: str, parameters: tuple[Any, ...]) -> sqlite3.Cursor:
         if not self.connection.in_transaction:
             raise RuntimeError("a write of the store runs outside a transaction")
@@ -506,6 +701,20 @@ def _session(row: tuple[Any, ...]) -> StoredSession:
         associated_data=associated_data,
         state=_decode_state(state),
         initial_header=initial_header,
+    )
+
+
+def _file(row: tuple[Any, ...]) -> FileRow:
+    position, contact, direction, message_id, attachment, state, held, saved_as = row
+    return FileRow(
+        position=position,
+        contact=contact,
+        incoming=direction == "in",
+        message_id=message_id,
+        attachment=Attachment.FromString(attachment),
+        state=state,
+        held=held,
+        saved_as=saved_as,
     )
 
 
