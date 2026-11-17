@@ -31,21 +31,29 @@ QUOTA_FULL: ErrorCode
 BLOB_TOO_LARGE: ErrorCode
 
 class ClientFrame(_message.Message):
-    __slots__ = ("login", "upload_bundle", "fetch_bundle", "send", "ack")
+    __slots__ = ("login", "upload_bundle", "fetch_bundle", "send", "ack", "start_blob", "put_blob", "fetch_blob", "delete_blob")
     LOGIN_FIELD_NUMBER: _ClassVar[int]
     UPLOAD_BUNDLE_FIELD_NUMBER: _ClassVar[int]
     FETCH_BUNDLE_FIELD_NUMBER: _ClassVar[int]
     SEND_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
+    START_BLOB_FIELD_NUMBER: _ClassVar[int]
+    PUT_BLOB_FIELD_NUMBER: _ClassVar[int]
+    FETCH_BLOB_FIELD_NUMBER: _ClassVar[int]
+    DELETE_BLOB_FIELD_NUMBER: _ClassVar[int]
     login: Login
     upload_bundle: UploadBundle
     fetch_bundle: FetchBundle
     send: Send
     ack: Ack
-    def __init__(self, login: _Optional[_Union[Login, _Mapping]] = ..., upload_bundle: _Optional[_Union[UploadBundle, _Mapping]] = ..., fetch_bundle: _Optional[_Union[FetchBundle, _Mapping]] = ..., send: _Optional[_Union[Send, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ...) -> None: ...
+    start_blob: StartBlob
+    put_blob: PutBlob
+    fetch_blob: FetchBlob
+    delete_blob: DeleteBlob
+    def __init__(self, login: _Optional[_Union[Login, _Mapping]] = ..., upload_bundle: _Optional[_Union[UploadBundle, _Mapping]] = ..., fetch_bundle: _Optional[_Union[FetchBundle, _Mapping]] = ..., send: _Optional[_Union[Send, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., start_blob: _Optional[_Union[StartBlob, _Mapping]] = ..., put_blob: _Optional[_Union[PutBlob, _Mapping]] = ..., fetch_blob: _Optional[_Union[FetchBlob, _Mapping]] = ..., delete_blob: _Optional[_Union[DeleteBlob, _Mapping]] = ...) -> None: ...
 
 class ServerFrame(_message.Message):
-    __slots__ = ("hello", "logged_in", "bundle_stored", "bundle", "stored", "deliver", "error")
+    __slots__ = ("hello", "logged_in", "bundle_stored", "bundle", "stored", "deliver", "error", "blob_stored", "blob_data")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     LOGGED_IN_FIELD_NUMBER: _ClassVar[int]
     BUNDLE_STORED_FIELD_NUMBER: _ClassVar[int]
@@ -53,6 +61,8 @@ class ServerFrame(_message.Message):
     STORED_FIELD_NUMBER: _ClassVar[int]
     DELIVER_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
+    BLOB_STORED_FIELD_NUMBER: _ClassVar[int]
+    BLOB_DATA_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     logged_in: LoggedIn
     bundle_stored: BundleStored
@@ -60,7 +70,9 @@ class ServerFrame(_message.Message):
     stored: Stored
     deliver: Deliver
     error: Error
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., logged_in: _Optional[_Union[LoggedIn, _Mapping]] = ..., bundle_stored: _Optional[_Union[BundleStored, _Mapping]] = ..., bundle: _Optional[_Union[Bundle, _Mapping]] = ..., stored: _Optional[_Union[Stored, _Mapping]] = ..., deliver: _Optional[_Union[Deliver, _Mapping]] = ..., error: _Optional[_Union[Error, _Mapping]] = ...) -> None: ...
+    blob_stored: BlobStored
+    blob_data: BlobData
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., logged_in: _Optional[_Union[LoggedIn, _Mapping]] = ..., bundle_stored: _Optional[_Union[BundleStored, _Mapping]] = ..., bundle: _Optional[_Union[Bundle, _Mapping]] = ..., stored: _Optional[_Union[Stored, _Mapping]] = ..., deliver: _Optional[_Union[Deliver, _Mapping]] = ..., error: _Optional[_Union[Error, _Mapping]] = ..., blob_stored: _Optional[_Union[BlobStored, _Mapping]] = ..., blob_data: _Optional[_Union[BlobData, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("version", "nonce")
@@ -195,6 +207,66 @@ class Error(_message.Message):
     identity: bytes
     blob_id: bytes
     def __init__(self, code: _Optional[_Union[ErrorCode, str]] = ..., message_id: _Optional[bytes] = ..., identity: _Optional[bytes] = ..., blob_id: _Optional[bytes] = ...) -> None: ...
+
+class StartBlob(_message.Message):
+    __slots__ = ("blob_id", "recipient", "length")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    RECIPIENT_FIELD_NUMBER: _ClassVar[int]
+    LENGTH_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    recipient: bytes
+    length: int
+    def __init__(self, blob_id: _Optional[bytes] = ..., recipient: _Optional[bytes] = ..., length: _Optional[int] = ...) -> None: ...
+
+class PutBlob(_message.Message):
+    __slots__ = ("blob_id", "offset", "data")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    offset: int
+    data: bytes
+    def __init__(self, blob_id: _Optional[bytes] = ..., offset: _Optional[int] = ..., data: _Optional[bytes] = ...) -> None: ...
+
+class BlobStored(_message.Message):
+    __slots__ = ("blob_id", "stored_length")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    STORED_LENGTH_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    stored_length: int
+    def __init__(self, blob_id: _Optional[bytes] = ..., stored_length: _Optional[int] = ...) -> None: ...
+
+class FetchBlob(_message.Message):
+    __slots__ = ("blob_id", "uploader", "offset", "length")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    UPLOADER_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    LENGTH_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    uploader: bytes
+    offset: int
+    length: int
+    def __init__(self, blob_id: _Optional[bytes] = ..., uploader: _Optional[bytes] = ..., offset: _Optional[int] = ..., length: _Optional[int] = ...) -> None: ...
+
+class BlobData(_message.Message):
+    __slots__ = ("blob_id", "uploader", "offset", "data")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    UPLOADER_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    uploader: bytes
+    offset: int
+    data: bytes
+    def __init__(self, blob_id: _Optional[bytes] = ..., uploader: _Optional[bytes] = ..., offset: _Optional[int] = ..., data: _Optional[bytes] = ...) -> None: ...
+
+class DeleteBlob(_message.Message):
+    __slots__ = ("blob_id", "uploader")
+    BLOB_ID_FIELD_NUMBER: _ClassVar[int]
+    UPLOADER_FIELD_NUMBER: _ClassVar[int]
+    blob_id: bytes
+    uploader: bytes
+    def __init__(self, blob_id: _Optional[bytes] = ..., uploader: _Optional[bytes] = ...) -> None: ...
 
 class PeerMessage(_message.Message):
     __slots__ = ("version", "initial_header", "header", "ciphertext")

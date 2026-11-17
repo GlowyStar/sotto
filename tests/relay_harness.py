@@ -7,7 +7,15 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import dataclass, field
 
@@ -26,13 +34,16 @@ from sotto.crypto.identity import (
 )
 from sotto.proto.sotto_pb2 import (
     ClientFrame,
+    FetchBlob,
     FetchBundle,
     Hello,
     Login,
     OneTimePrekey,
+    PutBlob,
     Send,
     ServerFrame,
     SignedPrekey,
+    StartBlob,
     UploadBundle,
 )
 from sotto.relay.logs import JsonFormatter
@@ -73,6 +84,19 @@ def messages_in(settings: Settings) -> list[tuple[bytes, bytes, bytes, bytes, in
             "SELECT sender, recipient, message_id, payload, stored_at FROM messages"
         ).fetchall()
     return rows
+
+
+def traces_in(settings: Settings, parts: Mapping[str, bytes]) -> list[str]:
+    """Names the parts that leave eight bytes in a row in a file of the database."""
+    files = b"".join(path.read_bytes() for path in settings.database.parent.iterdir())
+    return [
+        name
+        for name, part in parts.items()
+        if any(
+            part[start : start + WINDOW_BYTES] in files
+            for start in range(len(part) - WINDOW_BYTES + 1)
+        )
+    ]
 
 
 def make_public_key() -> bytes:
@@ -157,15 +181,11 @@ class RawClient:
         await self.send(self.login(seed))
         return await self.receive()
 
-    async def ask(self, frame: UploadBundle | FetchBundle | Send) -> ServerFrame:
+    async def ask(
+        self, frame: UploadBundle | FetchBundle | Send | StartBlob | PutBlob | FetchBlob
+    ) -> ServerFrame:
         """Sends a frame that has an answer and returns the next frame of the relay."""
-        match frame:
-            case UploadBundle():
-                await self.send(ClientFrame(upload_bundle=frame))
-            case FetchBundle():
-                await self.send(ClientFrame(fetch_bundle=frame))
-            case Send():
-                await self.send(ClientFrame(send=frame))
+        await self.send(frame_of(frame))
         return await self.receive()
 
     async def frames_until_close(self) -> tuple[list[ServerFrame], int | None]:
@@ -176,6 +196,25 @@ class RawClient:
                 while True:
                     frames.append(await self.receive())
         return frames, self.websocket.close_code
+
+
+def frame_of(
+    frame: UploadBundle | FetchBundle | Send | StartBlob | PutBlob | FetchBlob,
+) -> ClientFrame:
+    """Wraps a client frame that has an answer into its envelope."""
+    match frame:
+        case UploadBundle():
+            return ClientFrame(upload_bundle=frame)
+        case FetchBundle():
+            return ClientFrame(fetch_bundle=frame)
+        case Send():
+            return ClientFrame(send=frame)
+        case StartBlob():
+            return ClientFrame(start_blob=frame)
+        case PutBlob():
+            return ClientFrame(put_blob=frame)
+        case FetchBlob():
+            return ClientFrame(fetch_blob=frame)
 
 
 type OpenClient = Callable[[str], Awaitable[RawClient]]

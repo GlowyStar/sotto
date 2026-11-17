@@ -6,9 +6,22 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 from sotto.crypto.identity import IdentityKeyMismatchError
-from sotto.proto.sotto_pb2 import Bundle, Deliver, MessageRef, Send, SignedPrekey, UploadBundle
+from sotto.proto.sotto_pb2 import (
+    Bundle,
+    DeleteBlob,
+    Deliver,
+    FetchBlob,
+    MessageRef,
+    PutBlob,
+    Send,
+    SignedPrekey,
+    StartBlob,
+    UploadBundle,
+)
+from sotto.relay.frames import BLOB_CHUNK_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +59,27 @@ SCHEMA = (
     ) STRICT
     """,
     "CREATE INDEX IF NOT EXISTS messages_of_recipient ON messages (recipient, position)",
+    # A blob of part 3 and its pieces, one row for the data of each PutBlob (section 31.8).
+    """
+    CREATE TABLE IF NOT EXISTS blobs (
+        position INTEGER PRIMARY KEY,
+        uploader BLOB NOT NULL,
+        blob_id BLOB NOT NULL,
+        recipient BLOB NOT NULL,
+        length INTEGER NOT NULL,
+        stored_length INTEGER NOT NULL,
+        written_at INTEGER NOT NULL,
+        UNIQUE (uploader, blob_id)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS blob_chunks (
+        blob INTEGER NOT NULL,
+        offset INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        PRIMARY KEY (blob, offset)
+    ) STRICT
+    """,
 )
 
 # The condition of the update is step 4.1 of docs/protocol.md, section 9.1: with another
@@ -88,6 +122,38 @@ READ_NEXT_MESSAGE = """
 """
 DELETE_MESSAGE = "DELETE FROM messages WHERE recipient = ? AND sender = ? AND message_id = ?"
 DELETE_EXPIRED_MESSAGES = "DELETE FROM messages WHERE stored_at <= ?"
+READ_BLOB = """
+    SELECT position, length, stored_length FROM blobs WHERE uploader = ? AND blob_id = ?
+"""
+MEASURE_BLOBS_OF_UPLOADER = "SELECT coalesce(sum(length), 0) FROM blobs WHERE uploader = ?"
+STORE_BLOB = """
+    INSERT INTO blobs (uploader, blob_id, recipient, length, stored_length, written_at)
+    VALUES (?, ?, ?, ?, 0, ?)
+"""
+STORE_BLOB_CHUNK = "INSERT INTO blob_chunks (blob, offset, data) VALUES (?, ?, ?)"
+STORE_BLOB_PROGRESS = "UPDATE blobs SET stored_length = ?, written_at = ? WHERE position = ?"
+READ_COMPLETE_BLOB = """
+    SELECT position FROM blobs
+    WHERE uploader = ? AND blob_id = ? AND recipient = ? AND stored_length = length
+"""
+# A chunk is at most BLOB_CHUNK_BYTES long, so the first one that reaches into the range
+# starts less than that before it: the read stays on the range in the primary key.
+READ_BLOB_RANGE = """
+    SELECT offset, data FROM blob_chunks
+    WHERE blob = ? AND offset > ? AND offset < ? AND offset + length(data) > ?
+    ORDER BY offset
+"""
+# The rule of docs/protocol.md, section 31.4: the uploader deletes its blob in any state,
+# the recipient only a complete one.
+DELETE_BLOB = """
+    DELETE FROM blobs
+    WHERE uploader = ? AND blob_id = ?
+      AND (uploader = ? OR (recipient = ? AND stored_length = length))
+    RETURNING position
+"""
+DELETE_EXPIRED_BLOBS = "DELETE FROM blobs WHERE written_at <= ? RETURNING position"
+DELETE_BLOB_CHUNKS = "DELETE FROM blob_chunks WHERE blob = ?"
+MEASURE_BLOBS = "SELECT coalesce(sum(stored_length), 0) FROM blobs"
 READ_PAGE_COUNT = "PRAGMA page_count"
 READ_PAGE_SIZE = "PRAGMA page_size"
 # Copies the write-ahead log into the database file and truncates the log to zero length,
@@ -105,6 +171,34 @@ class UnknownRecipientError(Exception):
 
 class QueueFullError(Exception):
     """The queue of the recipient is at one of its caps."""
+
+
+class BlobTooLargeError(Exception):
+    """A blob would be longer than the relay accepts, or a piece would end past its length."""
+
+
+class QuotaFullError(Exception):
+    """A new blob would take the blobs of its uploader over their quota."""
+
+
+class BlobNotFoundError(Exception):
+    """The relay holds no blob of the uploader with this blob id."""
+
+
+class BlobStart(NamedTuple):
+    stored_length: int
+    is_new: bool
+
+
+class BlobPut(NamedTuple):
+    stored_length: int
+    appended: int
+    completes: bool
+
+
+class Swept(NamedTuple):
+    messages: int
+    blobs: int
 
 
 class Storage:
@@ -246,19 +340,119 @@ class Storage:
             deleted = self.connection.executemany(DELETE_MESSAGE, rows)
         return deleted.rowcount
 
-    def sweep(self, *, ttl_seconds: int) -> int:
-        """Deletes the messages stored `ttl_seconds` or more ago, then truncates the log.
+    def start_blob(
+        self, uploader: bytes, start: StartBlob, *, max_bytes: int, quota_bytes: int
+    ) -> BlobStart:
+        """Runs steps 2 to 6 of docs/protocol.md, section 31.1, in one transaction.
 
-        Returns the count of the deleted messages (docs/protocol.md, sections 10.7 and 13.2).
+        A blob that the relay holds under the uploader and the blob id stays as it is, and
+        the result carries its stored length.
+
+        Raises:
+            BlobTooLargeError: The length is more than `max_bytes`.
+            UnknownRecipientError: The recipient is not registered.
+            QuotaFullError: The blobs of the uploader would take more than `quota_bytes`.
+            StorageFullError: The database is at its page ceiling.
         """
         with self._write():
-            expired = self.connection.execute(
-                DELETE_EXPIRED_MESSAGES, (int(self.clock()) - ttl_seconds,)
-            )
+            held = self.connection.execute(READ_BLOB, (uploader, start.blob_id)).fetchone()
+            if held is not None:
+                return BlobStart(stored_length=held[2], is_new=False)
+            if start.length > max_bytes:
+                raise BlobTooLargeError("the blob is longer than the relay accepts")
+            if self.connection.execute(IS_REGISTERED, (start.recipient,)).fetchone() is None:
+                raise UnknownRecipientError("the recipient is not registered")
+
+            quota_used = self.connection.execute(MEASURE_BLOBS_OF_UPLOADER, (uploader,))
+            if quota_used.fetchone()[0] + start.length > quota_bytes:
+                raise QuotaFullError("the blobs of the uploader would pass the quota")
+
+            row = (uploader, start.blob_id, start.recipient, start.length, int(self.clock()))
+            self.connection.execute(STORE_BLOB, row)
+        return BlobStart(stored_length=0, is_new=True)
+
+    def put_blob(self, uploader: bytes, put: PutBlob) -> BlobPut:
+        """Runs steps 1 to 4 of docs/protocol.md, section 31.2, in one transaction.
+
+        A piece whose offset is not the stored length stores nothing, and the result
+        carries the stored length.
+
+        Raises:
+            BlobNotFoundError: The relay holds no blob of the uploader with this blob id.
+            BlobTooLargeError: The piece would end past the length of the blob.
+            StorageFullError: The database is at its page ceiling.
+        """
+        with self._write():
+            held = self.connection.execute(READ_BLOB, (uploader, put.blob_id)).fetchone()
+            if held is None:
+                raise BlobNotFoundError("the uploader holds no blob with this id")
+            position, length, stored_length = held
+            if put.offset != stored_length:
+                return BlobPut(stored_length=stored_length, appended=0, completes=False)
+
+            new_length = put.offset + len(put.data)
+            if new_length > length:
+                raise BlobTooLargeError("the piece ends past the length of the blob")
+            self.connection.execute(STORE_BLOB_CHUNK, (position, put.offset, put.data))
+            progress = (new_length, int(self.clock()), position)
+            self.connection.execute(STORE_BLOB_PROGRESS, progress)
+        return BlobPut(
+            stored_length=new_length, appended=len(put.data), completes=new_length == length
+        )
+
+    def fetch_blob(self, recipient: bytes, fetch: FetchBlob) -> bytes | None:
+        """Returns the range of a complete blob of `recipient` (docs/protocol.md, 31.3).
+
+        The result is empty from the end of the blob on, and None when the relay holds no
+        complete blob with this uploader and blob id for this recipient.
+        """
+        key = (fetch.uploader, fetch.blob_id, recipient)
+        row = self.connection.execute(READ_COMPLETE_BLOB, key).fetchone()
+        if row is None:
+            return None
+
+        end = fetch.offset + fetch.length
+        bounds = (row[0], fetch.offset - BLOB_CHUNK_BYTES, end, fetch.offset)
+        chunks = self.connection.execute(READ_BLOB_RANGE, bounds).fetchall()
+        if not chunks:
+            return b""
+        first_offset = chunks[0][0]
+        joined = b"".join(data for _, data in chunks)
+        return joined[fetch.offset - first_offset : end - first_offset]
+
+    def delete_blob(self, identity: bytes, delete: DeleteBlob) -> bool:
+        """Deletes the blob that `identity` may delete by docs/protocol.md, section 31.4.
+
+        Returns whether a blob was deleted; a pair that names none changes nothing.
+        """
+        names = (delete.uploader, delete.blob_id, identity, identity)
+        with self._write():
+            deleted = self.connection.execute(DELETE_BLOB, names).fetchall()
+            self.connection.executemany(DELETE_BLOB_CHUNKS, deleted)
+        return bool(deleted)
+
+    def blob_bytes(self) -> int:
+        """Returns the stored lengths of all blobs, added up."""
+        total: int = self.connection.execute(MEASURE_BLOBS).fetchone()[0]
+        return total
+
+    def sweep(self, *, ttl_seconds: int, blob_ttl_seconds: int) -> Swept:
+        """Deletes what expired, then truncates the log (docs/protocol.md, 13.2 and 31.5).
+
+        A message expires `ttl_seconds` after it was stored, a blob `blob_ttl_seconds`
+        after its last write. Returns the counts of what was deleted.
+        """
+        now = int(self.clock())
+        with self._write():
+            expired = self.connection.execute(DELETE_EXPIRED_MESSAGES, (now - ttl_seconds,))
+            expired_blobs = self.connection.execute(
+                DELETE_EXPIRED_BLOBS, (now - blob_ttl_seconds,)
+            ).fetchall()
+            self.connection.executemany(DELETE_BLOB_CHUNKS, expired_blobs)
         is_busy, _, _ = self.connection.execute(CHECKPOINT).fetchone()
         if is_busy:
             logger.warning("the checkpoint of the sweep did not finish")
-        return expired.rowcount
+        return Swept(messages=expired.rowcount, blobs=len(expired_blobs))
 
     def size_bytes(self) -> int:
         page_count: int = self.connection.execute(READ_PAGE_COUNT).fetchone()[0]

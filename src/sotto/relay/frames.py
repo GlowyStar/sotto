@@ -3,14 +3,29 @@
 from google.protobuf.message import DecodeError
 
 from sotto.crypto.identity import KEY_LENGTH, NONCE_LENGTH, SIGNATURE_LENGTH
-from sotto.proto.sotto_pb2 import Ack, ClientFrame, FetchBundle, Login, Send, UploadBundle
+from sotto.proto.sotto_pb2 import (
+    Ack,
+    ClientFrame,
+    DeleteBlob,
+    FetchBlob,
+    FetchBundle,
+    Login,
+    PutBlob,
+    Send,
+    StartBlob,
+    UploadBundle,
+)
 
 MAX_FRAME_BYTES = 65536
 MESSAGE_ID_LENGTH = 16
 # What the envelope and the other fields of a Send or a Deliver add is at most 64 bytes.
 MAX_PAYLOAD_BYTES = MAX_FRAME_BYTES - 64
+BLOB_ID_LENGTH = 16
+# What the envelope and the other fields of a PutBlob or a BlobData add is at most 128 bytes.
+BLOB_CHUNK_BYTES = MAX_FRAME_BYTES - 128
 
-type ParsedFrame = Login | UploadBundle | FetchBundle | Send | Ack
+type BlobFrame = StartBlob | PutBlob | FetchBlob | DeleteBlob
+type ParsedFrame = Login | UploadBundle | FetchBundle | Send | Ack | BlobFrame
 
 
 class MalformedFrameError(Exception):
@@ -45,6 +60,19 @@ def parse_client_frame(message: bytes) -> ParsedFrame:
         case "ack":
             _check_ack(envelope.ack)
             return envelope.ack
+        case "start_blob":
+            _check_start_blob(envelope.start_blob)
+            return envelope.start_blob
+        case "put_blob":
+            _check_put_blob(envelope.put_blob)
+            return envelope.put_blob
+        case "fetch_blob":
+            _check_fetch_blob(envelope.fetch_blob)
+            return envelope.fetch_blob
+        case "delete_blob":
+            _require_length("blob_id", envelope.delete_blob.blob_id, BLOB_ID_LENGTH)
+            _require_length("uploader", envelope.delete_blob.uploader, KEY_LENGTH)
+            return envelope.delete_blob
         case _:
             raise MalformedFrameError("no frame of the schema is set")
 
@@ -83,6 +111,29 @@ def _check_ack(ack: Ack) -> None:
     for message in ack.messages:
         _require_length("messages[].message_id", message.message_id, MESSAGE_ID_LENGTH)
         _require_length("messages[].sender", message.sender, KEY_LENGTH)
+
+
+def _check_start_blob(start: StartBlob) -> None:
+    _require_length("blob_id", start.blob_id, BLOB_ID_LENGTH)
+    _require_length("recipient", start.recipient, KEY_LENGTH)
+    if start.length == 0:
+        raise MalformedFrameError("length is 0")
+
+
+def _check_put_blob(put: PutBlob) -> None:
+    _require_length("blob_id", put.blob_id, BLOB_ID_LENGTH)
+    _require_chunk_length("data", len(put.data))
+
+
+def _check_fetch_blob(fetch: FetchBlob) -> None:
+    _require_length("blob_id", fetch.blob_id, BLOB_ID_LENGTH)
+    _require_length("uploader", fetch.uploader, KEY_LENGTH)
+    _require_chunk_length("length", fetch.length)
+
+
+def _require_chunk_length(field: str, length: int) -> None:
+    if not 1 <= length <= BLOB_CHUNK_BYTES:
+        raise MalformedFrameError(f"{field} is {length} bytes, not 1 to {BLOB_CHUNK_BYTES}")
 
 
 def _require_length(field: str, value: bytes, length: int) -> None:

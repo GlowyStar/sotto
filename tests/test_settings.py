@@ -15,7 +15,7 @@ def test_defaults_are_loopback_and_the_values_of_the_protocol() -> None:
         name="127.0.0.1",
         login_deadline_seconds=10,
         one_time_prekey_cap=100,
-        max_pages=262144,
+        max_pages=2097152,
         message_ttl_seconds=2592000,
         sweep_interval_seconds=60,
         queue_max_messages=1000,
@@ -24,6 +24,9 @@ def test_defaults_are_loopback_and_the_values_of_the_protocol() -> None:
         frame_refill_seconds=1,
         handout_bucket_size=20,
         handout_refill_seconds=300,
+        blob_max_bytes=104883216,
+        blob_quota_bytes=268435456,
+        blob_ttl_seconds=3196800,
         metrics_port=None,
     )
 
@@ -46,6 +49,9 @@ def test_every_setting_comes_from_the_environment() -> None:
             "RELAY_FRAME_REFILL_SECONDS": "2",
             "RELAY_HANDOUT_BUCKET_SIZE": "4",
             "RELAY_HANDOUT_REFILL_SECONDS": "30",
+            "RELAY_BLOB_MAX_BYTES": "4294967295",
+            "RELAY_BLOB_QUOTA_BYTES": "8192",
+            "RELAY_BLOB_TTL_SECONDS": "900",
             "RELAY_METRICS_PORT": "9100",
         }
     )
@@ -66,6 +72,9 @@ def test_every_setting_comes_from_the_environment() -> None:
         frame_refill_seconds=2,
         handout_bucket_size=4,
         handout_refill_seconds=30,
+        blob_max_bytes=4294967295,
+        blob_quota_bytes=8192,
+        blob_ttl_seconds=900,
         metrics_port=9100,
     )
 
@@ -128,9 +137,17 @@ def test_relay_without_a_database_path_is_rejected(environ: dict[str, str]) -> N
         "RELAY_FRAME_REFILL_SECONDS",
         "RELAY_HANDOUT_BUCKET_SIZE",
         "RELAY_HANDOUT_REFILL_SECONDS",
+        "RELAY_BLOB_MAX_BYTES",
+        "RELAY_BLOB_QUOTA_BYTES",
+        "RELAY_BLOB_TTL_SECONDS",
     ],
 )
 @pytest.mark.parametrize("value", ["", "0", "-1", "2.5", "ten"])
 def test_limit_that_is_no_whole_number_above_0_is_rejected(name: str, value: str) -> None:
     with pytest.raises(ValueError, match=name):
         Settings.from_env({"RELAY_DATABASE": "relay.db", name: value})
+
+
+def test_largest_blob_that_does_not_fit_logged_in_is_rejected() -> None:
+    with pytest.raises(ValueError, match="RELAY_BLOB_MAX_BYTES"):
+        Settings.from_env({"RELAY_DATABASE": "relay.db", "RELAY_BLOB_MAX_BYTES": "4294967296"})

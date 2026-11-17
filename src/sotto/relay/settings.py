@@ -6,6 +6,8 @@ from typing import Self
 
 # Rule 4 of docs/protocol.md, section 8.2.
 SERVER_NAME = re.compile(r"[a-z0-9._:-]{1,255}")
+# BLOB_MAX_BYTES travels as a uint32 in LoggedIn (docs/protocol.md, section 7.7).
+MAX_UINT32 = 2**32 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +18,7 @@ class Settings:
     name: str = "127.0.0.1"
     login_deadline_seconds: float = 10
     one_time_prekey_cap: int = 100
-    max_pages: int = 262144
+    max_pages: int = 2097152
     message_ttl_seconds: int = 2592000
     sweep_interval_seconds: float = 60
     queue_max_messages: int = 1000
@@ -25,6 +27,9 @@ class Settings:
     frame_refill_seconds: float = 1
     handout_bucket_size: int = 20
     handout_refill_seconds: float = 300
+    blob_max_bytes: int = 104883216
+    blob_quota_bytes: int = 268435456
+    blob_ttl_seconds: int = 3196800
     metrics_port: int | None = None
 
     @classmethod
@@ -45,6 +50,12 @@ class Settings:
         metrics_port = environ.get("RELAY_METRICS_PORT")
         if metrics_port is not None and not metrics_port.isdecimal():
             raise ValueError(f"RELAY_METRICS_PORT is not a port number: {metrics_port!r}")
+
+        blob_max_bytes = _read_whole_number_above_0(
+            environ, "RELAY_BLOB_MAX_BYTES", defaults.blob_max_bytes
+        )
+        if blob_max_bytes > MAX_UINT32:
+            raise ValueError(f"RELAY_BLOB_MAX_BYTES is above {MAX_UINT32}: {blob_max_bytes}")
 
         name = environ.get("RELAY_NAME", defaults.name)
         if SERVER_NAME.fullmatch(name) is None:
@@ -87,6 +98,13 @@ class Settings:
             ),
             handout_refill_seconds=_read_whole_number_above_0(
                 environ, "RELAY_HANDOUT_REFILL_SECONDS", defaults.handout_refill_seconds
+            ),
+            blob_max_bytes=blob_max_bytes,
+            blob_quota_bytes=_read_whole_number_above_0(
+                environ, "RELAY_BLOB_QUOTA_BYTES", defaults.blob_quota_bytes
+            ),
+            blob_ttl_seconds=_read_whole_number_above_0(
+                environ, "RELAY_BLOB_TTL_SECONDS", defaults.blob_ttl_seconds
             ),
             metrics_port=None if metrics_port is None else int(metrics_port),
         )

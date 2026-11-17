@@ -10,11 +10,17 @@ PLAIN_COUNTERS = (
     "sotto_messages_delivered_total",
     "sotto_messages_acked_total",
     "sotto_messages_expired_total",
+    "sotto_blobs_started_total",
+    "sotto_blobs_completed_total",
+    "sotto_blobs_expired_total",
+    "sotto_blob_bytes_stored_total",
+    "sotto_blob_bytes_fetched_total",
 )
 LABELLED_COUNTERS = (
     "sotto_frames_total",
     "sotto_bundle_fetches_total",
     "sotto_limit_refusals_total",
+    "sotto_blobs_deleted_total",
 )
 
 

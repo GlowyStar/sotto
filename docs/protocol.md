@@ -37,7 +37,8 @@ the attachment of a message and the rules of a client around them (section 28).
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
 - Every guarantee of parts 1 and 2 carries a citation (section 2.6), which names the test
-  that holds it. Part 3 is written before its code and carries none (section 28.3).
+  that holds it, and so does every rule of the relay in part 3. The rules of a client in
+  part 3 are written before their code and carry none (section 28.3).
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
 
@@ -853,6 +854,8 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
   is that of section 9.4
   [test: tests/test_bundles.py::test_counts_of_logged_in_and_bundle_stored_follow_the_stored_one_time_prekeys].
 - No answer.
+- The relay of this repository serves the blob frames and sets `blob_max_bytes` to its
+  BLOB_MAX_BYTES [test: tests/test_blobs.py::test_logged_in_announces_the_largest_blob].
 - Violations, seen by the client: a second LoggedIn, or one that arrives before the client
   sent its Login, is a malformed frame (section 7.4).
 
@@ -1010,7 +1013,9 @@ so that every stored payload fits into a Deliver.
   frames. A `code` that the client does not know, 0 included, is not: the client treats
   the request as refused and stops repeating it (section 11.1).
 - The relay answers the blob frames of part 3 with an Error as well. Such an Error has
-  `blob_id` set; section 30.8 says how its key fields are set and read.
+  `blob_id` set; section 30.8 says how its key fields are set and read
+  [test: tests/test_blobs.py::test_put_of_an_unknown_blob_or_of_another_uploader_is_not_found]
+  [test: tests/test_blobs.py::test_fetch_of_a_blob_that_is_not_a_complete_one_of_the_recipient_is_not_found].
 
 ## 8. Login
 
@@ -1533,16 +1538,19 @@ bundle
 | FRAME_REFILL_SECONDS    | 1        | seconds  | The time in which one token returns to a frame bucket                 |
 | HANDOUT_BUCKET_SIZE     | 20       | tokens   | The size of the handout bucket of one target identity                 |
 | HANDOUT_REFILL_SECONDS  | 300      | seconds  | The time in which one token returns to a handout bucket, 5 minutes    |
-| MAX_PAGES               | 262144   | pages    | The page ceiling of the database, 1 GiB at pages of 4096 bytes        |
+| MAX_PAGES               | 2097152  | pages    | The page ceiling of the database, 8 GiB at pages of 4096 bytes (section 31.7) |
 | SWEEP_INTERVAL_SECONDS  | 60       | seconds  | The time between two sweeps (section 13)                              |
+| BLOB_MAX_BYTES          | 104883216 | bytes   | The largest blob the relay accepts: the blob of a file of MAX_FILE_BYTES, 100 MiB (section 29.5). Announced in LoggedIn; at most 2^32 - 1 |
+| BLOB_QUOTA_BYTES        | 268435456 | bytes   | The largest sum of the lengths of the blobs the relay holds for one uploader, 256 MiB |
+| BLOB_TTL_SECONDS        | 3196800  | seconds  | The time after the last write of a blob at which it expires, 37 days: MESSAGE_TTL_SECONDS and one week |
 
 MAX_FRAME_BYTES is a constant of the relay (see below). Every other value is the default
 of a setting that the relay reads from the environment variable of the same name with the
 prefix `RELAY_`. A test compares this table with the code, constant by constant
 [test: tests/test_docs.py::test_limits_table_is_the_settings_of_the_relay].
 
-No frame carries a limit of this table, so a client uses the defaults of the four it
-needs:
+One frame carries a limit of this table: LoggedIn carries BLOB_MAX_BYTES (section 28.2).
+A client uses the defaults of the four others it needs:
 MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECONDS.
 
 - MAX_FRAME_BYTES is a constant of relay protocol version 1. A relay that serves clients
@@ -1579,7 +1587,7 @@ again is the same as a new one, and the relay MAY forget it
   is dropped keeps a message on the relay. Acks are therefore not limited: one identity
   can send them without bound, and each makes the relay look up every pair it names.
 - Of the blob frames of part 3, a StartBlob takes a token and the others do not
-  (section 31.2).
+  (section 31.2) [test: tests/test_blobs.py::test_start_takes_a_token_and_put_fetch_and_delete_take_none].
 - The handout bucket belongs to a target identity. Handing out one of its one-time prekeys
   takes one token, whoever asks. A fetch that finds no token gets the bundle without a
   one-time prekey and no Error (section 9.3)
@@ -1606,8 +1614,9 @@ protected").
 
 ### 12.4 The limits of part 3
 
-The limits of the blob frames are in a table of their own, section 31.7. Blobs count
-toward MAX_PAGES.
+BLOB_MAX_BYTES, BLOB_QUOTA_BYTES and BLOB_TTL_SECONDS are settings of the table of
+section 12.1. BLOB_CHUNK_BYTES is a constant in the table of section 31.7, which says how
+each of the four bounds the blob frames. Blobs count toward MAX_PAGES.
 
 ## 13. Erasure on the relay
 
@@ -1665,7 +1674,8 @@ How the relay gets there:
 ### 13.4 Blobs
 
 The blobs of part 3 are deleted by a DeleteBlob or by expiry, and "deleted" means for
-them what section 13.2 says (section 31.8).
+them what section 13.2 says (section 31.8)
+[test: tests/test_blobs.py::test_deleted_blob_is_in_no_file_of_the_database_after_the_sweep].
 
 ## 14. Versioning
 
@@ -3653,9 +3663,11 @@ Part 3 changes neither version number of section 1.3.
 
 ### 28.3 Status of part 3
 
-Part 3 is written before its code. Its rules carry no citation (section 1.2), and no test
-of this repository runs a blob frame, the blob cipher or an attachment. The relay of this
-repository does not serve the blob frames and announces 0.
+The relay of this repository serves the blob frames, and the rules of the relay in
+sections 30 and 31 carry citations like the rules of part 1. The rest of part 3, the blob
+cipher, the attachment and the rules of a client (sections 29 and 32 to 34), is written
+before its code: it carries no citation (section 1.2), and no test of this repository runs
+the blob cipher or an attachment.
 
 ### 28.4 Terms
 
@@ -3821,11 +3833,13 @@ Section 7.1 lists the blob frames with the other frames of the relay protocol.
   than 0 in the LoggedIn of the connection (section 28.2). A relay without the blob
   frames treats one as a malformed frame and closes with 1008 (section 7.3).
 - The rules of state of section 7.4 hold for the blob frames: a blob frame before the
-  login closes with 1008; the relay handles the frames of a connection one at a time and
-  answers each before it handles the next; every StartBlob, PutBlob and FetchBlob gets
-  exactly one answer.
+  login closes with 1008 [test: tests/test_blobs.py::test_blob_frame_before_the_login_closes_with_1008]; the
+  relay handles the frames of a connection one at a time and answers each before it
+  handles the next; every StartBlob, PutBlob and FetchBlob gets exactly one answer
+  [test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient].
 - A client MAY send several PutBlob or FetchBlob frames before their answers arrive. The
-  answers come in the order of the frames.
+  answers come in the order of the frames
+  [test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient].
 - The field numbers follow section 7.2: `blob_id` is field 1 of every blob frame, and
   FetchBlob, BlobData and DeleteBlob share their first two fields, the pair (blob id,
   uploader), as a MessageRef shares them with a Deliver.
@@ -3843,8 +3857,8 @@ Section 7.1 lists the blob frames with the other frames of the relay protocol.
 - Valid answers: BlobStored; or Error with RATE_LIMITED, BLOB_TOO_LARGE,
   UNKNOWN_RECIPIENT, QUOTA_FULL or STORAGE_FULL, with `blob_id` set to the `blob_id` of
   the request (section 30.8).
-- Violations: a malformed StartBlob closes with 1008, a `length` of 0 included. Section
-  31.1 has the full rules.
+- Violations: a malformed StartBlob closes with 1008, a `length` of 0 included
+  [test: tests/test_frames.py::test_blob_frame_that_breaks_its_table_is_malformed]. Section 31.1 has the full rules.
 
 ### 30.3 PutBlob
 
@@ -3857,8 +3871,8 @@ Section 7.1 lists the blob frames with the other frames of the relay protocol.
 - Sent by a logged-in client: bytes of a blob that it uploads.
 - Valid answers: BlobStored; or Error with NOT_FOUND, BLOB_TOO_LARGE or STORAGE_FULL,
   with `blob_id` set.
-- Violations: a malformed PutBlob closes with 1008, an empty `data` included. Section 31.2
-  has the full rules.
+- Violations: a malformed PutBlob closes with 1008, an empty `data` included
+  [test: tests/test_frames.py::test_blob_frame_that_breaks_its_table_is_malformed]. Section 31.2 has the full rules.
 
 ### 30.4 BlobStored
 
@@ -3884,7 +3898,8 @@ Section 7.1 lists the blob frames with the other frames of the relay protocol.
 - Sent by a logged-in client: a range of a blob of which it is the recipient.
 - Valid answers: BlobData; or Error with NOT_FOUND, with `blob_id` set to the `blob_id`
   and `identity` to the `uploader` of the request.
-- Violations: a malformed FetchBlob closes with 1008. Section 31.3 has the full rules.
+- Violations: a malformed FetchBlob closes with 1008
+  [test: tests/test_frames.py::test_blob_frame_that_breaks_its_table_is_malformed]. Section 31.3 has the full rules.
 
 ### 30.6 BlobData
 
@@ -3910,7 +3925,8 @@ Section 7.1 lists the blob frames with the other frames of the relay protocol.
 - Sent by a logged-in client: the uploader gives up a blob, or the recipient is done with
   one.
 - No answer and no Error, whatever the frame names (section 31.4).
-- Violations: a malformed DeleteBlob closes with 1008.
+- Violations: a malformed DeleteBlob closes with 1008
+  [test: tests/test_frames.py::test_blob_frame_that_breaks_its_table_is_malformed].
 
 ### 30.8 The Error of a blob frame
 
@@ -3935,20 +3951,26 @@ The relay handles a well-formed StartBlob of a logged-in connection in this orde
 uploader is the identity of the connection. Steps 2 to 6 are one transaction.
 
 1. It takes a token from the frame bucket of the uploader (section 12.2). Without a token
-   the answer is Error RATE_LIMITED.
+   the answer is Error RATE_LIMITED
+   [test: tests/test_blobs.py::test_start_takes_a_token_and_put_fetch_and_delete_take_none].
 2. When the relay holds a blob with this uploader and this `blob_id`, the answer is
    BlobStored with its stored length and nothing else happens. The `recipient` and the
-   `length` of the request are not looked at.
-3. When `length` is more than BLOB_MAX_BYTES, the answer is Error BLOB_TOO_LARGE.
-4. When `recipient` is not registered, the answer is Error UNKNOWN_RECIPIENT.
+   `length` of the request are not looked at
+   [test: tests/test_blobs.py::test_repeated_start_answers_the_stored_length_and_looks_at_nothing_else].
+3. When `length` is more than BLOB_MAX_BYTES, the answer is Error BLOB_TOO_LARGE
+   [test: tests/test_blobs.py::test_start_longer_than_the_largest_blob_is_blob_too_large].
+4. When `recipient` is not registered, the answer is Error UNKNOWN_RECIPIENT
+   [test: tests/test_blobs.py::test_start_to_an_unregistered_recipient_is_unknown_recipient].
 5. When the lengths of the blobs that the relay holds for this uploader, complete or not,
    together with `length` are more than BLOB_QUOTA_BYTES, the answer is Error
-   QUOTA_FULL.
+   QUOTA_FULL [test: tests/test_blobs.py::test_start_over_the_quota_is_quota_full_and_a_deletion_makes_room].
 6. It stores the uploader, the recipient, the blob id, the length, no byte of the blob
    and the time in whole seconds, and commits. When the transaction fails because the
    database is at its page ceiling, it is rolled back and the answer is Error
-   STORAGE_FULL.
-7. The answer is BlobStored with `stored_length` 0.
+   STORAGE_FULL
+   [test: tests/test_blobs.py::test_start_and_put_into_a_full_database_answer_storage_full_and_the_relay_serves_on].
+7. The answer is BlobStored with `stored_length` 0
+   [test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient].
 
 Step 2 is what makes a StartBlob safe to repeat: it is the question "how far did this
 upload get" after a connection ended (section 33.4).
@@ -3959,20 +3981,29 @@ The relay handles a well-formed PutBlob of a logged-in connection in this order.
 uploader is the identity of the connection. Steps 1 to 4 are one transaction.
 
 1. When the relay holds no blob with this uploader and this `blob_id`, the answer is
-   Error NOT_FOUND.
+   Error NOT_FOUND
+   [test: tests/test_blobs.py::test_put_of_an_unknown_blob_or_of_another_uploader_is_not_found].
 2. When `offset` is not the stored length of the blob, the answer is BlobStored with the
    stored length and nothing is stored. This covers a PutBlob that is repeated after a
-   lost answer and one that a client sent behind a PutBlob that failed.
+   lost answer and one that a client sent behind a PutBlob that failed
+   [test: tests/test_blobs.py::test_put_at_another_offset_than_the_stored_length_stores_nothing]
+   [test: tests/test_blobs.py::test_upload_cut_with_its_connection_goes_on_from_the_stored_length].
 3. When `offset` and the length of `data` together are more than the length of the blob,
-   the answer is Error BLOB_TOO_LARGE and nothing is stored.
+   the answer is Error BLOB_TOO_LARGE and nothing is stored
+   [test: tests/test_blobs.py::test_piece_that_ends_past_the_length_is_blob_too_large_and_stores_nothing].
 4. It appends `data` to the blob, sets the time of the blob to the time in whole seconds,
    and commits. When the transaction fails because the database is at its page ceiling,
-   it is rolled back and the answer is Error STORAGE_FULL.
-5. The answer is BlobStored with the new stored length.
+   it is rolled back and the answer is Error STORAGE_FULL
+   [test: tests/test_blobs.py::test_start_and_put_into_a_full_database_answer_storage_full_and_the_relay_serves_on]
+   [test: tests/test_blobs.py::test_blob_expires_its_ttl_after_its_last_write_complete_or_not].
+5. The answer is BlobStored with the new stored length
+   [test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient].
 
-A blob is complete when its stored length reaches its length; no frame finishes it.
+A blob is complete when its stored length reaches its length; no frame finishes it
+[test: tests/test_blobs.py::test_fetch_of_a_blob_that_is_not_a_complete_one_of_the_recipient_is_not_found].
 
-A PutBlob, a FetchBlob and a DeleteBlob take no token from the frame bucket. A token for
+A PutBlob, a FetchBlob and a DeleteBlob take no token from the frame bucket
+[test: tests/test_blobs.py::test_start_takes_a_token_and_put_fetch_and_delete_take_none]. A token for
 each would hold the largest blob, 1604 frames of BLOB_CHUNK_BYTES, to one frame a second
 once the bucket is empty: more than 25 minutes. The relay handles the frames of a
 connection one at a time, so a connection moves blob bytes no faster than the relay
@@ -3985,29 +4016,40 @@ The relay handles a well-formed FetchBlob of a logged-in connection in this orde
 1. When the relay holds no complete blob with this `uploader` and this `blob_id` whose
    recipient is the identity of the connection, the answer is Error NOT_FOUND. The answer
    is the same for a blob that does not exist, one that is not complete and one with
-   another recipient.
+   another recipient
+   [test: tests/test_blobs.py::test_fetch_of_a_blob_that_is_not_a_complete_one_of_the_recipient_is_not_found].
 2. The answer is BlobData with the bytes of the blob from `offset` on: `length` of them,
    or as many as the blob has from `offset` on, when that is fewer. When `offset` is the
-   length of the blob or more, `data` is empty.
+   length of the blob or more, `data` is empty
+   [test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient].
 
-A fetch changes nothing: the blob, its time and its bytes stay as they were. Only the
-recipient of a blob receives its bytes; the uploader cannot fetch its own blob.
+A fetch changes nothing: the blob, its time and its bytes stay as they were
+[test: tests/test_blobs.py::test_blob_uploaded_in_pieces_is_fetched_byte_for_byte_by_its_recipient]
+[test: tests/test_blobs.py::test_download_cut_with_its_connection_goes_on_from_the_bytes_it_holds]. Only the
+recipient of a blob receives its bytes; the uploader cannot fetch its own blob
+[test: tests/test_blobs.py::test_fetch_of_a_blob_that_is_not_a_complete_one_of_the_recipient_is_not_found].
 
 ### 31.4 DeleteBlob
 
 - The relay deletes the blob with this `uploader` and this `blob_id` when the identity of
   the connection is its uploader, whether the blob is complete or not, or is its
-  recipient and the blob is complete. Otherwise it does nothing.
-- A DeleteBlob has no answer and no Error, and is safe to repeat.
-- A deleted blob does not count toward the quota of its uploader.
+  recipient and the blob is complete. Otherwise it does nothing
+  [test: tests/test_blobs.py::test_uploader_deletes_its_blob_complete_or_not]
+  [test: tests/test_blobs.py::test_recipient_deletes_only_a_complete_blob_and_a_start_after_it_is_a_new_blob].
+- A DeleteBlob has no answer and no Error, and is safe to repeat
+  [test: tests/test_blobs.py::test_recipient_deletes_only_a_complete_blob_and_a_start_after_it_is_a_new_blob].
+- A deleted blob does not count toward the quota of its uploader
+  [test: tests/test_blobs.py::test_start_over_the_quota_is_quota_full_and_a_deletion_makes_room].
 - The relay keeps no record of a deleted blob. A StartBlob with the same blob id after
-  the deletion makes a new blob (section 31.1).
+  the deletion makes a new blob (section 31.1)
+  [test: tests/test_blobs.py::test_recipient_deletes_only_a_complete_blob_and_a_start_after_it_is_a_new_blob].
 
 ### 31.5 Expiry
 
 The relay deletes a blob BLOB_TTL_SECONDS after its last write, the StartBlob that made
 it or the last PutBlob that appended to it, at the first sweep after that moment
-(section 13), whether it is complete or not. Nobody gets a notice.
+(section 13), whether it is complete or not. Nobody gets a notice
+[test: tests/test_blobs.py::test_blob_expires_its_ttl_after_its_last_write_complete_or_not].
 
 A sender sends the message of a file after the last write of its blob (section 33.2),
 and the relay keeps a message for MESSAGE_TTL_SECONDS at most. With the defaults a blob so
@@ -4030,46 +4072,62 @@ The codes are those of section 11.2 and two more, QUOTA_FULL and BLOB_TOO_LARGE.
 | QUOTA_FULL        | 8   | StartBlob          | The blob would take the blobs of the uploader over BLOB_QUOTA_BYTES        | Stop                         |
 | BLOB_TOO_LARGE    | 9   | StartBlob, PutBlob | `length` is more than BLOB_MAX_BYTES, or `data` would end past the length  | Stop                         |
 
-A refused blob frame stores nothing and deletes nothing. The actions are those of section
-11.1.
+A refused blob frame stores nothing and deletes nothing
+[test: tests/test_blobs.py::test_piece_that_ends_past_the_length_is_blob_too_large_and_stores_nothing]
+[test: tests/test_blobs.py::test_start_to_an_unregistered_recipient_is_unknown_recipient]
+[test: tests/test_blobs.py::test_start_longer_than_the_largest_blob_is_blob_too_large]
+[test: tests/test_blobs.py::test_start_takes_a_token_and_put_fetch_and_delete_take_none]
+[test: tests/test_blobs.py::test_start_and_put_into_a_full_database_answer_storage_full_and_the_relay_serves_on].
+The actions are those of section 11.1.
 
 ### 31.7 Limits
 
 | Name             | Default   | Unit    | Meaning                                                                      |
 |------------------|-----------|---------|------------------------------------------------------------------------------|
-| BLOB_MAX_BYTES   | 104883216 | bytes   | The largest blob the relay accepts: the blob of a file of MAX_FILE_BYTES, 100 MiB (section 29.5). Announced in LoggedIn |
-| BLOB_QUOTA_BYTES | 268435456 | bytes   | The largest sum of the lengths of the blobs the relay holds for one uploader, 256 MiB |
-| BLOB_TTL_SECONDS | 3196800   | seconds | The time after the last write of a blob at which it expires, 37 days: MESSAGE_TTL_SECONDS and one week |
 | BLOB_CHUNK_BYTES | 65408     | bytes   | The largest `data` of a PutBlob and of a BlobData, and the largest `length` of a FetchBlob: MAX_FRAME_BYTES - 128 |
+
+BLOB_MAX_BYTES, BLOB_QUOTA_BYTES and BLOB_TTL_SECONDS are settings: their rows are in the
+table of section 12.1, and the relay reads them from the environment as that section says
+[test: tests/test_docs.py::test_limits_table_is_the_settings_of_the_relay]. A test compares
+the table above with the code [test: tests/test_docs.py::test_blob_limits_table_is_the_constant_of_the_relay].
 
 - BLOB_CHUNK_BYTES is a constant of relay protocol version 1, like MAX_FRAME_BYTES. The
   128 bytes bound what the envelope and the other fields add to `data`: 32 bytes in the
-  longest PutBlob and 66 in the longest BlobData.
-- The other three are settings that a relay which serves the blob frames reads from the
-  environment, as section 12.1 says, and they join the table of section 12.1 with the code
-  that reads them.
+  longest PutBlob and 66 in the longest BlobData
+  [test: tests/test_frames.py::test_largest_put_blob_and_blob_data_fit_the_largest_frame].
 - An operator MAY lower BLOB_MAX_BYTES: a client takes the value from the LoggedIn
   (section 33.1). A larger value gains nothing, since no client sends a file of more than
   MAX_FILE_BYTES.
 - A blob counts toward the quota of its uploader until it is deleted. A blob that its
   recipient never downloads, because the user does not ask for it or the client of the
   recipient does not implement part 3, holds its room for BLOB_TTL_SECONDS.
-- Blobs count toward MAX_PAGES (section 12.3). With the defaults the database holds about
-  ten blobs of the largest length, so a relay that serves files needs a larger MAX_PAGES.
+- Blobs count toward MAX_PAGES (section 12.3). Its default, 8 GiB, holds about eighty
+  blobs of the largest length, or the full quotas of 32 uploaders. The reason: with the
+  1 GiB that parts 1 and 2 had, three users who each send a long video fill the relay,
+  and every Send and upload after that gets STORAGE_FULL. 8 GiB still fits the disk of a
+  small host with room for the write-ahead log, which the ceiling does not bound
+  (section 13.2). The ceiling is a guard against a full disk, not a sizing: an operator
+  whose disk is smaller lowers it, one who serves more files raises it.
 
 ### 31.8 Storage, erasure and metrics
 
 - The relay of this repository keeps a blob, with its bytes, in its database file, the
   one file of its state. It stores the `data` of each PutBlob as a piece of its own, so
-  that a PutBlob writes its own bytes and not the blob again. It sends BlobStored only
-  after the commit of what the request stored, so that a stored length it reported
-  survives a kill of the relay process.
+  that a PutBlob writes its own bytes and not the blob again
+  [test: tests/test_process.py::test_blob_stored_length_survives_a_kill_of_the_relay].
+  It sends BlobStored only after the commit of what the request stored
+  [test: tests/test_blobs.py::test_blob_stored_is_sent_after_the_commit_of_the_piece], so that a stored length
+  it reported survives a kill of the relay process
+  [test: tests/test_process.py::test_blob_stored_length_survives_a_kill_of_the_relay]
+  and a restart [test: tests/test_blobs.py::test_upload_goes_on_from_the_stored_length_after_a_restart_of_the_relay].
 - A blob is deleted by a DeleteBlob (section 31.4) or by expiry in a sweep
   (section 31.5). "Deleted" means what section 13.2 says:
   after the first sweep that follows the deletion, the bytes of the blob and its blob id
-  are in none of the files of the database. Section 13.3 holds for blobs as well.
+  are in none of the files of the database
+  [test: tests/test_blobs.py::test_deleted_blob_is_in_no_file_of_the_database_after_the_sweep]. Section 13.3
+  holds for blobs as well.
 - The metrics of the blob frames carry no label that names an identity, as the other
-  metrics:
+  metrics [test: tests/test_metrics.py::test_metrics_count_the_blob_frames_without_an_identity]:
 
 | Name                             | Kind    | Counts                                                      |
 |----------------------------------|---------|-------------------------------------------------------------|

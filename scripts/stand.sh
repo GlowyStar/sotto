@@ -25,6 +25,10 @@ grep -q '^sotto_messages_stored_total [1-9]' <<<"$metrics" || {
     echo "the metrics count no stored message" >&2
     exit 1
 }
+grep -q '^sotto_blobs_started_total [1-9]' <<<"$metrics" || {
+    echo "the metrics count no started blob" >&2
+    exit 1
+}
 
 # What the tests above stored outlives the relay process because the database is on a volume.
 "${compose[@]}" restart relay

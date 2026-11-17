@@ -6,7 +6,7 @@ from pathlib import Path
 from google.protobuf.descriptor_pb2 import FileDescriptorProto, FileDescriptorSet
 from grpc_tools import protoc  # type: ignore[import-untyped]
 
-from sotto.relay.frames import MAX_FRAME_BYTES
+from sotto.relay.frames import BLOB_CHUNK_BYTES, MAX_FRAME_BYTES
 from sotto.relay.server import CloseCode
 from sotto.relay.settings import Settings
 
@@ -24,6 +24,7 @@ PEER_PREAMBLE = 'syntax = "proto3";\n\npackage sotto;\n\n'
 SCHEMA_LISTING = re.compile(r"^```proto\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 CLOSE_CODE_ROW = re.compile(r"^\| (\d{4}) \| (\w+) +\|", re.MULTILINE)
 LIMITS_TABLE = re.compile(r"^### 12\.1 The table\n(.*?)^### ", re.DOTALL | re.MULTILINE)
+BLOB_LIMITS_TABLE = re.compile(r"^### 31\.7 Limits\n(.*?)^### ", re.DOTALL | re.MULTILINE)
 LIMIT_ROW = re.compile(r"^\| ([A-Z_]+) +\| (\d+) +\|", re.MULTILINE)
 
 
@@ -98,6 +99,15 @@ def test_limits_table_is_the_settings_of_the_relay() -> None:
     assert {name: getattr(read, name.lower()) for name in settings_names} == dict.fromkeys(
         settings_names, 7
     )
+
+
+def test_blob_limits_table_is_the_constant_of_the_relay() -> None:
+    section = BLOB_LIMITS_TABLE.search(PROTOCOL)
+    assert section is not None
+
+    table = {name: int(default) for name, default in LIMIT_ROW.findall(section.group(1))}
+
+    assert table == {"BLOB_CHUNK_BYTES": BLOB_CHUNK_BYTES}
 
 
 def compile_schema(source: str, folder: Path) -> FileDescriptorProto:

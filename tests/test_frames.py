@@ -8,16 +8,24 @@ from relay_harness import build_upload
 
 from sotto.proto.sotto_pb2 import (
     Ack,
+    BlobData,
     ClientFrame,
+    DeleteBlob,
+    FetchBlob,
     FetchBundle,
     Login,
     MessageRef,
     OneTimePrekey,
+    PutBlob,
     Send,
+    ServerFrame,
     SignedPrekey,
+    StartBlob,
     UploadBundle,
 )
 from sotto.relay.frames import (
+    BLOB_CHUNK_BYTES,
+    MAX_FRAME_BYTES,
     MAX_PAYLOAD_BYTES,
     MalformedFrameError,
     ParsedFrame,
@@ -49,12 +57,31 @@ acks = st.builds(
         st.builds(MessageRef, message_id=message_ids, sender=fields), max_size=3
     ),
 )
+blob_ids = st.one_of(st.binary(max_size=24), st.binary(min_size=16, max_size=16))
+chunk_lengths = st.sampled_from([0, 1, BLOB_CHUNK_BYTES, BLOB_CHUNK_BYTES + 1])
+starts = st.builds(
+    StartBlob, blob_id=blob_ids, recipient=fields, length=st.sampled_from([0, 1, 2**32 - 1])
+)
+puts = st.builds(
+    PutBlob,
+    blob_id=blob_ids,
+    offset=ids,
+    data=st.one_of(st.binary(max_size=8), chunk_lengths.map(bytes)),
+)
+blob_fetches = st.builds(
+    FetchBlob, blob_id=blob_ids, uploader=fields, offset=ids, length=chunk_lengths
+)
+deletes = st.builds(DeleteBlob, blob_id=blob_ids, uploader=fields)
 serialized_frames = st.one_of(
     logins.map(lambda login: ClientFrame(login=login)),
     uploads.map(lambda upload: ClientFrame(upload_bundle=upload)),
     fetches.map(lambda fetch: ClientFrame(fetch_bundle=fetch)),
     sends.map(lambda send: ClientFrame(send=send)),
     acks.map(lambda ack: ClientFrame(ack=ack)),
+    starts.map(lambda start: ClientFrame(start_blob=start)),
+    puts.map(lambda put: ClientFrame(put_blob=put)),
+    blob_fetches.map(lambda fetch: ClientFrame(fetch_blob=fetch)),
+    deletes.map(lambda delete: ClientFrame(delete_blob=delete)),
 ).map(lambda frame: frame.SerializeToString())
 damaged_frames = st.tuples(serialized_frames, st.binary(max_size=8), st.integers(0, 200)).map(
     lambda parts: parts[0][: parts[2]] + parts[1] + parts[0][parts[2] :]
@@ -92,6 +119,12 @@ def lengths_of(frame: ParsedFrame) -> list[int]:
                 for message in frame.messages
                 for length in (len(message.message_id), len(message.sender))
             ]
+        case StartBlob():
+            return [len(frame.blob_id), len(frame.recipient)]
+        case PutBlob():
+            return [len(frame.blob_id)]
+        case FetchBlob() | DeleteBlob():
+            return [len(frame.blob_id), len(frame.uploader)]
 
 
 def test_complete_login_is_returned_with_its_fields() -> None:
@@ -236,6 +269,60 @@ def test_fetch_with_an_identity_of_another_length_is_malformed(length: int) -> N
         parse_client_frame(ClientFrame(fetch_bundle=fetch).SerializeToString())
 
 
+def complete_blob_frames() -> list[ClientFrame]:
+    blob_id, key = os.urandom(16), os.urandom(32)
+    return [
+        ClientFrame(start_blob=StartBlob(blob_id=blob_id, recipient=key, length=2**32 - 1)),
+        ClientFrame(put_blob=PutBlob(blob_id=blob_id, offset=0, data=b"x")),
+        ClientFrame(
+            put_blob=PutBlob(blob_id=blob_id, offset=7, data=os.urandom(BLOB_CHUNK_BYTES))
+        ),
+        ClientFrame(fetch_blob=FetchBlob(blob_id=blob_id, uploader=key, offset=0, length=1)),
+        ClientFrame(
+            fetch_blob=FetchBlob(
+                blob_id=blob_id, uploader=key, offset=2**32 - 1, length=BLOB_CHUNK_BYTES
+            )
+        ),
+        ClientFrame(delete_blob=DeleteBlob(blob_id=blob_id, uploader=key)),
+    ]
+
+
+@pytest.mark.parametrize("frame", complete_blob_frames())
+def test_complete_blob_frame_is_returned_with_its_fields(frame: ClientFrame) -> None:
+    parsed = parse_client_frame(frame.SerializeToString())
+
+    assert parsed == getattr(frame, str(frame.WhichOneof("frame")))
+
+
+def spoiled_blob_frames() -> list[ClientFrame]:
+    blob_id, key = os.urandom(16), os.urandom(32)
+    too_long = os.urandom(BLOB_CHUNK_BYTES + 1)
+    return [
+        ClientFrame(start_blob=StartBlob(blob_id=blob_id[:15], recipient=key, length=1)),
+        ClientFrame(start_blob=StartBlob(blob_id=blob_id, recipient=key[:31], length=1)),
+        ClientFrame(start_blob=StartBlob(blob_id=blob_id, recipient=key, length=0)),
+        ClientFrame(put_blob=PutBlob(blob_id=blob_id + b"x", offset=0, data=b"x")),
+        ClientFrame(put_blob=PutBlob(blob_id=blob_id, offset=0, data=b"")),
+        ClientFrame(put_blob=PutBlob(blob_id=blob_id, offset=0, data=too_long)),
+        ClientFrame(fetch_blob=FetchBlob(blob_id=b"", uploader=key, offset=0, length=1)),
+        ClientFrame(fetch_blob=FetchBlob(blob_id=blob_id, uploader=b"", offset=0, length=1)),
+        ClientFrame(fetch_blob=FetchBlob(blob_id=blob_id, uploader=key, offset=0, length=0)),
+        ClientFrame(
+            fetch_blob=FetchBlob(
+                blob_id=blob_id, uploader=key, offset=0, length=BLOB_CHUNK_BYTES + 1
+            )
+        ),
+        ClientFrame(delete_blob=DeleteBlob(blob_id=blob_id[:15], uploader=key)),
+        ClientFrame(delete_blob=DeleteBlob(blob_id=blob_id, uploader=key + b"x")),
+    ]
+
+
+@pytest.mark.parametrize("frame", spoiled_blob_frames())
+def test_blob_frame_that_breaks_its_table_is_malformed(frame: ClientFrame) -> None:
+    with pytest.raises(MalformedFrameError):
+        parse_client_frame(frame.SerializeToString())
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -285,13 +372,42 @@ def test_any_bytes_give_a_complete_frame_or_the_protocol_error(message: bytes) -
     except MalformedFrameError:
         return
 
-    expected = {Login: [32, 32, 64], FetchBundle: [32], Send: [16, 32]}.get(type(frame))
+    expected = {
+        Login: [32, 32, 64],
+        FetchBundle: [32],
+        Send: [16, 32],
+        StartBlob: [16, 32],
+        PutBlob: [16],
+        FetchBlob: [16, 32],
+        DeleteBlob: [16, 32],
+    }.get(type(frame))
     if isinstance(frame, UploadBundle):
         assert frame.HasField("signed_prekey")
         expected = [32, 64, 32, 64, *[32] * len(frame.one_time_prekeys)]
     if isinstance(frame, Send):
         assert 1 <= len(frame.payload) <= MAX_PAYLOAD_BYTES
+    if isinstance(frame, StartBlob):
+        assert frame.length >= 1
+    if isinstance(frame, PutBlob):
+        assert 1 <= len(frame.data) <= BLOB_CHUNK_BYTES
+    if isinstance(frame, FetchBlob):
+        assert 1 <= frame.length <= BLOB_CHUNK_BYTES
     if isinstance(frame, Ack):
         assert frame.messages
         expected = [16, 32] * len(frame.messages)
     assert lengths_of(frame) == expected
+
+
+def test_largest_put_blob_and_blob_data_fit_the_largest_frame() -> None:
+    blob_id, key, data = os.urandom(16), os.urandom(32), os.urandom(BLOB_CHUNK_BYTES)
+    put = ClientFrame(put_blob=PutBlob(blob_id=blob_id, offset=2**32 - 1, data=data))
+    blob_data = ServerFrame(
+        blob_data=BlobData(blob_id=blob_id, uploader=key, offset=2**32 - 1, data=data)
+    )
+
+    overheads = [
+        len(frame.SerializeToString()) - BLOB_CHUNK_BYTES for frame in (put, blob_data)
+    ]
+
+    assert overheads == [32, 66]
+    assert all(BLOB_CHUNK_BYTES + overhead <= MAX_FRAME_BYTES for overhead in overheads)

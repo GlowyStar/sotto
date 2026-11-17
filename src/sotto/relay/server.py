@@ -24,15 +24,21 @@ from sotto.crypto.identity import (
 )
 from sotto.proto.sotto_pb2 import (
     Ack,
+    BlobData,
+    BlobStored,
     BundleStored,
+    DeleteBlob,
     Error,
     ErrorCode,
+    FetchBlob,
     FetchBundle,
     Hello,
     LoggedIn,
     Login,
+    PutBlob,
     Send,
     ServerFrame,
+    StartBlob,
     Stored,
     UploadBundle,
 )
@@ -47,7 +53,10 @@ from sotto.relay.logs import ConnectionLogger
 from sotto.relay.metrics import Metrics
 from sotto.relay.settings import Settings
 from sotto.relay.storage import (
+    BlobNotFoundError,
+    BlobTooLargeError,
     QueueFullError,
+    QuotaFullError,
     Storage,
     StorageFullError,
     UnknownRecipientError,
@@ -61,6 +70,8 @@ METRICS_PATH = "/metrics"
 PROTOCOL_VERSION = 1
 # The code that websockets closes with when a handler fails (section 11.3).
 INTERNAL_ERROR = 1011
+
+type AnsweredFrame = UploadBundle | FetchBundle | Send | StartBlob | PutBlob | FetchBlob
 
 
 class CloseCode(IntEnum):
@@ -107,8 +118,8 @@ async def close_connection(connection: ServerConnection, code: CloseCode) -> Non
     await connection.close(code)
 
 
-def refusal(frame: UploadBundle | FetchBundle | Send, code: ErrorCode) -> ServerFrame:
-    """Builds the Error for a refused frame with the key field of section 7.16."""
+def refusal(frame: AnsweredFrame, code: ErrorCode) -> ServerFrame:
+    """Builds the Error for a refused frame with the key fields of sections 7.16 and 30.8."""
     match frame:
         case Send():
             return ServerFrame(error=Error(code=code, message_id=frame.message_id))
@@ -116,6 +127,11 @@ def refusal(frame: UploadBundle | FetchBundle | Send, code: ErrorCode) -> Server
             return ServerFrame(error=Error(code=code, identity=frame.identity))
         case UploadBundle():
             return ServerFrame(error=Error(code=code))
+        case StartBlob() | PutBlob():
+            return ServerFrame(error=Error(code=code, blob_id=frame.blob_id))
+        case FetchBlob():
+            error = Error(code=code, blob_id=frame.blob_id, identity=frame.uploader)
+            return ServerFrame(error=error)
 
 
 def result_of(answer: ServerFrame) -> str:
@@ -181,6 +197,7 @@ class Relay:
         gauges = {
             "sotto_connections_open": self.open_connections,
             "sotto_database_bytes": self.storage.size_bytes(),
+            "sotto_blob_bytes": self.storage.blob_bytes(),
         }
         return connection.respond(HTTPStatus.OK, self.metrics.render(gauges))
 
@@ -227,7 +244,11 @@ class Relay:
             connection.logger.info("logged in")
             self.metrics.count("sotto_logins_total")
             count = self.storage.count_one_time_prekeys(identity_key)
-            logged_in = ServerFrame(logged_in=LoggedIn(one_time_prekey_count=count))
+            logged_in = ServerFrame(
+                logged_in=LoggedIn(
+                    one_time_prekey_count=count, blob_max_bytes=self.settings.blob_max_bytes
+                )
+            )
             await connection.send(logged_in.SerializeToString())
 
             delivery = asyncio.create_task(
@@ -262,8 +283,14 @@ class Relay:
                 self.metrics.count("sotto_messages_acked_total", acked)
                 self.metrics.count("sotto_frames_total", type="Ack", result="none")
                 continue
+            if isinstance(frame, DeleteBlob):
+                self.delete_blob(identity_key, frame)
+                self.metrics.count("sotto_frames_total", type="DeleteBlob", result="none")
+                continue
 
-            if self.frame_buckets.take(identity_key):
+            # A token per piece would hold a large blob to a frame a second (section 31.2).
+            takes_no_token = isinstance(frame, PutBlob | FetchBlob)
+            if takes_no_token or self.frame_buckets.take(identity_key):
                 answer = self.answer_request(identity_key, frame)
             else:
                 self.metrics.count("sotto_limit_refusals_total", kind="frame_bucket")
@@ -273,10 +300,8 @@ class Relay:
             )
             await connection.send(answer.SerializeToString())
 
-    def answer_request(
-        self, identity_key: bytes, frame: UploadBundle | FetchBundle | Send
-    ) -> ServerFrame:
-        """Answers a frame that took its token from the frame bucket of the identity."""
+    def answer_request(self, identity_key: bytes, frame: AnsweredFrame) -> ServerFrame:
+        """Answers a frame that passed the frame bucket of the identity or needs no token."""
         match frame:
             case UploadBundle():
                 return self.answer_upload(identity_key, frame)
@@ -284,6 +309,12 @@ class Relay:
                 return self.answer_fetch(frame)
             case Send():
                 return self.answer_send(identity_key, frame)
+            case StartBlob():
+                return self.answer_start_blob(identity_key, frame)
+            case PutBlob():
+                return self.answer_put_blob(identity_key, frame)
+            case FetchBlob():
+                return self.answer_fetch_blob(identity_key, frame)
 
     async def deliver_queue(
         self, connection: ServerConnection, identity_key: bytes, wakeup: asyncio.Event
@@ -386,6 +417,67 @@ class Relay:
         self.metrics.count("sotto_bundle_fetches_total", one_time_prekey=handed_out)
         return ServerFrame(bundle=bundle)
 
+    def answer_start_blob(self, uploader: bytes, start: StartBlob) -> ServerFrame:
+        """Runs steps 2 to 7 of section 31.1 for the identity of the connection."""
+        try:
+            started = self.storage.start_blob(
+                uploader,
+                start,
+                max_bytes=self.settings.blob_max_bytes,
+                quota_bytes=self.settings.blob_quota_bytes,
+            )
+        except BlobTooLargeError:
+            code = ErrorCode.BLOB_TOO_LARGE
+        except UnknownRecipientError:
+            code = ErrorCode.UNKNOWN_RECIPIENT
+        except QuotaFullError:
+            self.metrics.count("sotto_limit_refusals_total", kind="blob_quota")
+            code = ErrorCode.QUOTA_FULL
+        except StorageFullError:
+            code = ErrorCode.STORAGE_FULL
+        else:
+            if started.is_new:
+                self.metrics.count("sotto_blobs_started_total")
+            stored = BlobStored(blob_id=start.blob_id, stored_length=started.stored_length)
+            return ServerFrame(blob_stored=stored)
+        return refusal(start, code)
+
+    def answer_put_blob(self, uploader: bytes, put: PutBlob) -> ServerFrame:
+        """Runs section 31.2 for the identity of the connection."""
+        try:
+            done = self.storage.put_blob(uploader, put)
+        except BlobNotFoundError:
+            code = ErrorCode.NOT_FOUND
+        except BlobTooLargeError:
+            code = ErrorCode.BLOB_TOO_LARGE
+        except StorageFullError:
+            code = ErrorCode.STORAGE_FULL
+        else:
+            self.metrics.count("sotto_blob_bytes_stored_total", done.appended)
+            if done.completes:
+                self.metrics.count("sotto_blobs_completed_total")
+            stored = BlobStored(blob_id=put.blob_id, stored_length=done.stored_length)
+            return ServerFrame(blob_stored=stored)
+        return refusal(put, code)
+
+    def answer_fetch_blob(self, recipient: bytes, fetch: FetchBlob) -> ServerFrame:
+        """Runs section 31.3 for the identity of the connection."""
+        data = self.storage.fetch_blob(recipient, fetch)
+        if data is None:
+            return refusal(fetch, ErrorCode.NOT_FOUND)
+
+        self.metrics.count("sotto_blob_bytes_fetched_total", len(data))
+        blob_data = BlobData(
+            blob_id=fetch.blob_id, uploader=fetch.uploader, offset=fetch.offset, data=data
+        )
+        return ServerFrame(blob_data=blob_data)
+
+    def delete_blob(self, identity_key: bytes, delete: DeleteBlob) -> None:
+        """Runs section 31.4: deletes the blob when the identity may, else does nothing."""
+        if self.storage.delete_blob(identity_key, delete):
+            by = "uploader" if delete.uploader == identity_key else "recipient"
+            self.metrics.count("sotto_blobs_deleted_total", by=by)
+
 
 async def sweep_periodically(relay: Relay) -> None:
     """Sweeps the database every sweep interval until it is cancelled (section 13.2).
@@ -398,15 +490,21 @@ async def sweep_periodically(relay: Relay) -> None:
         relay.frame_buckets.forget_full()
         relay.handout_buckets.forget_full()
         try:
-            expired = relay.storage.sweep(ttl_seconds=settings.message_ttl_seconds)
+            swept = relay.storage.sweep(
+                ttl_seconds=settings.message_ttl_seconds,
+                blob_ttl_seconds=settings.blob_ttl_seconds,
+            )
         except Exception:
             # The next sweep can succeed, and a relay that stopped sweeping would keep
             # deleted messages in its files without a sign.
             logger.exception("the sweep failed")
             continue
-        relay.metrics.count("sotto_messages_expired_total", expired)
-        if expired:
-            logger.info("the sweep deleted %d expired messages", expired)
+        relay.metrics.count("sotto_messages_expired_total", swept.messages)
+        relay.metrics.count("sotto_blobs_expired_total", swept.blobs)
+        if swept.messages:
+            logger.info("the sweep deleted %d expired messages", swept.messages)
+        if swept.blobs:
+            logger.info("the sweep deleted %d expired blobs", swept.blobs)
 
 
 @asynccontextmanager
