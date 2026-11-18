@@ -5,15 +5,21 @@ argument or prints it (docs/protocol.md, section 22.4). Received files go into t
 `received` of the data directory (section 32.2). The profile of part 4 is set offline and
 goes to the contacts at the next connection; the local name of a contact is the name used.
 `chat` prints every message with its number in the log, which the commands of part 5 take
-(section 39), and counts a message as read once it printed it.
+(section 39), and counts a message as read once it printed it. At a terminal `chat`
+edits the typed line in place under what it prints; from a pipe it reads plain lines.
 """
 
 import argparse
 import asyncio
+import codecs
 import os
 import re
+import signal
 import sys
+import termios
 import threading
+import tty
+import unicodedata
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -54,6 +60,15 @@ SILENT_RESULTS = frozenset({"DUPLICATE", "NOT_A_CONTACT", "UNKNOWN_CONTENT"})
 CHAT_COMMANDS = (
     "commands: /reply N text, /edit N text, /delete N, /timer [off|30s|5m|1h|1d|1w], /quit"
 )
+# One row of an 80-column terminal.
+CHAT_HINT = "Enter sends, /quit leaves; /reply N text, /edit N text, /delete N, /timer 1h|off"
+PROMPT = "> "
+READ_BYTES = 4096
+FALLBACK_COLUMNS = 80
+# A key as a terminal sends it: a CSI or SS3 sequence, Alt with b, f or Backspace, or a
+# character; a lone Esc is a control character like any other.
+KEY = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1bO.|\x1b[bf\x7f]|.", re.DOTALL)
+UNFINISHED_KEY = re.compile(r"\x1b(\[[0-?]*[ -/]*|O)?\Z")
 TIMER = re.compile(r"([0-9]{1,7})([smhdw])")
 TIMER_UNITS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
 QUOTE_SHOWN = 60
@@ -299,21 +314,21 @@ def _reset(arguments: argparse.Namespace) -> int:
 async def _run_chat(transport: Transport, contact: bytes) -> int:
     lines: asyncio.Queue[str | None] = asyncio.Queue()
     leaving = asyncio.Event()
-    _read_lines_in_the_background(lines, leaving)
     names = _names(transport.client)
-    async with asyncio.TaskGroup() as tasks:
-        connection = tasks.create_task(transport.run())
-        printer = tasks.create_task(_print_events(transport, names))
-        typing = tasks.create_task(_send_lines(transport, contact, lines))
-        quitting = tasks.create_task(leaving.wait())
-        await asyncio.wait({connection, quitting}, return_when="FIRST_COMPLETED")
-        stopped = connection.done()
-        if not stopped:
-            # The lines typed before /quit go out, unless a send waits for the relay.
-            await asyncio.wait({typing}, timeout=QUIT_GRACE_SECONDS)
-        for task in (printer, connection, typing, quitting):
-            task.cancel()
-    _print_waiting_events(transport, names)
+    with _typed_lines(lines, leaving):
+        async with asyncio.TaskGroup() as tasks:
+            connection = tasks.create_task(transport.run())
+            printer = tasks.create_task(_print_events(transport, names))
+            typing = tasks.create_task(_send_lines(transport, contact, lines))
+            quitting = tasks.create_task(leaving.wait())
+            await asyncio.wait({connection, quitting}, return_when="FIRST_COMPLETED")
+            stopped = connection.done()
+            if not stopped:
+                # The lines typed before /quit go out, unless a send waits for the relay.
+                await asyncio.wait({typing}, timeout=QUIT_GRACE_SECONDS)
+            for task in (printer, connection, typing, quitting):
+                task.cancel()
+        _print_waiting_events(transport, names)
     return 1 if stopped else 0
 
 
@@ -466,9 +481,17 @@ def _number(text: str) -> int:
 
 
 async def _print_events(transport: Transport, names: dict[bytes, str]) -> None:
+    """Prints the events of a chat, and the hint once after the first `connected` when the
+    line is typed at a terminal."""
     progress: dict[bytes, int] = {}
+    hint_is_due = _typed is not None
     while True:
-        _show(transport, await transport.events.get(), names, progress)
+        event = await transport.events.get()
+        _show(transport, event, names, progress)
+        hint_now = hint_is_due and isinstance(event, Connected)
+        if hint_now:
+            _say(CHAT_HINT)
+            hint_is_due = False
 
 
 def _print_waiting_events(transport: Transport, names: dict[bytes, str]) -> None:
@@ -663,7 +686,11 @@ def _write_avatar(path: Path, avatar: bytes | None) -> None:
 
 
 def _say(line: str) -> None:
-    print(line, flush=True)
+    if _typed is None:
+        print(line, flush=True)
+        return
+    # The typed line gives its row to the printed one and is drawn again under it.
+    print(f"\r\x1b[K{line}\n{_typed.drawn(_columns())}", end="", flush=True)
 
 
 def _read_lines_in_the_background(
@@ -689,6 +716,182 @@ def _read_lines_in_the_background(
             return
 
     threading.Thread(target=read, daemon=True).start()
+
+
+class TypedLine:
+    """The line typed at a terminal and the cursor in it, edited by the keys of an
+    Emacs-style line editor."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.cursor = 0
+
+    def press(self, key: str) -> str | None:
+        """Applies one key as `KEY` cuts them; returns the line that Enter ends.
+
+        A key it does not know changes nothing, and a control character is never typed.
+        """
+        text, cursor = self.text, self.cursor
+        match key:
+            case "\r" | "\n":
+                self.text, self.cursor = "", 0
+                return text
+            case "\x7f" | "\x08":
+                start = max(cursor - 1, 0)
+                text, cursor = text[:start] + text[cursor:], start
+            case "\x04" | "\x1b[3~":
+                text = text[:cursor] + text[cursor + 1 :]
+            case "\x17" | "\x1b\x7f":
+                start = _previous_word(text, cursor)
+                text, cursor = text[:start] + text[cursor:], start
+            case "\x15":
+                text, cursor = text[cursor:], 0
+            case "\x0b":
+                text = text[:cursor]
+            case "\x02" | "\x1b[D" | "\x1bOD":
+                cursor = max(cursor - 1, 0)
+            case "\x06" | "\x1b[C" | "\x1bOC":
+                cursor = min(cursor + 1, len(text))
+            case "\x1bb" | "\x1b[1;3D" | "\x1b[1;5D":
+                cursor = _previous_word(text, cursor)
+            case "\x1bf" | "\x1b[1;3C" | "\x1b[1;5C":
+                cursor = _next_word(text, cursor)
+            case "\x01" | "\x1b[H" | "\x1bOH" | "\x1b[1~" | "\x1b[7~":
+                cursor = 0
+            case "\x05" | "\x1b[F" | "\x1bOF" | "\x1b[4~" | "\x1b[8~":
+                cursor = len(text)
+            case _ if len(key) == 1 and not is_control(key):
+                text, cursor = text[:cursor] + key + text[cursor:], cursor + 1
+        self.text, self.cursor = text, cursor
+        return None
+
+    def drawn(self, columns: int) -> str:
+        """The prompt and the part of the line around the cursor that fits one row, then
+        the cursor in its place. A long line scrolls sideways and never wraps, because a
+        line printed above a wrapped one would split it."""
+        room = columns - len(PROMPT) - 1
+        widths = [_width(character) for character in self.text]
+        start, before = self.cursor, 0
+        for width in reversed(widths[: self.cursor]):
+            if before + width > room:
+                break
+            start -= 1
+            before += width
+        end, used = self.cursor, before
+        for width in widths[self.cursor :]:
+            if used + width > room:
+                break
+            end += 1
+            used += width
+        return f"\r{PROMPT}{self.text[start:end]}\x1b[K\r\x1b[{len(PROMPT) + before}C"
+
+
+_typed: TypedLine | None = None
+
+
+@contextmanager
+def _typed_lines(lines: asyncio.Queue[str | None], leaving: asyncio.Event) -> Iterator[None]:
+    """Feeds the lines the user types to the queue, then None, and sets `leaving` at /quit
+    or the end of input: edited in place when stdin and stdout are a terminal, read as
+    they come otherwise."""
+    stdin_is_piped = not sys.stdin.isatty()
+    stdout_is_piped = not sys.stdout.isatty()
+    if stdin_is_piped or stdout_is_piped:
+        _read_lines_in_the_background(lines, leaving)
+        yield
+        return
+
+    global _typed
+    descriptor = sys.stdin.fileno()
+    saved = tty.setcbreak(descriptor, termios.TCSANOW)
+    _typed = TypedLine()
+    try:
+        _read_keys_in_the_loop(descriptor, _typed, lines, leaving)
+        yield
+    finally:
+        loop = asyncio.get_running_loop()
+        loop.remove_reader(descriptor)
+        loop.remove_signal_handler(signal.SIGTERM)
+        _typed = None
+        print("\r\x1b[K", end="", flush=True)
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+
+
+def _read_keys_in_the_loop(
+    descriptor: int,
+    typed: TypedLine,
+    lines: asyncio.Queue[str | None],
+    leaving: asyncio.Event,
+) -> None:
+    """Reads the keys of a terminal in cbreak mode in the event loop and draws the typed
+    line after each read; the lines go to the queue as `_read_lines_in_the_background`
+    puts them. SIGTERM ends the input as /quit does, so the terminal gets its modes back."""
+    loop = asyncio.get_running_loop()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    unfinished = ""
+
+    def end_the_input() -> None:
+        loop.remove_reader(descriptor)
+        lines.put_nowait(None)
+        leaving.set()
+
+    def read() -> None:
+        nonlocal unfinished
+        try:
+            data = os.read(descriptor, READ_BYTES)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b""
+        if not data:
+            end_the_input()
+            return
+        keys = unfinished + decoder.decode(data)
+        complete = UNFINISHED_KEY.sub("", keys, count=1)
+        unfinished = keys[len(complete) :]
+        if _take_keys(typed, complete, lines):
+            print(typed.drawn(_columns()), end="", flush=True)
+        else:
+            end_the_input()
+
+    loop.add_reader(descriptor, read)
+    loop.add_signal_handler(signal.SIGTERM, end_the_input)
+
+
+def _columns() -> int:
+    """The width of the terminal; a pseudo-terminal that was never given a size has 0."""
+    return os.get_terminal_size(sys.stdout.fileno()).columns or FALLBACK_COLUMNS
+
+
+def _take_keys(typed: TypedLine, keys: str, lines: asyncio.Queue[str | None]) -> bool:
+    """Presses the keys and queues each line that Enter ends; False once /quit or Ctrl-D
+    on an empty line ends the input."""
+    for key in KEY.findall(keys):
+        ends_the_input = key == "\x04" and not typed.text
+        if ends_the_input:
+            return False
+        line = typed.press(key)
+        if line == QUIT:
+            return False
+        if line is not None:
+            lines.put_nowait(line)
+    return True
+
+
+def _previous_word(text: str, cursor: int) -> int:
+    return len(re.sub(r"\w*\W*\Z", "", text[:cursor], count=1))
+
+
+def _next_word(text: str, cursor: int) -> int:
+    return len(text) - len(re.sub(r"\A\W*\w*", "", text[cursor:], count=1))
+
+
+def _width(character: str) -> int:
+    """The columns a terminal gives a character: none for a combining mark, two for a
+    wide one."""
+    if unicodedata.category(character) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
 
 
 @contextmanager
