@@ -95,10 +95,17 @@ Python 3.14 and Docker.
    uv run sotto --data-dir alice chat bob    # terminal 1
    ```
 
-   Both print `connected`. A line typed in one terminal is printed in the other as
-   `#1 alice: <the line>`, where `#1` is the number of the message in that terminal's
-   log. `/quit` or the end of input leaves the chat; what the other side sends meanwhile
-   waits at the relay and is printed by the next `chat`.
+   Both print `connected`, a line on how to send and leave, and the prompt `> `. A line
+   typed in one terminal is printed in the other as `#1 alice: <the line>`, where `#1` is
+   the number of the message in that terminal's log. `/quit`, Ctrl-D on an empty line or
+   the end of input leaves the chat; what the other side sends meanwhile waits at the
+   relay and is printed by the next `chat`.
+
+   The typed line is edited in place: the arrows, Home and End, Option- or Ctrl-arrows by
+   word, Backspace, Delete and Ctrl-A, E, B, F, U, K, W, D; other keys do nothing. What
+   arrives meanwhile is printed above it, and a line wider than the window scrolls
+   sideways. When stdin or stdout is not a terminal, the chat reads plain lines and prints
+   neither the prompt nor the help line.
 
    Under your own message the chat prints `#1 sent` when the relay has it, then
    `#1 delivered` or `#1 read` when the other client reports it. A message counts as

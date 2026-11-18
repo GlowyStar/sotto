@@ -1,16 +1,24 @@
 import asyncio
 import os
+import pty
+import signal
 import sys
-from dataclasses import dataclass
+import termios
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from sotto.client.cli import (
+    CHAT_HINT,
     DEFAULT_RELAY,
+    KEY,
+    PROMPT,
     RECEIVED_FILES,
     CommandError,
+    TypedLine,
     _print_event,
+    _read_keys_in_the_loop,
     describe_timer,
     main,
     parse_timer,
@@ -557,3 +565,187 @@ async def test_two_processes_reply_edit_delete_see_the_marks_and_lose_a_timed_me
 
     assert texts_in(alice) == ["hi alice"]
     assert texts_in(bob) == ["hi alice"]
+
+
+def typed(keys: str) -> TypedLine:
+    line = TypedLine()
+    for key in KEY.findall(keys):
+        line.press(key)
+    return line
+
+
+def test_typed_line_is_edited_by_the_arrows_and_the_shortcuts() -> None:
+    cases = {
+        "wrld\x1b[D\x1b[D\x1b[Do\x01hello ": ("hello world", 6),
+        "abc\x7f\x1b[D\x08": ("b", 0),
+        "abc\x01\x1b[3~\x1b[F": ("bc", 2),
+        "abc\x02\x02\x04\x06\x06": ("ac", 2),
+        "one two  \x17": ("one ", 4),
+        "one two\x1bb\x15": ("two", 0),
+        "one, two\x1b[1;5D\x1b[1;3D\x1bf\x0b": ("one", 3),
+        "one two\x1b[H\x1b[1;5C\x1b\x7f\x1bOF": (" two", 4),
+        "a\x1b[1;7Bb\x1b[Ac\t\x1bOQ\x1b[200~d\x00\u202e": ("abcd", 4),
+        "\x1bhi\x1b\x1bOA": ("hi", 2),
+        "\u043f\u0440\u0438\u0432\u0435\u0442 \u4e16\u754c\x1b[D\x1b[DX": (
+            "\u043f\u0440\u0438\u0432\u0435\u0442 X\u4e16\u754c",
+            8,
+        ),
+    }
+
+    for keys, (text, cursor) in cases.items():
+        line = typed(keys)
+        assert (line.text, line.cursor) == (text, cursor), repr(keys)
+    line = typed("sent\x1b[D")
+    assert (line.press("\r"), line.text, line.cursor) == ("sent", "", 0)
+    assert line.press("x") is None
+
+
+def test_typed_line_scrolls_sideways_instead_of_wrapping() -> None:
+    short = typed("hi")
+    long = typed("0123456789" * 3)
+    wide = typed("\u4e16" * 12)
+
+    assert short.drawn(80) == "\r> hi\x1b[K\r\x1b[4C"
+    assert long.drawn(20) == "\r> 34567890123456789\x1b[K\r\x1b[19C"
+    long.press("\x01")
+    assert long.drawn(20) == "\r> 01234567890123456\x1b[K\r\x1b[2C"
+    assert wide.drawn(20) == "\r> " + "\u4e16" * 8 + "\x1b[K\r\x1b[18C"
+
+
+@dataclass
+class PseudoTerminal:
+    """A `sotto chat` process whose standard input and output are a pseudo-terminal."""
+
+    process: asyncio.subprocess.Process
+    master: int
+    terminal: int
+    output: bytearray = field(default_factory=bytearray)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    seen: int = 0
+
+    def read(self) -> None:
+        try:
+            data = os.read(self.master, 4096)
+        except OSError:
+            data = b""
+        if not data:
+            asyncio.get_running_loop().remove_reader(self.master)
+        self.output += data
+        self.changed.set()
+
+    async def expect(self, text: str) -> None:
+        """Waits until the output after what an earlier call found holds `text`."""
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            while (found := self.output.find(text.encode(), self.seen)) < 0:
+                self.changed.clear()
+                await self.changed.wait()
+        self.seen = found + len(text)
+
+    def press(self, keys: str) -> None:
+        os.write(self.master, keys.encode())
+
+    def close(self) -> None:
+        asyncio.get_running_loop().remove_reader(self.master)
+        os.close(self.master)
+        os.close(self.terminal)
+
+
+async def open_chat_at_a_terminal(data_directory: Path, name: str, url: str) -> PseudoTerminal:
+    master, terminal = pty.openpty()
+    process = await asyncio.create_subprocess_exec(
+        SOTTO,
+        "--data-dir",
+        data_directory,
+        "chat",
+        name,
+        "--relay",
+        url,
+        stdin=terminal,
+        stdout=terminal,
+    )
+    chat = PseudoTerminal(process, master, terminal)
+    asyncio.get_running_loop().add_reader(master, chat.read)
+    return chat
+
+
+@pytest.mark.stand
+async def test_chat_at_a_terminal_prompts_and_keeps_the_typed_line_under_a_message(
+    relay_url: str, tmp_path: Path
+) -> None:
+    url = f"{relay_url}/ws"
+    alice, bob = tmp_path / "alice", tmp_path / "bob"
+    alice_id = await sotto(alice, "init")
+    bob_id = await sotto(bob, "init")
+    await sotto(alice, "add", "bob", bob_id)
+    await sotto(bob, "add", "alice", alice_id)
+
+    bob_chat = await open_chat(bob, "alice", url)
+    alice_chat = await open_chat_at_a_terminal(alice, "bob", url)
+    try:
+        await alice_chat.expect("connected\r\n")
+        await alice_chat.expect(f"{CHAT_HINT}\r\n\r{PROMPT}")
+        alice_chat.press("wrld\x1b[D\x1b[D\x1b[Do\x01hello \x1b[1;7B\x1b[A\r")
+        await bob_chat.expect("#1 alice: hello world")
+        await alice_chat.expect("#1 you: hello world")
+
+        alice_chat.press("half \u0442\u0430\u0439\u043f")
+        await alice_chat.expect(f"{PROMPT}half \u0442\u0430\u0439\u043f")
+        await bob_chat.type("a message in between")
+        await alice_chat.expect(
+            f"#2 bob: a message in between\r\n\r{PROMPT}half \u0442\u0430\u0439\u043f"
+        )
+        alice_chat.press("\u0435\u0434 line\r")
+        await bob_chat.expect("#3 alice: half \u0442\u0430\u0439\u043f\u0435\u0434 line")
+
+        alice_chat.press("/quit\r")
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            assert await alice_chat.process.wait() == 0
+        modes = termios.tcgetattr(alice_chat.terminal)[3]
+    finally:
+        alice_chat.close()
+    await bob_chat.quit()
+
+    assert b"^[" not in alice_chat.output
+    assert modes & termios.ICANON and modes & termios.ECHO
+
+
+async def test_a_key_split_over_reads_is_one_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sotto.client.cli._columns", lambda: 80)
+    lines: asyncio.Queue[str | None] = asyncio.Queue()
+    reading, writing = os.pipe()
+    loop = asyncio.get_running_loop()
+    _read_keys_in_the_loop(reading, TypedLine(), lines, asyncio.Event())
+    try:
+        for chunk in (b"ab\x1b", b"[", b"D", b"X\n"):
+            os.write(writing, chunk)
+            await asyncio.sleep(0.01)
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            assert await lines.get() == "aXb"
+    finally:
+        loop.remove_reader(reading)
+        loop.remove_signal_handler(signal.SIGTERM)
+        os.close(reading)
+        os.close(writing)
+
+
+@pytest.mark.stand
+async def test_chat_at_a_terminal_gives_the_terminal_back_when_terminated(
+    relay_url: str, tmp_path: Path
+) -> None:
+    alice, bob = tmp_path / "alice", tmp_path / "bob"
+    await sotto(alice, "init")
+    await sotto(alice, "add", "bob", await sotto(bob, "init"))
+
+    chat = await open_chat_at_a_terminal(alice, "bob", f"{relay_url}/ws")
+    try:
+        await chat.expect(f"{CHAT_HINT}\r\n\r{PROMPT}")
+        chat.press("half typed")
+        await chat.expect(f"{PROMPT}half typed")
+        chat.process.terminate()
+        async with asyncio.timeout(PATIENCE_SECONDS):
+            assert await chat.process.wait() == 0
+        modes = termios.tcgetattr(chat.terminal)[3]
+    finally:
+        chat.close()
+
+    assert modes & termios.ICANON and modes & termios.ECHO
