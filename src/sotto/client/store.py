@@ -302,6 +302,11 @@ LOG_MESSAGE = """
     )
     RETURNING position
 """
+# A store of a version before the counter keeps its highest number only in its rows, so a
+# deleted newest message would give its number again (section 39.8).
+SEED_MESSAGE_NUMBER = """
+    INSERT OR IGNORE INTO message_numbers SELECT 1, coalesce(max(position), 0) FROM messages
+"""
 COUNT_MESSAGE_NUMBER = """
     INSERT INTO message_numbers VALUES (1, ?)
     ON CONFLICT DO UPDATE SET last_number = excluded.last_number
@@ -534,6 +539,7 @@ class Store:
         with self.transaction():
             for table in TABLES:
                 self.connection.execute(table)
+            self.connection.execute(SEED_MESSAGE_NUMBER)
 
     def close(self) -> None:
         self.connection.close()

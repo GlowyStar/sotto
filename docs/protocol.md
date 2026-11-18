@@ -5146,7 +5146,8 @@ highest number that a message of its log ever had (section 39.8). A store of the
 client of this repository that does not implement part 5 opens in one that does: it
 gains what this section lists, and its earlier messages have no timer, no quote and no
 receipt and cannot be edited
-[test: tests/client/test_changes.py::test_store_of_the_previous_version_opens_and_takes_part_5].
+[test: tests/client/test_changes.py::test_store_of_the_previous_version_opens_and_takes_part_5]
+[test: tests/client/test_changes.py::test_store_of_the_previous_version_never_gives_the_number_of_its_newest_message_again].
 
 ### 39.11 Constants and local results
 
