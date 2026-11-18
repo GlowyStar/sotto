@@ -137,6 +137,20 @@ def text_of(client: Client, number: int) -> str | None:
     return None if message is None else message.text
 
 
+def reopen_as_previous_version(clients: Clients, client: Client) -> Client:
+    """Turns the store of `client` into one of the version before part 5 and opens it."""
+    path = client.store.connection.execute("PRAGMA database_list").fetchone()[2]
+    with client.store.transaction():
+        for table in ("message_states", "timers", "settings", "message_numbers"):
+            client.store.connection.execute(f"DROP TABLE {table}")
+        client.store.connection.execute("DROP INDEX messages_by_id")
+    client.store.close()
+
+    reopened = Client(Store(Path(path)), clock=clients.clock)
+    clients.stores.append(reopened.store)
+    return reopened
+
+
 def test_reply_carries_a_quote_that_shows_without_the_original(
     relay: Relay, alice: Client, bob: Client
 ) -> None:
@@ -587,15 +601,7 @@ def test_store_of_the_previous_version_opens_and_takes_part_5(
 ) -> None:
     at_alice, at_bob = say(relay, alice, bob, "from before")
     say(relay, bob, alice, "also from before")
-    path = bob.store.connection.execute("PRAGMA database_list").fetchone()[2]
-    with bob.store.transaction():
-        for table in ("message_states", "timers", "settings"):
-            bob.store.connection.execute(f"DROP TABLE {table}")
-        bob.store.connection.execute("DROP INDEX messages_by_id")
-    bob.store.close()
-
-    reopened = Client(Store(Path(path)), clock=clients.clock)
-    clients.stores.append(reopened.store)
+    reopened = reopen_as_previous_version(clients, bob)
     relay.send(alice, alice.delete(bob.identity_key, at_alice))
     send_receipts(relay, alice)
     deleted, receipt = [reopened.receive(one) for one in relay.queues.pop(bob.identity_key)]
@@ -605,6 +611,21 @@ def test_store_of_the_previous_version_opens_and_takes_part_5(
     assert reopened.timer(alice.identity_key) == 0
     assert (deleted.number, deleted.deleted) == (at_bob, True)
     assert texts(reopened) == [("out", "also from before")]
+
+
+def test_store_of_the_previous_version_never_gives_the_number_of_its_newest_message_again(
+    clients: Clients, relay: Relay, alice: Client, bob: Client
+) -> None:
+    say(relay, bob, alice, "a session")
+    at_alice, at_bob = say(relay, alice, bob, "the newest from before")
+    reopened = reopen_as_previous_version(clients, bob)
+    relay.send(alice, alice.delete(bob.identity_key, at_alice))
+    deleted = one(relay, reopened)
+    relay.send(alice, alice.send_text(bob.identity_key, "after the deletion"))
+    after = one(relay, reopened)
+
+    assert (deleted.number, deleted.deleted) == (at_bob, True)
+    assert number_of(after) > at_bob
 
 
 async def next_incoming(link: Transport, wanted: str) -> Received:
