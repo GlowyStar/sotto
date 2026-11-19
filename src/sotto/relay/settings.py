@@ -18,6 +18,7 @@ class Settings:
     name: str = "127.0.0.1"
     login_deadline_seconds: float = 10
     one_time_prekey_cap: int = 100
+    pq_one_time_prekey_cap: int = 40
     max_pages: int = 2097152
     message_ttl_seconds: int = 2592000
     sweep_interval_seconds: float = 60
@@ -71,6 +72,9 @@ class Settings:
             ),
             one_time_prekey_cap=_read_whole_number_above_0(
                 environ, "RELAY_ONE_TIME_PREKEY_CAP", defaults.one_time_prekey_cap
+            ),
+            pq_one_time_prekey_cap=_read_whole_number_above_0(
+                environ, "RELAY_PQ_ONE_TIME_PREKEY_CAP", defaults.pq_one_time_prekey_cap
             ),
             max_pages=_read_whole_number_above_0(
                 environ, "RELAY_MAX_PAGES", defaults.max_pages

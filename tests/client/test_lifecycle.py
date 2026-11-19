@@ -11,6 +11,7 @@ from client_harness import Clients, Relay, befriend, files_holding, rows, send
 from sotto.client.session import (
     ONE_TIME_PREKEY_CAP,
     ONE_TIME_PREKEY_HELD_MAX,
+    PQ_ONE_TIME_PREKEY_CAP,
     SEEN_ID_SECONDS,
     SIGNED_PREKEY_GRACE_SECONDS,
     SIGNED_PREKEY_ROTATION_SECONDS,
@@ -84,7 +85,9 @@ def test_initial_message_under_a_replaced_signed_prekey_decrypts_only_in_the_gra
     assert old_private_key is not None
 
     clients.clock.advance(SIGNED_PREKEY_ROTATION_SECONDS)
-    upload = bob.prepare_upload(one_time_prekey_count=0)
+    upload = bob.prepare_upload(
+        pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+    )
     assert upload is not None
     assert upload.signed_prekey.id == 2
     clients.clock.advance(seconds_after_the_replacement)
@@ -124,7 +127,9 @@ def test_replayed_initial_message_gives_no_text_after_its_session_left_and_after
     assert bob.receive(initial).result == "REPLAYED_INITIAL"
     assert rows(bob.store) == store_before
 
-    bob.prepare_upload(one_time_prekey_count=0)
+    bob.prepare_upload(
+        pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+    )
     clients.clock.advance(SIGNED_PREKEY_GRACE_SECONDS)
     bob.delete_expired_prekeys()
     assert bob.store.connection.execute("SELECT count(*) FROM records").fetchone() == (
@@ -155,18 +160,22 @@ def test_removed_contact_added_again_gets_no_replayed_initial_message(
 def test_rotation_follows_the_age_of_the_newest_signed_prekey(
     clients: Clients, carol: Client
 ) -> None:
-    first = carol.prepare_upload(one_time_prekey_count=0)
+    first = carol.prepare_upload(
+        pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+    )
     assert first is not None
     assert first.signed_prekey.id == 1
     assert len(first.one_time_prekeys) == ONE_TIME_PREKEY_CAP
 
-    assert carol.prepare_upload(ONE_TIME_PREKEY_CAP) == replace(first, one_time_prekeys=())
+    assert carol.prepare_upload(ONE_TIME_PREKEY_CAP, PQ_ONE_TIME_PREKEY_CAP) == replace(
+        first, one_time_prekeys=()
+    )
     carol.confirm_upload(first)
     clients.clock.advance(SIGNED_PREKEY_ROTATION_SECONDS - 1)
-    assert carol.prepare_upload(ONE_TIME_PREKEY_CAP) is None
+    assert carol.prepare_upload(ONE_TIME_PREKEY_CAP, PQ_ONE_TIME_PREKEY_CAP) is None
 
     clients.clock.advance(1)
-    rotated = carol.prepare_upload(ONE_TIME_PREKEY_CAP)
+    rotated = carol.prepare_upload(ONE_TIME_PREKEY_CAP, PQ_ONE_TIME_PREKEY_CAP)
     assert rotated is not None
     assert rotated.signed_prekey.id == 2
     assert rotated.one_time_prekeys == ()
@@ -178,7 +187,9 @@ def test_rotation_follows_the_age_of_the_newest_signed_prekey(
 def test_refill_tops_up_to_the_cap_below_the_threshold(
     carol: Client, count: int, made: int
 ) -> None:
-    upload = carol.prepare_upload(one_time_prekey_count=count)
+    upload = carol.prepare_upload(
+        pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=count
+    )
 
     assert len(one_time_prekey_ids(upload)) == made
 
@@ -190,7 +201,12 @@ def test_held_one_time_prekeys_are_bounded_by_deleting_the_lowest_ids(
     assert bundle.one_time_prekey is not None
     assert bundle.one_time_prekey.id == 1
 
-    uploads = [bob.prepare_upload(one_time_prekey_count=0) for _ in range(10)]
+    uploads = [
+        bob.prepare_upload(
+            pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+        )
+        for _ in range(10)
+    ]
 
     assert one_time_prekey_ids(uploads[-1]) == list(range(902, 1002))
     assert held_one_time_prekey_ids(bob) == list(range(2, 1002))
@@ -202,8 +218,14 @@ def test_held_one_time_prekeys_are_bounded_by_deleting_the_lowest_ids(
 def test_unanswered_upload_keeps_its_keys_and_a_refused_one_deletes_them(
     carol: Client,
 ) -> None:
-    unanswered = one_time_prekey_ids(carol.prepare_upload(one_time_prekey_count=0))
-    refused_upload = carol.prepare_upload(one_time_prekey_count=0)
+    unanswered = one_time_prekey_ids(
+        carol.prepare_upload(
+            pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+        )
+    )
+    refused_upload = carol.prepare_upload(
+        pq_one_time_prekey_count=PQ_ONE_TIME_PREKEY_CAP, one_time_prekey_count=0
+    )
     refused = one_time_prekey_ids(refused_upload)
     assert set(unanswered).isdisjoint(refused)
 
@@ -215,9 +237,9 @@ def test_unanswered_upload_keeps_its_keys_and_a_refused_one_deletes_them(
 
 
 def test_prekey_ids_are_never_reused_and_stop_at_the_last_id(carol: Client) -> None:
-    first = carol.make_prekeys(2)
+    first = carol.make_prekeys(2, 0)
     carol.drop_refused_upload(first)
-    second = carol.make_prekeys(1)
+    second = carol.make_prekeys(1, 0)
     assert (second.signed_prekey.id, one_time_prekey_ids(second)) == (2, [3])
 
     with carol.store.transaction():
@@ -225,8 +247,8 @@ def test_prekey_ids_are_never_reused_and_stop_at_the_last_id(carol: Client) -> N
             "UPDATE identity SET last_signed_prekey_id = ?, last_one_time_prekey_id = ?",
             (LAST_PREKEY_ID - 1, LAST_PREKEY_ID - 1),
         )
-    last = carol.make_prekeys(2)
-    after_the_last = carol.make_prekeys(1)
+    last = carol.make_prekeys(2, 0)
+    after_the_last = carol.make_prekeys(1, 0)
 
     assert (last.signed_prekey.id, one_time_prekey_ids(last)) == (
         LAST_PREKEY_ID,

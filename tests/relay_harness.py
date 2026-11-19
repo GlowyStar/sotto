@@ -30,8 +30,10 @@ from sotto.crypto.identity import (
     derive_x25519_public_key,
     sign_identity_dh_key,
     sign_login,
+    sign_pq_prekey,
     sign_signed_prekey,
 )
+from sotto.crypto.pqxdh import KEM_SEED_LENGTH, kem_public_key
 from sotto.proto.sotto_pb2 import (
     ClientFrame,
     FetchBlob,
@@ -129,6 +131,24 @@ def build_upload(seed: bytes, one_time_prekey_ids: Sequence[int] = ()) -> Upload
             for prekey_id in one_time_prekey_ids
         ],
     )
+
+
+def make_pq_prekey(seed: bytes, prekey_id: int) -> SignedPrekey:
+    """A post-quantum prekey of a new key pair that the identity of `seed` signed."""
+    key = kem_public_key(os.urandom(KEM_SEED_LENGTH))
+    return SignedPrekey(id=prekey_id, key=key, signature=sign_pq_prekey(seed, pq_prekey=key))
+
+
+def build_pq_upload(
+    seed: bytes, pq_prekey_id: int, pq_one_time_prekey_ids: Sequence[int] = ()
+) -> UploadBundle:
+    """Builds a bundle with a last-resort and one-time post-quantum prekeys (section 42.1)."""
+    upload = build_upload(seed)
+    upload.pq_prekey.CopyFrom(make_pq_prekey(seed, pq_prekey_id))
+    upload.pq_one_time_prekeys.extend(
+        make_pq_prekey(seed, prekey_id) for prekey_id in pq_one_time_prekey_ids
+    )
+    return upload
 
 
 @dataclass(frozen=True, slots=True)

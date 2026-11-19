@@ -346,7 +346,7 @@ def test_message_without_initial_header_from_a_contact_without_session_is_no_ses
     assert rows(bob.store) == store_before
 
 
-@pytest.mark.parametrize("version", [0, 2])
+@pytest.mark.parametrize("version", [0, 3])
 def test_other_version_is_acked_and_changes_nothing(
     alice: Client, bob: Client, relay: Relay, version: int
 ) -> None:
@@ -431,7 +431,7 @@ def test_largest_text_fits_a_payload_with_an_initial_header(
 
     assert len(text.encode()) == envelope.MAX_TEXT_BYTES
     assert peer_message.HasField("initial_header")
-    assert len(peer_message.ciphertext) == 65052
+    assert len(peer_message.ciphertext) == 64028
     assert len(delivered.payload) <= LONGEST_PAYLOAD
     assert bob.receive(delivered).text == text
 

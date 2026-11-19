@@ -93,12 +93,14 @@ class Login(_message.Message):
     def __init__(self, identity_key: _Optional[bytes] = ..., client_nonce: _Optional[bytes] = ..., signature: _Optional[bytes] = ...) -> None: ...
 
 class LoggedIn(_message.Message):
-    __slots__ = ("one_time_prekey_count", "blob_max_bytes")
+    __slots__ = ("one_time_prekey_count", "blob_max_bytes", "pq_one_time_prekey_count")
     ONE_TIME_PREKEY_COUNT_FIELD_NUMBER: _ClassVar[int]
     BLOB_MAX_BYTES_FIELD_NUMBER: _ClassVar[int]
+    PQ_ONE_TIME_PREKEY_COUNT_FIELD_NUMBER: _ClassVar[int]
     one_time_prekey_count: int
     blob_max_bytes: int
-    def __init__(self, one_time_prekey_count: _Optional[int] = ..., blob_max_bytes: _Optional[int] = ...) -> None: ...
+    pq_one_time_prekey_count: int
+    def __init__(self, one_time_prekey_count: _Optional[int] = ..., blob_max_bytes: _Optional[int] = ..., pq_one_time_prekey_count: _Optional[int] = ...) -> None: ...
 
 class SignedPrekey(_message.Message):
     __slots__ = ("id", "key", "signature")
@@ -119,22 +121,28 @@ class OneTimePrekey(_message.Message):
     def __init__(self, id: _Optional[int] = ..., key: _Optional[bytes] = ...) -> None: ...
 
 class UploadBundle(_message.Message):
-    __slots__ = ("identity_dh_key", "identity_dh_signature", "signed_prekey", "one_time_prekeys")
+    __slots__ = ("identity_dh_key", "identity_dh_signature", "signed_prekey", "one_time_prekeys", "pq_prekey", "pq_one_time_prekeys")
     IDENTITY_DH_KEY_FIELD_NUMBER: _ClassVar[int]
     IDENTITY_DH_SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     SIGNED_PREKEY_FIELD_NUMBER: _ClassVar[int]
     ONE_TIME_PREKEYS_FIELD_NUMBER: _ClassVar[int]
+    PQ_PREKEY_FIELD_NUMBER: _ClassVar[int]
+    PQ_ONE_TIME_PREKEYS_FIELD_NUMBER: _ClassVar[int]
     identity_dh_key: bytes
     identity_dh_signature: bytes
     signed_prekey: SignedPrekey
     one_time_prekeys: _containers.RepeatedCompositeFieldContainer[OneTimePrekey]
-    def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., signed_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., one_time_prekeys: _Optional[_Iterable[_Union[OneTimePrekey, _Mapping]]] = ...) -> None: ...
+    pq_prekey: SignedPrekey
+    pq_one_time_prekeys: _containers.RepeatedCompositeFieldContainer[SignedPrekey]
+    def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., signed_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., one_time_prekeys: _Optional[_Iterable[_Union[OneTimePrekey, _Mapping]]] = ..., pq_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., pq_one_time_prekeys: _Optional[_Iterable[_Union[SignedPrekey, _Mapping]]] = ...) -> None: ...
 
 class BundleStored(_message.Message):
-    __slots__ = ("one_time_prekey_count",)
+    __slots__ = ("one_time_prekey_count", "pq_one_time_prekey_count")
     ONE_TIME_PREKEY_COUNT_FIELD_NUMBER: _ClassVar[int]
+    PQ_ONE_TIME_PREKEY_COUNT_FIELD_NUMBER: _ClassVar[int]
     one_time_prekey_count: int
-    def __init__(self, one_time_prekey_count: _Optional[int] = ...) -> None: ...
+    pq_one_time_prekey_count: int
+    def __init__(self, one_time_prekey_count: _Optional[int] = ..., pq_one_time_prekey_count: _Optional[int] = ...) -> None: ...
 
 class FetchBundle(_message.Message):
     __slots__ = ("identity",)
@@ -143,18 +151,20 @@ class FetchBundle(_message.Message):
     def __init__(self, identity: _Optional[bytes] = ...) -> None: ...
 
 class Bundle(_message.Message):
-    __slots__ = ("identity", "identity_dh_key", "identity_dh_signature", "signed_prekey", "one_time_prekey")
+    __slots__ = ("identity", "identity_dh_key", "identity_dh_signature", "signed_prekey", "one_time_prekey", "pq_prekey")
     IDENTITY_FIELD_NUMBER: _ClassVar[int]
     IDENTITY_DH_KEY_FIELD_NUMBER: _ClassVar[int]
     IDENTITY_DH_SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     SIGNED_PREKEY_FIELD_NUMBER: _ClassVar[int]
     ONE_TIME_PREKEY_FIELD_NUMBER: _ClassVar[int]
+    PQ_PREKEY_FIELD_NUMBER: _ClassVar[int]
     identity: bytes
     identity_dh_key: bytes
     identity_dh_signature: bytes
     signed_prekey: SignedPrekey
     one_time_prekey: OneTimePrekey
-    def __init__(self, identity: _Optional[bytes] = ..., identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., signed_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., one_time_prekey: _Optional[_Union[OneTimePrekey, _Mapping]] = ...) -> None: ...
+    pq_prekey: SignedPrekey
+    def __init__(self, identity: _Optional[bytes] = ..., identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., signed_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ..., one_time_prekey: _Optional[_Union[OneTimePrekey, _Mapping]] = ..., pq_prekey: _Optional[_Union[SignedPrekey, _Mapping]] = ...) -> None: ...
 
 class Send(_message.Message):
     __slots__ = ("message_id", "recipient", "payload")
@@ -281,18 +291,22 @@ class PeerMessage(_message.Message):
     def __init__(self, version: _Optional[int] = ..., initial_header: _Optional[_Union[InitialHeader, _Mapping]] = ..., header: _Optional[bytes] = ..., ciphertext: _Optional[bytes] = ...) -> None: ...
 
 class InitialHeader(_message.Message):
-    __slots__ = ("identity_dh_key", "identity_dh_signature", "ephemeral_key", "signed_prekey_id", "one_time_prekey_id")
+    __slots__ = ("identity_dh_key", "identity_dh_signature", "ephemeral_key", "signed_prekey_id", "one_time_prekey_id", "kem_ciphertext", "pq_prekey_id")
     IDENTITY_DH_KEY_FIELD_NUMBER: _ClassVar[int]
     IDENTITY_DH_SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     EPHEMERAL_KEY_FIELD_NUMBER: _ClassVar[int]
     SIGNED_PREKEY_ID_FIELD_NUMBER: _ClassVar[int]
     ONE_TIME_PREKEY_ID_FIELD_NUMBER: _ClassVar[int]
+    KEM_CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
+    PQ_PREKEY_ID_FIELD_NUMBER: _ClassVar[int]
     identity_dh_key: bytes
     identity_dh_signature: bytes
     ephemeral_key: bytes
     signed_prekey_id: int
     one_time_prekey_id: int
-    def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ...) -> None: ...
+    kem_ciphertext: bytes
+    pq_prekey_id: int
+    def __init__(self, identity_dh_key: _Optional[bytes] = ..., identity_dh_signature: _Optional[bytes] = ..., ephemeral_key: _Optional[bytes] = ..., signed_prekey_id: _Optional[int] = ..., one_time_prekey_id: _Optional[int] = ..., kem_ciphertext: _Optional[bytes] = ..., pq_prekey_id: _Optional[int] = ...) -> None: ...
 
 class Content(_message.Message):
     __slots__ = ("text", "attachment", "profile", "edit", "deletion", "receipt", "timer", "quote", "expires_after")

@@ -44,6 +44,7 @@ from sotto.client.session import (
 from sotto.client.store import FileRow, UploadRow
 from sotto.crypto.blob import BadBlobError, blob_length
 from sotto.crypto.identity import (
+    KEM_PUBLIC_KEY_LENGTH,
     KEY_LENGTH,
     NONCE_LENGTH,
     SIGNATURE_LENGTH,
@@ -407,15 +408,20 @@ def read_server_frame(message: bytes) -> ServerMessage:
 
 
 def upload_frame(upload: PrekeyUpload) -> UploadBundle:
-    prekey = upload.signed_prekey
-    signed = SignedPrekeyFrame(id=prekey.id, key=prekey.key, signature=prekey.signature)
+    pq_prekey = None
+    if upload.pq_prekey is not None:
+        pq_prekey = _signed_prekey_frame(upload.pq_prekey)
     return UploadBundle(
         identity_dh_key=upload.identity_dh_key,
         identity_dh_signature=upload.identity_dh_signature,
-        signed_prekey=signed,
+        signed_prekey=_signed_prekey_frame(upload.signed_prekey),
         one_time_prekeys=[
             OneTimePrekeyFrame(id=prekey.id, key=prekey.key)
             for prekey in upload.one_time_prekeys
+        ],
+        pq_prekey=pq_prekey,
+        pq_one_time_prekeys=[
+            _signed_prekey_frame(prekey) for prekey in upload.pq_one_time_prekeys
         ],
     )
 
@@ -425,15 +431,25 @@ def bundle_of(frame: BundleFrame) -> Bundle:
     if frame.HasField("one_time_prekey"):
         handed = frame.one_time_prekey
         extra = OneTimePrekey(id=handed.id, key=handed.key)
-    prekey = frame.signed_prekey
-    signed = SignedPrekey(id=prekey.id, key=prekey.key, signature=prekey.signature)
+    pq_prekey = None
+    if frame.HasField("pq_prekey"):
+        pq_prekey = _signed_prekey(frame.pq_prekey)
     return Bundle(
         identity=frame.identity,
         identity_dh_key=frame.identity_dh_key,
         identity_dh_signature=frame.identity_dh_signature,
-        signed_prekey=signed,
+        signed_prekey=_signed_prekey(frame.signed_prekey),
         one_time_prekey=extra,
+        pq_prekey=pq_prekey,
     )
+
+
+def _signed_prekey(frame: SignedPrekeyFrame) -> SignedPrekey:
+    return SignedPrekey(id=frame.id, key=frame.key, signature=frame.signature)
+
+
+def _signed_prekey_frame(prekey: SignedPrekey) -> SignedPrekeyFrame:
+    return SignedPrekeyFrame(id=prekey.id, key=prekey.key, signature=prekey.signature)
 
 
 def send_frame(outgoing: Outgoing) -> ClientFrame:
@@ -736,7 +752,9 @@ class Transport:
     async def _after_login(self, logged_in: LoggedIn) -> None:
         """The three steps of section 23.3, then the transfers of section 33.4."""
         await self._send_blob_deletions()
-        upload = self.client.prepare_upload(logged_in.one_time_prekey_count)
+        upload = self.client.prepare_upload(
+            logged_in.one_time_prekey_count, logged_in.pq_one_time_prekey_count
+        )
         if upload is not None:
             frame = ClientFrame(upload_bundle=upload_frame(upload))
             await self._request(_Request(frame=frame, upload=upload))
@@ -1221,6 +1239,9 @@ def _check_bundle(bundle: BundleFrame) -> None:
     )
     if bundle.HasField("one_time_prekey"):
         _require_length("one_time_prekey.key", bundle.one_time_prekey.key, KEY_LENGTH)
+    if bundle.HasField("pq_prekey"):
+        _require_length("pq_prekey.key", bundle.pq_prekey.key, KEM_PUBLIC_KEY_LENGTH)
+        _require_length("pq_prekey.signature", bundle.pq_prekey.signature, SIGNATURE_LENGTH)
 
 
 def _check_deliver(deliver: Deliver) -> None:

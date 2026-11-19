@@ -85,6 +85,8 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
         "one_time_prekeys",
         "outbox",
         "own_profile",
+        "pq_prekey_ids",
+        "pq_prekeys",
         "profile_sends",
         "profiles",
         "records",

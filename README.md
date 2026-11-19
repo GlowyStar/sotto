@@ -9,8 +9,8 @@ opens one.
 - Not audited. Nobody has reviewed this code for security, so do not trust it with
   anything that matters.
 - An alpha. Two people chat from two terminals through a relay: the command-line client
-  `sotto` encrypts every text end to end (the key agreement and the Double Ratchet of
-  part 2 of the protocol), and the text is in no frame, log line or file of the relay
+  `sotto` encrypts every text end to end (the key agreement PQXDH of part 6 and the
+  Double Ratchet of part 2 of the protocol), and the text is in no frame, log line or file of the relay
   [test: tests/client/test_transport.py::test_marker_text_is_in_no_frame_log_or_file_of_the_relay].
   Files of up to 100 MiB go the same way: encrypted on the sender's device, uploaded in
   pieces that resume where a broken connection or a restart left them, and saved whole
@@ -27,13 +27,14 @@ opens one.
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
   `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
-  holds five parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  holds six parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
   resumable uploads and downloads through the relay and the attachment of a message.
   Part 4 is the profile: a display name and an avatar that a client sends to its
   contacts. Part 5 is replies, edits, delete for both, delivery and read receipts and
-  disappearing messages.
+  disappearing messages. Part 6 is the post-quantum key agreement of every new session,
+  X25519 with ML-KEM-768, and the transition from the classical one.
   [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
@@ -47,8 +48,11 @@ opens one.
 - An identity is a key pair made on the device: no phone number, no email, no password.
 - The relay routes ciphertext and keeps a message only until its recipient confirms it.
   It still sees who talks to whom, when and how much.
-- Key agreement and message encryption follow Signal's public X3DH and Double Ratchet
-  specifications in their classical form, with no post-quantum protection. The primitives
+- Key agreement and message encryption follow Signal's public PQXDH and Double Ratchet
+  specifications. A new session agrees its key with X25519 and ML-KEM-768, so recorded
+  traffic stays closed to a later quantum computer; the ratchet stays classical, and
+  nothing protects against an attacker who has such a computer at the time of the
+  session ([threat model](docs/threat-model.md#post-quantum-protection)). The primitives
   come from vetted libraries only.
 - The protocol is written down, and shared test vectors keep the implementations in step:
   a command-line client here and a macOS client in a repository of its own.

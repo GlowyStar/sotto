@@ -15,6 +15,7 @@ from relay_harness import (
     Clock,
     OpenClient,
     RawClient,
+    build_pq_upload,
     build_upload,
     messages_in,
     running_relay,
@@ -34,6 +35,7 @@ from sotto.proto.sotto_pb2 import (
     Send,
     ServerFrame,
     Stored,
+    UploadBundle,
 )
 from sotto.relay import storage as storage_module
 from sotto.relay.frames import MAX_PAYLOAD_BYTES
@@ -44,8 +46,8 @@ from sotto.relay.storage import Storage
 # Sent by the WebSocket library when the handler of a connection raises.
 INTERNAL_ERROR = 1011
 PAGE_BYTES = 4096
-# The empty schema takes 12 pages and an upload of 100 one-time prekeys takes 3 or 4.
-FEW_PAGES = 16
+# The empty schema takes 15 pages and an upload of 100 one-time prekeys takes 3 or 4.
+FEW_PAGES = 19
 NOT_FOUND = ErrorCode.NOT_FOUND
 TTL_SECONDS = 100
 SWEEP_SECONDS = 0.01
@@ -75,7 +77,7 @@ def store_one_message(storage: Storage, payload_length: int) -> tuple[bytes, Sen
     """Registers a recipient and stores one message to it; returns the sender and the Send."""
     seed, sender = os.urandom(32), os.urandom(32)
     recipient = derive_identity_key(seed)
-    storage.store_bundle(recipient, build_upload(seed), cap=100)
+    storage.store_bundle(recipient, build_upload(seed), cap=100, pq_cap=40)
     send = Send(
         message_id=os.urandom(16), recipient=recipient, payload=os.urandom(payload_length)
     )
@@ -134,11 +136,12 @@ def test_same_key_under_another_signature_is_stored_and_keeps_the_first_signatur
     # the same key, which a signer with randomization makes.
     second.identity_dh_signature = os.urandom(64)
 
-    storage.store_bundle(identity_key, first, cap=100)
-    storage.store_bundle(identity_key, second, cap=100)
-    bundle = storage.fetch_bundle(identity_key)
+    storage.store_bundle(identity_key, first, cap=100, pq_cap=40)
+    storage.store_bundle(identity_key, second, cap=100, pq_cap=40)
+    fetched = storage.fetch_bundle(identity_key)
 
-    assert bundle is not None
+    assert fetched is not None
+    bundle = fetched.bundle
     assert bundle.identity_dh_signature == first.identity_dh_signature
     assert bundle.signed_prekey == second.signed_prekey
 
@@ -271,7 +274,7 @@ async def test_bundle_is_sent_after_the_commit_that_deleted_its_one_time_prekey(
 ) -> None:
     seed = os.urandom(32)
     identity = derive_identity_key(seed)
-    storage.store_bundle(identity, build_upload(seed, [1, 2]), cap=100)
+    storage.store_bundle(identity, build_upload(seed, [1, 2]), cap=100, pq_cap=40)
     relay = Relay(settings, storage)
     states_at_each_send = []
 
@@ -333,7 +336,7 @@ async def test_stored_is_sent_after_the_commit_of_the_message(
 ) -> None:
     seed = os.urandom(32)
     recipient = derive_identity_key(seed)
-    storage.store_bundle(recipient, build_upload(seed), cap=100)
+    storage.store_bundle(recipient, build_upload(seed), cap=100, pq_cap=40)
     send = Send(message_id=os.urandom(16), recipient=recipient, payload=os.urandom(100))
     relay = Relay(settings, storage)
     states_at_each_send = []
@@ -601,3 +604,30 @@ async def test_failed_sweep_is_logged_and_the_next_sweep_runs(
     }
     assert [row[2] for row in rows_after_the_failure] == [send.message_id]
     assert failures == {"the sweep failed"}
+
+
+def test_database_of_the_first_version_opens_and_gains_the_pq_prekey_tables(
+    settings: Settings,
+) -> None:
+    seed = os.urandom(32)
+    identity_key = derive_identity_key(seed)
+    pq_upload = build_pq_upload(seed, 1, [2])
+    first_version_upload = UploadBundle()
+    first_version_upload.CopyFrom(pq_upload)
+    first_version_upload.ClearField("pq_prekey")
+    first_version_upload.ClearField("pq_one_time_prekeys")
+    with closing(Storage(settings.database, max_pages=1000)) as storage:
+        storage.store_bundle(identity_key, first_version_upload, cap=100, pq_cap=40)
+        for table in ("pq_prekeys", "pq_one_time_prekeys"):
+            storage.connection.execute(f"DROP TABLE {table}")
+
+    with closing(Storage(settings.database, max_pages=1000)) as storage:
+        before = storage.read_bundle(identity_key)
+        counts = storage.store_bundle(identity_key, pq_upload, cap=100, pq_cap=40)
+        after = storage.read_bundle(identity_key)
+
+    assert before is not None
+    assert not before.HasField("pq_prekey")
+    assert counts == (0, 1)
+    assert after is not None
+    assert after.pq_prekey.id == 1

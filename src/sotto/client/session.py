@@ -25,7 +25,7 @@ from sotto.client.envelope import (
     MAX_QUOTE_BYTES,
     MAX_RECEIPT_IDS,
     MESSAGE_ID_LENGTH,
-    VERSION,
+    X3DH_VERSION,
     AvatarTooLargeError,
     BadContentError,
     BadPaddingError,
@@ -61,7 +61,7 @@ from sotto.client.store import (
     StoredSignedPrekey,
     UploadRow,
 )
-from sotto.crypto import ratchet, x3dh
+from sotto.crypto import pqxdh, ratchet
 from sotto.crypto.blob import (
     BLOB_NONCE_LENGTH,
     FILE_KEY_LENGTH,
@@ -75,10 +75,8 @@ from sotto.crypto.blob import (
 from sotto.crypto.identity import (
     KEY_LENGTH,
     NONCE_LENGTH,
-    BadBundleError,
     Bundle,
     CryptoError,
-    IdentityKeyMismatchError,
     OneTimePrekey,
     SignedPrekey,
     decode_user_id,
@@ -86,11 +84,12 @@ from sotto.crypto.identity import (
     derive_x25519_public_key,
     sign_identity_dh_key,
     sign_login,
+    sign_pq_prekey,
     sign_signed_prekey,
-    verify_identity_dh_key,
 )
+from sotto.crypto.pqxdh import KEM_SEED_LENGTH, kem_public_key
 from sotto.crypto.ratchet import MESSAGE_NONCE_LENGTH, DecryptFailedError, RatchetState
-from sotto.crypto.x3dh import BadInitialHeaderError
+from sotto.crypto.x3dh import check_initial_header
 from sotto.proto.sotto_pb2 import (
     Attachment,
     Content,
@@ -110,6 +109,9 @@ SIGNED_PREKEY_GRACE_SECONDS = 3196800
 ONE_TIME_PREKEY_REFILL_BELOW = 50
 ONE_TIME_PREKEY_CAP = 100
 ONE_TIME_PREKEY_HELD_MAX = 1000
+PQ_ONE_TIME_PREKEY_REFILL_BELOW = 20
+PQ_ONE_TIME_PREKEY_CAP = 40
+PQ_ONE_TIME_PREKEY_HELD_MAX = 400
 BLOB_GONE = "BLOB_GONE"
 DELETED_ON_FAILURE = frozenset({BadBlobError.result, NotAnImageError.result})
 MAX_EDITS = 10
@@ -141,6 +143,14 @@ class UnknownSignedPrekeyError(CryptoError):
 
 class UnknownOneTimePrekeyError(CryptoError):
     result = "UNKNOWN_ONE_TIME_PREKEY"
+
+
+class UnknownPqPrekeyError(CryptoError):
+    result = "UNKNOWN_PQ_PREKEY"
+
+
+class X3dhRefusedError(CryptoError):
+    result = "X3DH_REFUSED"
 
 
 class FilesUnsupportedError(CryptoError):
@@ -258,12 +268,15 @@ class _Sealed:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PrekeyUpload:
-    """The keys of an UploadBundle (section 21.4), saved before they are handed out."""
+    """The keys of an UploadBundle (section 21.4), saved before they are handed out.
+    `pq_prekey` is the last-resort post-quantum prekey of the signed prekey (42.2)."""
 
     identity_dh_key: bytes
     identity_dh_signature: bytes
     signed_prekey: SignedPrekey
     one_time_prekeys: tuple[OneTimePrekey, ...]
+    pq_prekey: SignedPrekey | None
+    pq_one_time_prekeys: tuple[SignedPrekey, ...]
 
 
 class Client:
@@ -313,13 +326,15 @@ class Client:
             identity_key=self.identity_key, client_nonce=client_nonce, signature=signature
         )
 
-    def make_prekeys(self, one_time_count: int) -> PrekeyUpload:
-        """Makes a new signed prekey and `one_time_count` one-time prekeys and saves them."""
-        now = self.now()
+    def make_prekeys(self, one_time_count: int, pq_one_time_count: int) -> PrekeyUpload:
+        """Makes a new signed prekey with its last-resort post-quantum prekey, and the
+        one-time prekeys of both kinds that the counts ask for, and saves them."""
         with self.store.transaction():
-            self.store.add_signed_prekey(self.random_bytes(KEY_LENGTH), made_at=now)
+            self._add_signed_prekey()
             one_time_prekeys = self._add_one_time_prekeys(one_time_count)
-        return self._upload(self._newest_signed_prekey(), one_time_prekeys)
+            pq_one_time_prekeys = self._add_pq_one_time_prekeys(pq_one_time_count)
+        newest = self._newest_signed_prekey()
+        return self._upload(newest, one_time_prekeys, pq_one_time_prekeys)
 
     def delete_expired_prekeys(self) -> None:
         """Step 1 of section 21.2, after every LoggedIn and at every start before a dial."""
@@ -327,11 +342,15 @@ class Client:
         with self.store.transaction():
             self.store.delete_signed_prekeys(replaced_at_or_before=replaced_at_or_before)
 
-    def prepare_upload(self, one_time_prekey_count: int) -> PrekeyUpload | None:
-        """Steps 1 and 2 of section 21.2 and the refill of section 21.3, after a LoggedIn.
+    def prepare_upload(
+        self, one_time_prekey_count: int, pq_one_time_prekey_count: int
+    ) -> PrekeyUpload | None:
+        """Steps 1 and 2 of section 21.2 and the refills of sections 21.3 and 42.2, after
+        a LoggedIn.
 
         Args:
             one_time_prekey_count: The count of the LoggedIn, the word of the relay.
+            pq_one_time_prekey_count: Its count of one-time post-quantum prekeys.
 
         Returns:
             The one UploadBundle of the login, every key of it saved first, or None when
@@ -339,23 +358,25 @@ class Client:
             A one-time prekey is made for one frame and put into no other (section 21.4).
         """
         self.delete_expired_prekeys()
-        now = self.now()
         refill = 0
         if one_time_prekey_count < ONE_TIME_PREKEY_REFILL_BELOW:
             refill = ONE_TIME_PREKEY_CAP - one_time_prekey_count
+        pq_refill = 0
+        if pq_one_time_prekey_count < PQ_ONE_TIME_PREKEY_REFILL_BELOW:
+            pq_refill = PQ_ONE_TIME_PREKEY_CAP - pq_one_time_prekey_count
 
         with self.store.transaction():
-            newest = self.store.newest_signed_prekey()
-            if newest is None or now - newest.made_at >= SIGNED_PREKEY_ROTATION_SECONDS:
-                self.store.add_signed_prekey(self.random_bytes(KEY_LENGTH), made_at=now)
+            if self._is_rotation_due():
+                self._add_signed_prekey()
             one_time_prekeys = self._add_one_time_prekeys(refill)
+            pq_one_time_prekeys = self._add_pq_one_time_prekeys(pq_refill)
 
         newest = self._newest_signed_prekey()
         relay_holds_the_newest = newest.confirmed
-        made_no_one_time_prekey = not one_time_prekeys
+        made_no_one_time_prekey = not one_time_prekeys and not pq_one_time_prekeys
         if relay_holds_the_newest and made_no_one_time_prekey:
             return None
-        return self._upload(newest, one_time_prekeys)
+        return self._upload(newest, one_time_prekeys, pq_one_time_prekeys)
 
     def confirm_upload(self, upload: PrekeyUpload) -> None:
         """Records the BundleStored of an UploadBundle: the relay holds its signed prekey."""
@@ -369,6 +390,8 @@ class Client:
         with self.store.transaction():
             for one_time_prekey in upload.one_time_prekeys:
                 self.store.delete_one_time_prekey(one_time_prekey.id)
+            for pq_one_time_prekey in upload.pq_one_time_prekeys:
+                self.store.delete_pq_one_time_prekey(pq_one_time_prekey.id)
 
     def forget_seen_ids(self) -> None:
         """Deletes the seen ids and the traces of part 5 older than SEEN_ID_SECONDS, at a
@@ -402,7 +425,7 @@ class Client:
         return bool(self.store.sessions(contact))
 
     def start_session(self, contact: bytes, bundle: Bundle) -> int:
-        """START of section 20.3: section 16.6 with a bundle fetched for the contact.
+        """START of section 20.3: section 41.5 with a bundle fetched for the contact.
 
         It serves L1 without a session and L2, the reset: the new session enters the list
         at its head and the older ones stay behind it (section 20.6).
@@ -412,15 +435,16 @@ class Client:
 
         Raises:
             NotAContactError: The identity is not a contact.
-            BadBundleError: Check 1, 2 or 4 of section 5.4 failed.
+            BadBundleError: Check 1, 2, 4, 6 or 7 of section 5.4 failed.
             IdentityKeyMismatchError: The bundle carries another key than the pin.
+            PqPrekeyMissingError: The bundle carries no post-quantum prekey.
             ZeroDhError: A key of the bundle has small order.
         """
         if not self.store.is_contact(contact):
             raise NotAContactError("the identity is not a contact")
         pin = self.store.pin(contact)
         ephemeral_private_key = self.random_bytes(KEY_LENGTH)
-        agreement = x3dh.initiate(
+        agreement = pqxdh.initiate(
             bundle,
             identity_key=self.identity_key,
             identity_dh_private_key=self._identity.identity_dh_private_key,
@@ -439,6 +463,8 @@ class Client:
             identity_dh_signature=self._identity_dh_signature(),
             ephemeral_key=derive_x25519_public_key(ephemeral_private_key),
             signed_prekey_id=bundle.signed_prekey.id,
+            kem_ciphertext=agreement.kem_ciphertext,
+            pq_prekey_id=agreement.pq_prekey_id,
         )
         if bundle.one_time_prekey is not None:
             initial_header.one_time_prekey_id = bundle.one_time_prekey.id
@@ -910,10 +936,17 @@ class Client:
         """I3 to I8 of section 20.2."""
         initial_header = envelope.initial_header
         pin = self.store.pin(delivered.sender)
-        _check_initial_header(delivered.sender, initial_header, pin)
+        check_initial_header(
+            delivered.sender,
+            identity_dh_key=initial_header.identity_dh_key,
+            signature=initial_header.identity_dh_signature,
+            pinned_identity_dh_key=pin,
+        )
 
         record = self.store.record(delivered.sender, initial_header.ephemeral_key)
         if record is None:
+            if envelope.version == X3DH_VERSION:
+                raise X3dhRefusedError("a new session of version 1 is refused (41.10)")
             return self._accept_new(delivered, envelope, pin)
         session = self.store.session(record.session_id)
         if session is None:
@@ -936,11 +969,12 @@ class Client:
     def _accept_new(
         self, delivered: Delivered, envelope: PeerMessage, pin: bytes | None
     ) -> Received:
-        """Steps 3 to 9 of section 16.8 and ACCEPT-NEW of section 20.3."""
+        """Steps 3 to 10 of section 41.7 and ACCEPT-NEW of section 20.3."""
         initial_header = envelope.initial_header
         signed_prekey_id = initial_header.signed_prekey_id
+        replaced_after = self.now() - SIGNED_PREKEY_GRACE_SECONDS
         signed_prekey_private_key = self.store.signed_prekey(
-            signed_prekey_id, replaced_after=self.now() - SIGNED_PREKEY_GRACE_SECONDS
+            signed_prekey_id, replaced_after=replaced_after
         )
         if signed_prekey_private_key is None:
             raise UnknownSignedPrekeyError("no signed prekey has the id of the initial header")
@@ -955,15 +989,22 @@ class Client:
                     "no one-time prekey has the id of the initial header"
                 )
 
-        agreement = x3dh.respond(
+        pq_prekey_id = initial_header.pq_prekey_id
+        pq_prekey = self.store.pq_prekey(pq_prekey_id, replaced_after=replaced_after)
+        if pq_prekey is None:
+            raise UnknownPqPrekeyError("no post-quantum prekey has the id of the header")
+
+        agreement = pqxdh.respond(
             identity_key=self.identity_key,
             identity_dh_private_key=self._identity.identity_dh_private_key,
             signed_prekey_private_key=signed_prekey_private_key,
             one_time_prekey_private_key=one_time_prekey_private_key,
+            pq_prekey_seed=pq_prekey.seed,
             sender_identity_key=delivered.sender,
             sender_identity_dh_key=initial_header.identity_dh_key,
             sender_identity_dh_signature=initial_header.identity_dh_signature,
             ephemeral_key=initial_header.ephemeral_key,
+            kem_ciphertext=initial_header.kem_ciphertext,
             pinned_identity_dh_key=pin,
         )
         state = ratchet.init_responder(
@@ -990,6 +1031,8 @@ class Client:
             dropped = self.store.drop_sessions_behind(delivered.sender)
             if one_time_prekey_id is not None:
                 self.store.delete_one_time_prekey(one_time_prekey_id)
+            if pq_prekey.is_one_time:
+                self.store.delete_pq_one_time_prekey(pq_prekey_id)
             if pin is None:
                 self.store.set_pin(delivered.sender, initial_header.identity_dh_key)
             self._owe_profile_to_a_new_session(delivered.sender)
@@ -1297,7 +1340,9 @@ class Client:
             nonce=self.random_bytes(MESSAGE_NONCE_LENGTH),
         )
         envelope = PeerMessage(
-            version=VERSION, header=encrypted.header, ciphertext=encrypted.ciphertext
+            version=session.version,
+            header=encrypted.header,
+            ciphertext=encrypted.ciphertext,
         )
         if session.initial_header is not None:
             envelope.initial_header.MergeFromString(session.initial_header)
@@ -1327,6 +1372,9 @@ class Client:
     def _decrypt(
         self, session: StoredSession, delivered: Delivered, envelope: PeerMessage
     ) -> ratchet.Decrypted:
+        """Section 17.7 on a session of the version of the envelope only (41.10)."""
+        if session.version != envelope.version:
+            raise DecryptFailedError("the session is of another version than the envelope")
         return self._decrypt_state(session.state, session.associated_data, delivered, envelope)
 
     def _decrypt_state(
@@ -1366,21 +1414,75 @@ class Client:
             one_time_prekeys.append(OneTimePrekey(id=prekey_id, key=key))
         return tuple(one_time_prekeys)
 
+    def _add_pq_one_time_prekeys(self, count: int) -> tuple[SignedPrekey, ...]:
+        """Makes `count` one-time post-quantum prekeys, first deleting those with the
+        lowest ids that a batch would push past PQ_ONE_TIME_PREKEY_HELD_MAX (42.2)."""
+        count = min(count, PQ_ONE_TIME_PREKEY_HELD_MAX, self.store.pq_prekey_ids_left())
+        held = self.store.pq_one_time_prekey_count()
+        over_the_bound = held + count - PQ_ONE_TIME_PREKEY_HELD_MAX
+        if over_the_bound > 0:
+            self.store.delete_lowest_pq_one_time_prekeys(over_the_bound)
+
+        pq_one_time_prekeys = []
+        for _ in range(count):
+            seed = self.random_bytes(KEM_SEED_LENGTH)
+            prekey_id = self.store.add_pq_prekey(seed, signed_prekey_id=None)
+            if prekey_id is None:
+                break
+            pq_one_time_prekeys.append(self._signed_pq_prekey(prekey_id, seed))
+        return tuple(pq_one_time_prekeys)
+
+    def _add_signed_prekey(self) -> None:
+        """Step 2 of section 21.2: a new signed prekey with its last-resort post-quantum
+        prekey, inside the caller's transaction."""
+        signed_prekey_id = self.store.add_signed_prekey(
+            self.random_bytes(KEY_LENGTH), made_at=self.now()
+        )
+        if signed_prekey_id is not None:
+            seed = self.random_bytes(KEM_SEED_LENGTH)
+            self.store.add_pq_prekey(seed, signed_prekey_id=signed_prekey_id)
+
+    def _is_rotation_due(self) -> bool:
+        """Step 2 of section 21.2: no signed prekey, an old one, or one without a
+        last-resort post-quantum prekey while its counter can still give one."""
+        newest = self.store.newest_signed_prekey()
+        if newest is None:
+            return True
+        is_old = self.now() - newest.made_at >= SIGNED_PREKEY_ROTATION_SECONDS
+        lacks_a_pq_prekey = newest.pq_prekey is None
+        can_make_a_pq_prekey = self.store.pq_prekey_ids_left() > 0
+        return is_old or (lacks_a_pq_prekey and can_make_a_pq_prekey)
+
+    def _signed_pq_prekey(self, prekey_id: int, seed: bytes) -> SignedPrekey:
+        key = kem_public_key(seed)
+        signature = sign_pq_prekey(self._identity.seed, pq_prekey=key)
+        return SignedPrekey(id=prekey_id, key=key, signature=signature)
+
     def _upload(
-        self, newest: StoredSignedPrekey, one_time_prekeys: tuple[OneTimePrekey, ...]
+        self,
+        newest: StoredSignedPrekey,
+        one_time_prekeys: tuple[OneTimePrekey, ...],
+        pq_one_time_prekeys: tuple[SignedPrekey, ...],
     ) -> PrekeyUpload:
-        """An UploadBundle of section 21.4 with the newest signed prekey."""
+        """An UploadBundle of section 21.4 with the newest signed prekey and its pair."""
         signed_key = derive_x25519_public_key(newest.private_key)
         signed_prekey = SignedPrekey(
             id=newest.prekey_id,
             key=signed_key,
             signature=sign_signed_prekey(self._identity.seed, signed_prekey=signed_key),
         )
+        pq_prekey = None
+        if newest.pq_prekey is not None:
+            pq_prekey = self._signed_pq_prekey(
+                newest.pq_prekey.prekey_id, newest.pq_prekey.seed
+            )
         return PrekeyUpload(
             identity_dh_key=self.identity_dh_key,
             identity_dh_signature=self._identity_dh_signature(),
             signed_prekey=signed_prekey,
             one_time_prekeys=one_time_prekeys,
+            pq_prekey=pq_prekey,
+            pq_one_time_prekeys=pq_one_time_prekeys,
         )
 
     def _newest_signed_prekey(self) -> StoredSignedPrekey:
@@ -1391,30 +1493,6 @@ class Client:
 
     def _identity_dh_signature(self) -> bytes:
         return sign_identity_dh_key(self._identity.seed, identity_dh_key=self.identity_dh_key)
-
-
-def _check_initial_header(
-    sender: bytes, initial_header: InitialHeader, pin: bytes | None
-) -> None:
-    """Steps 1 and 2 of section 16.8, before any Diffie-Hellman value.
-
-    Raises:
-        BadInitialHeaderError: The signature does not verify under the sender.
-        IdentityKeyMismatchError: The key is not the pinned one.
-    """
-    try:
-        verify_identity_dh_key(
-            sender,
-            identity_dh_key=initial_header.identity_dh_key,
-            signature=initial_header.identity_dh_signature,
-        )
-    except BadBundleError as error:
-        raise BadInitialHeaderError("the signature over the X25519 key fails") from error
-
-    has_pin = pin is not None
-    carries_another_key = initial_header.identity_dh_key != pin
-    if has_pin and carries_another_key:
-        raise IdentityKeyMismatchError("the initial header carries another X25519 key")
 
 
 def _read_content(padded_plaintext: bytes) -> tuple[Content | None, str | None]:

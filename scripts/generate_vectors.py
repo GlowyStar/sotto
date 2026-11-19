@@ -4,18 +4,29 @@ Run by hand after a change of a layout or of a vector:
 
     uv run python scripts/generate_vectors.py
 
+The vectors of PQXDH encapsulate with fixed randomness, ML-KEM.Encaps_internal of FIPS 203,
+which only the OpenSSL command line offers here: an `openssl` of release 3.5 or later on
+the PATH.
+
 The written file is committed with that change. From the first tag that holds a vector
 file, a vector is only ever added, at the end of its list (section 15.4).
 """
 
 import hashlib
 import json
+import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.mlkem import (
+    MLKEM768PrivateKey,
+    MLKEM768PublicKey,
+)
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from google.protobuf.message import Message as ProtoMessage
 
 from sotto.client.envelope import (
@@ -61,11 +72,16 @@ from sotto.crypto.identity import (
     encode_user_id,
     identity_dh_string,
     login_string,
+    pq_prekey_string,
     sign_identity_dh_key,
     sign_login,
+    sign_pq_prekey,
     sign_signed_prekey,
     signed_prekey_string,
 )
+from sotto.crypto.pqxdh import Encapsulation, PqKeyAgreement, kem_public_key
+from sotto.crypto.pqxdh import initiate as pqxdh_initiate
+from sotto.crypto.pqxdh import respond as pqxdh_respond
 from sotto.crypto.ratchet import (
     MAX_SKIP,
     RatchetState,
@@ -607,7 +623,7 @@ def key_schedule(dh_outputs: list[bytes]) -> Fields:
     return recorded
 
 
-def outputs_of(agreement: KeyAgreement) -> Fields:
+def outputs_of(agreement: KeyAgreement | PqKeyAgreement) -> Fields:
     return {
         "sk": agreement.shared_secret.hex(),
         "session_associated_data": agreement.associated_data.hex(),
@@ -1713,6 +1729,332 @@ def content_vectors() -> list[ContentVector]:
     return content_encode_vectors() + content_decode_vectors()
 
 
+ALICE_PQ_PREKEY_SEED = bytes([0x17]) * 64
+ALICE_PQ_ONE_TIME_PREKEY_SEED = bytes([0x18]) * 64
+ALICE_OTHER_PQ_PREKEY_SEED = bytes([0x19]) * 64
+ALICE_PQ_PREKEY = kem_public_key(ALICE_PQ_PREKEY_SEED)
+ALICE_PQ_ONE_TIME_PREKEY = kem_public_key(ALICE_PQ_ONE_TIME_PREKEY_SEED)
+PQ_PREKEY_ID = 8
+PQ_ONE_TIME_PREKEY_ID = 42
+KEM_RANDOMNESS = bytes([0x41]) * 32
+KEM_RANDOMNESS_FOR_THE_LAST_RESORT = bytes([0x42]) * 32
+EPHEMERAL_PRIVATE_KEY_FOR_THE_LAST_RESORT = bytes([0x35]) * 32
+OPENSSL = "openssl"
+OPENSSL_SECONDS = 30
+
+type PqFields = dict[str, Any]
+type PqVector = dict[str, Any]
+
+
+def encapsulate_internal(public_key: bytes, randomness: bytes) -> Encapsulation:
+    """ML-KEM.Encaps_internal(ek, m) of FIPS 203, section 6.2: the derandomized
+    encapsulation that FIPS 203 allows for testing, run by the OpenSSL command line."""
+    pem = MLKEM768PublicKey.from_public_bytes(public_key).public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
+    with tempfile.TemporaryDirectory() as folder:
+        key_path = Path(folder) / "key.pem"
+        ciphertext_path = Path(folder) / "ct"
+        secret_path = Path(folder) / "ss"
+        key_path.write_bytes(pem)
+        # A fixed command as a list without a shell; the arguments are made here.
+        subprocess.run(  # noqa: S603
+            [
+                OPENSSL,
+                "pkeyutl",
+                "-encap",
+                "-pubin",
+                "-inkey",
+                key_path,
+                "-pkeyopt",
+                f"hexikme:{randomness.hex()}",
+                "-out",
+                ciphertext_path,
+                "-secret",
+                secret_path,
+            ],
+            check=True,
+            timeout=OPENSSL_SECONDS,
+            capture_output=True,
+            text=True,
+        )
+        return Encapsulation(
+            ciphertext=ciphertext_path.read_bytes(), shared_secret=secret_path.read_bytes()
+        )
+
+
+def pq_bundle(
+    seed: bytes,
+    pq_prekey_id: int = PQ_ONE_TIME_PREKEY_ID,
+    pq_prekey: bytes = ALICE_PQ_ONE_TIME_PREKEY,
+) -> PqFields:
+    """A Bundle of section 7.11 with a post-quantum prekey signed by the identity of seed."""
+    return valid_bundle(ALICE_SEED) | {
+        "pq_prekey_id": pq_prekey_id,
+        "pq_prekey_key": pq_prekey.hex(),
+        "pq_prekey_signature": sign_pq_prekey(seed, pq_prekey=pq_prekey).hex(),
+    }
+
+
+def bundle_with_pq_prekey(fields: PqFields) -> Bundle:
+    bundle = bundle_of(fields)
+    if "pq_prekey_id" not in fields:
+        return bundle
+    pq_prekey = SignedPrekey(
+        id=int(fields["pq_prekey_id"]),
+        key=bytes.fromhex(fields["pq_prekey_key"]),
+        signature=bytes.fromhex(fields["pq_prekey_signature"]),
+    )
+    return replace(bundle, pq_prekey=pq_prekey)
+
+
+def kem_key_vectors() -> list[PqVector]:
+    return [
+        passes(
+            f"mlkem768-public-key-{case}",
+            "mlkem768-public-key",
+            {"seed": seed.hex()},
+            {"public_key": kem_public_key(seed).hex()},
+        )
+        for case, seed in (
+            ("last-resort", ALICE_PQ_PREKEY_SEED),
+            ("one-time", ALICE_PQ_ONE_TIME_PREKEY_SEED),
+        )
+    ]
+
+
+def pq_signed_strings(fields: PqFields) -> PqFields:
+    identity = bytes.fromhex(fields["identity"])
+    strings: PqFields = {
+        "identity_dh_string": identity_dh_string(
+            identity_key=identity, identity_dh_key=bytes.fromhex(fields["identity_dh_key"])
+        ).hex(),
+        "signed_prekey_string": signed_prekey_string(
+            identity_key=identity, signed_prekey=bytes.fromhex(fields["signed_prekey_key"])
+        ).hex(),
+    }
+    if "pq_prekey_key" in fields:
+        strings["pq_prekey_string"] = pq_prekey_string(
+            identity_key=identity, pq_prekey=bytes.fromhex(fields["pq_prekey_key"])
+        ).hex()
+    return strings
+
+
+def pq_key_schedule(dh_outputs: list[bytes], kem_shared_secret: bytes) -> PqFields:
+    recorded: PqFields = {
+        f"dh{number}": output.hex() for number, output in enumerate(dh_outputs, 1)
+    }
+    recorded["kem_shared_secret"] = kem_shared_secret.hex()
+    key_material = KEY_MATERIAL_PREFIX + b"".join(dh_outputs) + kem_shared_secret
+    recorded["input_key_material"] = key_material.hex()
+    return recorded
+
+
+def pqxdh_initiate_vector(
+    case: str,
+    fields: PqFields,
+    ephemeral_private_key: bytes = EPHEMERAL_PRIVATE_KEY,
+    randomness: bytes = KEM_RANDOMNESS,
+    *,
+    error: str | None = None,
+) -> PqVector:
+    name = f"pqxdh-initiate-{case}"
+    inputs: PqFields = {
+        "identity_key": BOB.hex(),
+        "identity_dh_private_key": BOB_IDENTITY_DH_PRIVATE_KEY.hex(),
+        "ephemeral_private_key": ephemeral_private_key.hex(),
+        "contact_id": ALICE.hex(),
+    }
+    inputs |= fields
+    intermediates = pq_signed_strings(fields)
+    if error is not None:
+        return fails(name, "pqxdh-initiate", inputs, error, intermediates=intermediates)
+
+    bundle = bundle_with_pq_prekey(fields)
+    encapsulation = encapsulate_internal(bytes.fromhex(fields["pq_prekey_key"]), randomness)
+    inputs |= {
+        "kem_randomness": randomness.hex(),
+        "kem_ciphertext": encapsulation.ciphertext.hex(),
+        "kem_shared_secret": encapsulation.shared_secret.hex(),
+    }
+    dh_outputs = [
+        dh(BOB_IDENTITY_DH_PRIVATE_KEY, bundle.signed_prekey.key),
+        dh(ephemeral_private_key, bundle.identity_dh_key),
+        dh(ephemeral_private_key, bundle.signed_prekey.key),
+    ]
+    if bundle.one_time_prekey is not None:
+        dh_outputs.append(dh(ephemeral_private_key, bundle.one_time_prekey.key))
+    agreement = pqxdh_initiate(
+        bundle,
+        identity_key=BOB,
+        identity_dh_private_key=BOB_IDENTITY_DH_PRIVATE_KEY,
+        ephemeral_private_key=ephemeral_private_key,
+        contact_identity_key=ALICE,
+        pinned_identity_dh_key=None,
+        encapsulate=lambda _: encapsulation,
+    )
+    intermediates |= pq_key_schedule(dh_outputs, encapsulation.shared_secret)
+
+    initial_header: PqFields = {
+        "identity_dh_key": BOB_IDENTITY_DH.hex(),
+        "ephemeral_key": derive_x25519_public_key(ephemeral_private_key).hex(),
+        "signed_prekey_id": bundle.signed_prekey.id,
+        "pq_prekey_id": agreement.pq_prekey_id,
+        "kem_ciphertext": agreement.kem_ciphertext.hex(),
+    }
+    if bundle.one_time_prekey is not None:
+        initial_header["one_time_prekey_id"] = bundle.one_time_prekey.id
+    outputs: PqFields = outputs_of(agreement) | {"initial_header": initial_header}
+    return passes(name, "pqxdh-initiate", inputs, outputs, intermediates=intermediates)
+
+
+def pqxdh_respond_vector(
+    case: str,
+    initiated: PqVector,
+    *,
+    pq_prekey_seed: bytes = ALICE_PQ_ONE_TIME_PREKEY_SEED,
+    kem_ciphertext: bytes | None = None,
+    ephemeral_key: bytes | None = None,
+    error: str | None = None,
+) -> PqVector:
+    """The responder's side of an initiate vector, with what the case changes on the way."""
+    name = f"pqxdh-respond-{case}"
+    header: PqFields = initiated["outputs"]["initial_header"]
+    if ephemeral_key is None:
+        ephemeral_key = bytes.fromhex(header["ephemeral_key"])
+    if kem_ciphertext is None:
+        kem_ciphertext = bytes.fromhex(header["kem_ciphertext"])
+    signed_prekey_id = header["signed_prekey_id"]
+    one_time_prekey_id = header.get("one_time_prekey_id")
+    pq_prekey_id = header["pq_prekey_id"]
+    one_time_prekey_private_key = None
+    if one_time_prekey_id is not None:
+        one_time_prekey_private_key = ALICE_ONE_TIME_PREKEY_PRIVATE_KEY
+
+    signature = sign_identity_dh_key(BOB_SEED, identity_dh_key=BOB_IDENTITY_DH)
+    inputs: PqFields = {
+        "identity_key": ALICE.hex(),
+        "identity_dh_private_key": ALICE_IDENTITY_DH_PRIVATE_KEY.hex(),
+        "signed_prekey_private_key": ALICE_SIGNED_PREKEY_PRIVATE_KEY.hex(),
+    }
+    if one_time_prekey_private_key is not None:
+        inputs["one_time_prekey_private_key"] = one_time_prekey_private_key.hex()
+    inputs |= {
+        "pq_prekey_seed": pq_prekey_seed.hex(),
+        "sender": BOB.hex(),
+        "identity_dh_key": BOB_IDENTITY_DH.hex(),
+        "identity_dh_signature": signature.hex(),
+        "ephemeral_key": ephemeral_key.hex(),
+        "kem_ciphertext": kem_ciphertext.hex(),
+        "signed_prekey_id": signed_prekey_id,
+    }
+    if one_time_prekey_id is not None:
+        inputs["one_time_prekey_id"] = one_time_prekey_id
+    inputs["pq_prekey_id"] = pq_prekey_id
+
+    intermediates: PqFields = {
+        "identity_dh_string": identity_dh_string(
+            identity_key=BOB, identity_dh_key=BOB_IDENTITY_DH
+        ).hex(),
+    }
+    if error is not None:
+        return fails(name, "pqxdh-respond", inputs, error, intermediates=intermediates)
+
+    dh_outputs = [
+        dh(ALICE_SIGNED_PREKEY_PRIVATE_KEY, BOB_IDENTITY_DH),
+        dh(ALICE_IDENTITY_DH_PRIVATE_KEY, ephemeral_key),
+        dh(ALICE_SIGNED_PREKEY_PRIVATE_KEY, ephemeral_key),
+    ]
+    if one_time_prekey_private_key is not None:
+        dh_outputs.append(dh(one_time_prekey_private_key, ephemeral_key))
+    kem_shared_secret = MLKEM768PrivateKey.from_seed_bytes(pq_prekey_seed).decapsulate(
+        kem_ciphertext
+    )
+    agreement = pqxdh_respond(
+        identity_key=ALICE,
+        identity_dh_private_key=ALICE_IDENTITY_DH_PRIVATE_KEY,
+        signed_prekey_private_key=ALICE_SIGNED_PREKEY_PRIVATE_KEY,
+        one_time_prekey_private_key=one_time_prekey_private_key,
+        pq_prekey_seed=pq_prekey_seed,
+        sender_identity_key=BOB,
+        sender_identity_dh_key=BOB_IDENTITY_DH,
+        sender_identity_dh_signature=signature,
+        ephemeral_key=ephemeral_key,
+        kem_ciphertext=kem_ciphertext,
+        pinned_identity_dh_key=None,
+    )
+    intermediates |= pq_key_schedule(dh_outputs, kem_shared_secret)
+    return passes(
+        name, "pqxdh-respond", inputs, outputs_of(agreement), intermediates=intermediates
+    )
+
+
+def modulus_check_failure(public_key: bytes) -> bytes:
+    """The key with its first coefficient set to 4095, above q = 3329 (FIPS 203, 7.2)."""
+    return bytes([0xFF, public_key[1] | 0x0F]) + public_key[2:]
+
+
+def pqxdh_vectors() -> list[PqVector]:
+    with_one_time_prekeys = pq_bundle(ALICE_SEED)
+    with_the_last_resort = pq_bundle(ALICE_SEED, PQ_PREKEY_ID, ALICE_PQ_PREKEY)
+    del with_the_last_resort["one_time_prekey_id"]
+    del with_the_last_resort["one_time_prekey_key"]
+    without_a_pq_prekey = valid_bundle(ALICE_SEED)
+    signed_by_mallory = with_one_time_prekeys | {
+        "pq_prekey_signature": sign_pq_prekey(
+            MALLORY_SEED, pq_prekey=ALICE_PQ_ONE_TIME_PREKEY
+        ).hex()
+    }
+    flipped = with_flipped_signature(with_one_time_prekeys, "pq_prekey_signature")
+    no_kem_key = pq_bundle(
+        ALICE_SEED, pq_prekey=modulus_check_failure(ALICE_PQ_ONE_TIME_PREKEY)
+    )
+    of_small_order = with_one_time_prekeys | {"one_time_prekey_key": X25519_ORDER_2.hex()}
+
+    first = pqxdh_initiate_vector("with-one-time-prekeys", with_one_time_prekeys)
+    last_resort = pqxdh_initiate_vector(
+        "with-the-last-resort-pq-prekey",
+        with_the_last_resort,
+        EPHEMERAL_PRIVATE_KEY_FOR_THE_LAST_RESORT,
+        KEM_RANDOMNESS_FOR_THE_LAST_RESORT,
+    )
+    other_ciphertext = encapsulate_internal(ALICE_PQ_ONE_TIME_PREKEY, bytes([0x43]) * 32)
+    return [
+        *kem_key_vectors(),
+        first,
+        pqxdh_respond_vector("with-one-time-prekeys", first),
+        last_resort,
+        pqxdh_respond_vector(
+            "with-the-last-resort-pq-prekey", last_resort, pq_prekey_seed=ALICE_PQ_PREKEY_SEED
+        ),
+        pqxdh_respond_vector(
+            "replaced-kem-ciphertext", first, kem_ciphertext=other_ciphertext.ciphertext
+        ),
+        pqxdh_respond_vector(
+            "wrong-pq-prekey", first, pq_prekey_seed=ALICE_OTHER_PQ_PREKEY_SEED
+        ),
+        pqxdh_initiate_vector(
+            "without-a-pq-prekey", without_a_pq_prekey, error="PQ_PREKEY_MISSING"
+        ),
+        pqxdh_initiate_vector(
+            "pq-prekey-signed-by-another-identity", signed_by_mallory, error="BAD_BUNDLE"
+        ),
+        pqxdh_initiate_vector("pq-prekey-signature-flipped", flipped, error="BAD_BUNDLE"),
+        pqxdh_initiate_vector(
+            "pq-prekey-fails-the-modulus-check", no_kem_key, error="BAD_BUNDLE"
+        ),
+        pqxdh_initiate_vector(
+            "one-time-prekey-of-small-order", of_small_order, error="ZERO_DH"
+        ),
+        pqxdh_respond_vector(
+            "ephemeral-key-of-small-order",
+            first,
+            ephemeral_key=X25519_ORDER_8,
+            error="ZERO_DH",
+        ),
+    ]
+
+
 FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "identity.json": identity_vectors,
     "x3dh.json": x3dh_vectors,
@@ -1720,6 +2062,7 @@ FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "blob.json": blob_vectors,
     "profile.json": profile_vectors,
     "content.json": content_vectors,
+    "pqxdh.json": pqxdh_vectors,
 }
 
 

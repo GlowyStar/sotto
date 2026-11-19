@@ -4,8 +4,9 @@ Part 1, sections 1 to 15: identity, the prekey bundle and the relay protocol. Pa
 sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 27 close
 both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Part 4,
 sections 35 to 37: the profile, a display name and an avatar. Part 5, sections 38 to 40:
-replies, edits, deletion for both, receipts and the disappearing timer. Appendix A
-follows section 40.
+replies, edits, deletion for both, receipts and the disappearing timer. Part 6, sections
+41 to 43: the post-quantum key agreement PQXDH, end-to-end version 2. Appendix A follows
+section 43.
 
 ## 1. Status and scope
 
@@ -41,11 +42,15 @@ Part 5 specifies what a client says about the messages of a chat: a reply with a
 an edit, a request to delete a message for both, delivery and read receipts and the
 disappearing timer (section 38).
 
+Part 6 specifies the key agreement of every new session: PQXDH, X25519 with ML-KEM-768,
+the post-quantum prekeys that the relay stores and hands out, and the transition from the
+key agreement of section 16 (section 41).
+
 ### 1.2 Status
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee of parts 1 to 5 carries a citation (section 2.6), which names the
+- Every guarantee of parts 1 to 6 carries a citation (section 2.6), which names the
   test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
@@ -55,7 +60,7 @@ disappearing timer (section 38).
 | Version                     | Value | Covers                                                    |
 |-----------------------------|-------|-----------------------------------------------------------|
 | Relay protocol version      | 1     | Sections 6 to 13, the login string of section 4.2, and sections 30 and 31 |
-| End-to-end protocol version | 1     | Sections 3 and 5, the key statements of sections 4.3 and 4.4, sections 16 to 25, sections 29, 32 and 33, sections 35 and 36, and sections 38 and 39 |
+| End-to-end protocol version | 2     | Sections 3 and 5, the key statements of sections 4.3 to 4.5, sections 16 to 25, sections 29, 32 and 33, sections 35 and 36, sections 38 and 39, and sections 41 and 42. Version 1 is that of the sessions made by section 16 (section 41.10) |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
 what a client does with a relay protocol version it does not know.
@@ -67,7 +72,7 @@ names the section of part 2 each time.
 
 | Item                                                                                                  | Section |
 |-------------------------------------------------------------------------------------------------------|---------|
-| Key agreement between two identities from a prekey bundle, including the handling of an all-zero Diffie-Hellman output | 16 |
+| Key agreement between two identities from a prekey bundle, including the handling of an all-zero Diffie-Hellman output | 16; for every new session 41 |
 | The Double Ratchet: key derivation, the message header, skipped message keys                          | 17      |
 | Message encryption: the cipher, the nonce, the associated data and the wire layout                    | 18      |
 | The peer envelope and the plaintext with its padding, that is, the content of the `payload` field of sections 7.12 and 7.14 | 19 |
@@ -277,8 +282,9 @@ never registered and the frame gets the answer for an identity that is not regis
 
 ### 4.1 Common rules
 
-An identity key signs exactly three kinds of byte string: the login string (4.2), the
-X25519 identity key string (4.3) and the signed prekey string (4.4).
+An identity key signs exactly four kinds of byte string: the login string (4.2), the
+X25519 identity key string (4.3), the signed prekey string (4.4) and the post-quantum
+prekey string (4.5).
 
 1. The signature is Ed25519 as in RFC 8032 section 5.1: no prehash and no context. It is
    made and verified by the library of the platform: `Ed25519PrivateKey.sign` and
@@ -379,6 +385,25 @@ Total length: 86 bytes.
 
 The id of a signed prekey is not part of the string (section 5.2).
 
+### 4.5 The post-quantum prekey string
+
+| Offset | Length | Field      | Value                                                                                  |
+|--------|--------|------------|----------------------------------------------------------------------------------------|
+| 0      | 25     | prefix     | ASCII `sotto/1 ml-kem-768-prekey`, hex `736f74746f2f31206d6c2d6b656d2d3736382d7072656b6579` |
+| 25     | 1      | terminator | `00`                                                                                   |
+| 26     | 32     | IKsig      | the identity key of the signer                                                         |
+| 58     | 1184   | PQPK       | the ML-KEM-768 public key of a post-quantum prekey (section 41.3)                      |
+
+Total length: 1242 bytes
+[test: tests/crypto/test_identity.py::test_signed_strings_of_two_purposes_never_coincide].
+
+- Signed by: the owner of the identity, with the private key of the identity, for every
+  post-quantum prekey it makes, the last-resort one and each one-time one (section 42.2).
+- Verified by: the relay on every UploadBundle that carries post-quantum prekeys
+  (section 42.1); a client on every Bundle it fetched (section 5.4, check 6).
+
+The id of a post-quantum prekey and its kind are not part of the string.
+
 ## 5. Prekey bundle
 
 ### 5.1 The keys
@@ -389,6 +414,8 @@ The id of a signed prekey is not part of the string (section 5.2).
 | IKdh  | X25519 public key  | 32     | One per identity. Never changes (section 5.3). |
 | SPK   | X25519 public key  | 32     | Replaced by its owner from time to time.       |
 | OPK   | X25519 public key  | 32     | Handed out once, then deleted (section 9.3).   |
+| PQSPK | ML-KEM-768 public key | 1184 | Replaced with the signed prekey (section 42.2). |
+| PQOPK | ML-KEM-768 public key | 1184 | Handed out once, then deleted (section 42.1).  |
 
 An X25519 public key is the 32-byte string of RFC 7748 section 5. The rules for using
 these keys are in section 16
@@ -412,6 +439,9 @@ start a session with it while it is offline.
 | Signature over SPK          | bytes | 64     |                                             |
 | One-time prekey id          | u32   |        | No                                          |
 | One-time prekey (OPK)       | bytes | 32     | No                                          |
+| Post-quantum prekey id      | u32   |        | No                                          |
+| Post-quantum prekey (PQSPK or PQOPK) | bytes | 1184 | Yes, by the string of section 4.5  |
+| Signature over it           | bytes | 64     |                                             |
 
 - A prekey id is any value from 0 to 2^32 - 1.
 - An upload carries any number of one-time prekeys, none included (section 7.8). A fetched
@@ -450,7 +480,10 @@ change for the life of the identity.
 
 A client that received a Bundle for a contact runs these checks in this order and stops at
 the first that fails
-[test: tests/crypto/test_identity.py::test_bundle_checks_stop_at_the_first_failure].
+[test: tests/crypto/test_identity.py::test_bundle_checks_stop_at_the_first_failure]
+[test: tests/crypto/test_pqxdh.py::test_bundle_that_fails_a_check_reaches_no_encapsulation].
+Checks 5 to 7 belong to the key agreement of version 2 (section 41.5); the key agreement
+of section 16 ran the first four.
 The lengths of the fields were checked before, when the frame was parsed (section 7.3).
 
 | No. | Check                                                                                         | Result on failure     |
@@ -459,8 +492,11 @@ The lengths of the fields were checked before, when the frame was parsed (sectio
 | 2   | `identity_dh_signature` verifies under `identity` over the string of section 4.3, built from `identity` and `identity_dh_key` | BAD_BUNDLE |
 | 3   | If the client has a pinned X25519 identity key for the contact: `identity_dh_key` equals it   | IDENTITY_KEY_MISMATCH |
 | 4   | `signed_prekey.signature` verifies under `identity` over the string of section 4.4, built from `identity` and `signed_prekey.key` | BAD_BUNDLE |
+| 5   | `pq_prekey` is present                                                                        | PQ_PREKEY_MISSING     |
+| 6   | `pq_prekey.signature` verifies under `identity` over the string of section 4.5, built from `identity` and `pq_prekey.key` | BAD_BUNDLE |
+| 7   | `pq_prekey.key` loads as an ML-KEM-768 public key: the check of FIPS 203, section 7.2 (section 41.3) | BAD_BUNDLE |
 
-- When all four pass and the client has no pin for the contact, it pins `identity_dh_key`
+- When all seven pass and the client has no pin for the contact, it pins `identity_dh_key`
   in the transaction that stores the session made from the bundle (section 16.6, step 8)
   [test: tests/client/test_session.py::test_bundle_with_another_x25519_key_than_the_pin_is_refused_before_any_diffie_hellman]. A key agreement that fails after the checks pins nothing
   [test: tests/client/test_session.py::test_key_agreement_that_fails_after_the_checks_stores_no_session_and_no_pin].
@@ -598,6 +634,7 @@ message Login {
 message LoggedIn {
   uint32 one_time_prekey_count = 1;
   uint32 blob_max_bytes = 2;
+  uint32 pq_one_time_prekey_count = 3;
 }
 
 message SignedPrekey {
@@ -616,10 +653,13 @@ message UploadBundle {
   bytes identity_dh_signature = 2;
   SignedPrekey signed_prekey = 3;
   repeated OneTimePrekey one_time_prekeys = 4;
+  SignedPrekey pq_prekey = 5;
+  repeated SignedPrekey pq_one_time_prekeys = 6;
 }
 
 message BundleStored {
   uint32 one_time_prekey_count = 1;
+  uint32 pq_one_time_prekey_count = 2;
 }
 
 message FetchBundle {
@@ -632,6 +672,7 @@ message Bundle {
   bytes identity_dh_signature = 3;
   SignedPrekey signed_prekey = 4;
   OneTimePrekey one_time_prekey = 5;
+  SignedPrekey pq_prekey = 6;
 }
 
 message Send {
@@ -855,6 +896,7 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
 |-------------------------|-----|--------|---------------------------------------------------------|
 | `one_time_prekey_count` | 1   | uint32 | The number of one-time prekeys the relay holds for the identity, 0 for an identity that is not registered |
 | `blob_max_bytes`        | 2   | uint32 | BLOB_MAX_BYTES of a relay that serves the blob frames of part 3, 0 for a relay that does not (section 28.2) |
+| `pq_one_time_prekey_count` | 3 | uint32 | The number of one-time post-quantum prekeys the relay holds for the identity (section 42.1) |
 
 - Sent by the relay once, when it accepted the Login
   [test: tests/test_login.py::test_login_is_accepted]
@@ -880,6 +922,10 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
 | `one_time_prekeys`         | 4   | repeated OneTimePrekey | 0 or more, as many as fit in one frame |
 | `one_time_prekeys[].id`    | 1   | uint32        | 0 to 2^32 - 1                                 |
 | `one_time_prekeys[].key`   | 2   | bytes         | 32                                            |
+| `pq_prekey`                | 5   | SignedPrekey  | present or absent: the last-resort post-quantum prekey (section 42.1) |
+| `pq_prekey.key`, `pq_prekey.signature` | 2, 3 | bytes | 1184 and 64 when present; the signature over the string of section 4.5 |
+| `pq_one_time_prekeys`      | 6   | repeated SignedPrekey | 0 or more, as many as fit in one frame |
+| `pq_one_time_prekeys[].key`, `.signature` | 2, 3 | bytes | 1184 and 64                         |
 
 - Sent by a logged-in client. The bundle is that of the identity of the connection
   (section 9.1).
@@ -897,6 +943,7 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
 | Field                   | No. | Type   | Length or value                                              |
 |-------------------------|-----|--------|--------------------------------------------------------------|
 | `one_time_prekey_count` | 1   | uint32 | The number of one-time prekeys the relay holds for the identity after the upload |
+| `pq_one_time_prekey_count` | 2 | uint32 | The same for the one-time post-quantum prekeys (section 42.1) |
 
 - Sent by the relay as the answer to an accepted UploadBundle
   [test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte].
@@ -927,12 +974,13 @@ Rules of state for a client [test: tests/client/test_transport.py::test_frame_ou
 | `identity_dh_signature`   | 3   | bytes         | 64                                             |
 | `signed_prekey`           | 4   | SignedPrekey  | present; `key` 32, `signature` 64              |
 | `one_time_prekey`         | 5   | OneTimePrekey | present or absent; `key` 32 when present       |
+| `pq_prekey`               | 6   | SignedPrekey  | present or absent; `key` 1184 and `signature` 64 when present (section 42.1) |
 
 - Sent by the relay as the answer to a FetchBundle for a registered identity
   [test: tests/test_bundles.py::test_uploaded_bundle_is_fetched_byte_for_byte].
 - No answer. The client runs the checks of section 5.4.
 - Violations, seen by the client: a wrong length or an absent `signed_prekey` is a
-  malformed frame.
+  malformed frame. An absent `pq_prekey` is not: check 5 of section 5.4 refuses it.
 
 ### 7.12 Send
 
@@ -1173,7 +1221,8 @@ The relay handles a well-formed UploadBundle of a logged-in connection in this o
    Error BAD_BUNDLE.
 3. It builds the string of section 4.4 from the identity key of the connection and
    `signed_prekey.key` and verifies `signed_prekey.signature` over it. On failure the
-   answer is Error BAD_BUNDLE.
+   answer is Error BAD_BUNDLE. It verifies every post-quantum prekey of the frame the same
+   way over the string of section 4.5 (section 42.1).
 4. In one transaction:
    1. When the relay holds an X25519 identity key for the identity and `identity_dh_key`
       differs from it, the answer is Error IDENTITY_KEY_MISMATCH and nothing of the frame
@@ -1188,11 +1237,12 @@ The relay handles a well-formed UploadBundle of a logged-in connection in this o
       One is stored while the identity has fewer than ONE_TIME_PREKEY_CAP stored. The rest
       are dropped
       [test: tests/test_bundles.py::test_one_time_prekeys_are_stored_in_the_order_of_the_frame_up_to_the_cap].
+      The post-quantum prekeys are stored by the rules of section 42.1.
    5. When the transaction fails because the database is at its page ceiling
       (section 12), it is rolled back, the answer is Error STORAGE_FULL and nothing of the
       frame is stored.
-5. The answer is BundleStored with the number of one-time prekeys stored for the identity
-   after the transaction.
+5. The answer is BundleStored with the numbers of one-time prekeys and of one-time
+   post-quantum prekeys stored for the identity after the transaction.
 
 The relay verifies both signatures because the X25519 identity key is written once: an
 upload that was not verified would fix a wrong key for the identity for good.
@@ -1221,8 +1271,8 @@ The relay handles a well-formed FetchBundle of a logged-in connection in this or
 2. When the identity of the request is not registered, the answer is Error NOT_FOUND.
 3. It decides the handout of a one-time prekey (section 9.3).
 4. The answer is Bundle: the identity of the request, its X25519 identity key and
-   signature, its stored signed prekey with id and signature, and the one-time prekey of
-   step 3 when there is one.
+   signature, its stored signed prekey with id and signature, the one-time prekey of
+   step 3 when there is one, and a post-quantum prekey by section 42.1.
 
 Any logged-in identity can fetch the bundle of any registered identity, its own included.
 The relay returns the stored bytes of every key and signature unchanged
@@ -1231,7 +1281,8 @@ The relay returns the stored bytes of every key and signature unchanged
 ### 9.3 The handout of a one-time prekey
 
 A fetched bundle carries at most one one-time prekey, and a one-time prekey is handed out
-at most once
+at most once; the same holds for a one-time post-quantum prekey, which the same token
+decides (section 42.1)
 [test: tests/test_bundles.py::test_each_fetch_hands_out_the_one_time_prekey_that_was_stored_first].
 
 1. When the handout bucket of the target identity (section 12.2) has no token, the bundle
@@ -1260,8 +1311,8 @@ A bundle without a one-time prekey still starts a session
 
 ### 9.4 The count of one-time prekeys
 
-LoggedIn and BundleStored carry the number of one-time prekeys that the relay holds for
-the identity at that moment
+LoggedIn and BundleStored carry the number of one-time prekeys, and that of one-time
+post-quantum prekeys, that the relay holds for the identity at that moment
 [test: tests/test_bundles.py::test_counts_of_logged_in_and_bundle_stored_follow_the_stored_one_time_prekeys].
 A client uses it to decide when to upload more (section 21.3) [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox]. The relay
 sends no other notice when the number falls
@@ -1542,6 +1593,7 @@ bundle
 | QUEUE_MAX_MESSAGES      | 1000     | messages | The largest number of messages in the queue of one recipient          |
 | QUEUE_MAX_BYTES         | 16777216 | bytes    | The largest sum of payload lengths in the queue of one recipient, 16 MiB |
 | ONE_TIME_PREKEY_CAP     | 100      | keys     | The largest number of one-time prekeys stored for one identity        |
+| PQ_ONE_TIME_PREKEY_CAP  | 40       | keys     | The largest number of one-time post-quantum prekeys stored for one identity (section 42.1) |
 | FRAME_BUCKET_SIZE       | 60       | tokens   | The size of the frame bucket of one identity                          |
 | FRAME_REFILL_SECONDS    | 1        | seconds  | The time in which one token returns to a frame bucket                 |
 | HANDOUT_BUCKET_SIZE     | 20       | tokens   | The size of the handout bucket of one target identity                 |
@@ -1558,13 +1610,14 @@ prefix `RELAY_`. A test compares this table with the code, constant by constant
 [test: tests/test_docs.py::test_limits_table_is_the_settings_of_the_relay].
 
 One frame carries a limit of this table: LoggedIn carries BLOB_MAX_BYTES (section 28.2).
-A client uses the defaults of the four others it needs:
-MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and MESSAGE_TTL_SECONDS.
+A client uses the defaults of the five others it needs:
+MAX_FRAME_BYTES, ONE_TIME_PREKEY_CAP, PQ_ONE_TIME_PREKEY_CAP, FRAME_REFILL_SECONDS and
+MESSAGE_TTL_SECONDS.
 
 - MAX_FRAME_BYTES is a constant of relay protocol version 1. A relay that serves clients
   MUST NOT run with another value: with a larger one it stores a message that no client
   can receive, with a smaller one it closes on a frame that this protocol allows.
-- A relay with another ONE_TIME_PREKEY_CAP or FRAME_REFILL_SECONDS still works with a
+- A relay with another ONE_TIME_PREKEY_CAP, PQ_ONE_TIME_PREKEY_CAP or FRAME_REFILL_SECONDS still works with a
   client that assumes the defaults (sections 9.1 and 11.1). These and the other settings
   of the table are the operator's to change.
 - A client builds two times of its own on MESSAGE_TTL_SECONDS: how long it keeps a seen id
@@ -1612,7 +1665,8 @@ protected").
 
 - QUEUE_MAX_MESSAGES and QUEUE_MAX_BYTES count every message of a queue, delivered or
   not. A Send that would go over either gets QUEUE_FULL (section 10.2).
-- ONE_TIME_PREKEY_CAP bounds what an upload stores (section 9.1).
+- ONE_TIME_PREKEY_CAP and PQ_ONE_TIME_PREKEY_CAP bound what an upload stores
+  (sections 9.1 and 42.1).
 - MAX_PAGES bounds the database file. A write that needs a page above it fails, the relay
   answers STORAGE_FULL and stays up
   [test: tests/test_storage.py::test_upload_into_a_full_database_answers_storage_full_and_the_relay_serves_on].
@@ -1709,29 +1763,33 @@ of Hello, the first frame of every connection.
 
 ### 14.2 The end-to-end protocol version
 
-The end-to-end protocol version is 1. It appears in one place on the wire, inside the
-payload: the `version` field of the peer envelope (section 19.2). It is also the first
-byte of the session associated data, which is not sent and which every message of a
-session authenticates (section 16.5)
+The end-to-end protocol version is 2, and a client of version 2 still reads version 1 on
+the sessions made before (section 41.10). The version appears in one place on the wire,
+inside the payload: the `version` field of the peer envelope (section 19.2). It is also
+the first byte of the session associated data, which is not sent and which every message
+of a session authenticates (section 16.5)
 [test: tests/client/test_session.py::test_two_clients_exchange_texts_in_both_directions]. The relay does not read it and
 has no rule about it (section 7.12).
 
 - In every version of the end-to-end protocol the payload is a `PeerMessage` whose field 1
   is `version`.
 - A client reads `version` before it applies any other rule to the envelope. A client that
-  reads a `version` other than 1, 0 included, decrypts nothing and changes nothing in its
-  store: it reports that the contact uses a version it does not implement and acks the
-  message (section 19.4)
+  reads a `version` it does not implement, 0 included, decrypts nothing and changes
+  nothing in its store: it reports that the contact uses a version it does not implement
+  and acks the message (section 19.4). A client of version 2 implements 1 and 2
   [test: tests/client/test_session.py::test_other_version_is_acked_and_changes_nothing].
 - A change that a client of version 1 would refuse or misread is a new version: another
   layout of the header, of the associated data or of the padding, another cipher or key
-  derivation. A new member of the `Content` oneof is not: a client of version 1 reports
-  such a message as UNKNOWN_CONTENT (section 19.5). `attachment` of part 3, `profile`
+  derivation. Version 2 is such a change: the key derivation of section 41.4. A new
+  member of the `Content` oneof is not: a client of version 1 reports such a message as
+  UNKNOWN_CONTENT (section 19.5). `attachment` of part 3, `profile`
   of part 4 and `edit`, `deletion`, `receipt` and `timer` of part 5 are of this kind.
   Neither is a new field of `Content` beside the oneof, which a client of version 1
   ignores: `quote` and `expires_after` of part 5 (section 39.9).
-- A bundle has no version field. The keys and signatures of a bundle are those of version
-  1; a version that adds a key adds a field and a signed string for it.
+- A bundle has no version field. A version that adds a key adds a field and a signed
+  string for it: version 2 added `pq_prekey` and the string of section 4.5. A relay of
+  version 1 of the relay protocol ignores the new fields (section 7.3), so the relay
+  protocol version stays 1 (section 41.10).
 
 ### 14.3 The label in the signed strings
 
@@ -1767,6 +1825,9 @@ and the fifth `vectors/profile.json` of part 4, whose operations section 37 name
 The sixth is `vectors/content.json` of part 5, whose operations section 40 names
 [test: tests/crypto/test_content_vectors.py::test_positive_vectors_replay_byte_for_byte]
 [test: tests/crypto/test_content_vectors.py::test_negative_vectors_raise_their_named_error].
+The seventh is `vectors/pqxdh.json` of part 6, whose operations section 43 names
+[test: tests/crypto/test_pqxdh_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_pqxdh_vectors.py::test_negative_vectors_raise_their_named_error].
 
 ### 15.2 The schema of a vector file
 
@@ -1977,6 +2038,10 @@ other value is a hex string.
 ## 16. Key agreement
 
 ### 16.1 What it is
+
+This section is the key agreement of end-to-end version 1. A client of version 2 makes
+every new session by section 41, which builds on this one, and keeps the sessions that
+this section made before (section 41.10).
 
 Two identities agree on a secret with X3DH Revision 1 and two deviations from it:
 signatures are Ed25519 instead of XEdDSA, and an identity has an X25519 identity key of its
@@ -2679,6 +2744,8 @@ message InitialHeader {
   bytes ephemeral_key = 3;
   uint32 signed_prekey_id = 4;
   optional uint32 one_time_prekey_id = 5;
+  bytes kem_ciphertext = 6;
+  uint32 pq_prekey_id = 7;
 }
 
 // The plaintext of a message before padding.
@@ -2755,6 +2822,10 @@ every message counts from 1 without a gap and every tag is one byte. In addition
   two fields of `UploadBundle`.
 - `one_time_prekey_id` is the one field of this protocol with the proto3 label
   `optional`: 0 is a valid prekey id, so the field needs a presence of its own.
+  `pq_prekey_id` needs none: an initial header of version 2 always carries it, and one of
+  version 1 never reads it.
+- `kem_ciphertext` and `pq_prekey_id` are read in an envelope of version 2 only
+  (section 41.6); in one of version 1 they are ignored.
 - `Content` is a oneof with seven members: `text`, `attachment` of part 3 (section 32),
   `profile` of part 4 (section 35), and `edit`, `deletion`, `receipt` and `timer` of
   part 5 (section 38). A kind of message that is added later is a new member of the oneof
@@ -2768,7 +2839,7 @@ The relay parses none of this (section 7.12).
 
 | Field            | No. | Type          | Length or value                                                  |
 |------------------|-----|---------------|------------------------------------------------------------------|
-| `version`        | 1   | uint32        | 1, the end-to-end protocol version (section 14.2)                |
+| `version`        | 1   | uint32        | 1 or 2, the end-to-end version of the session (sections 14.2 and 41.10) |
 | `initial_header` | 2   | InitialHeader | Present while the session of the sender holds one (section 16.7) |
 | `header`         | 3   | bytes         | 40, the message header of section 17.5                           |
 | `ciphertext`     | 4   | bytes         | L + 28, the layout of section 18.3; L is a multiple of 256 and at least 256 |
@@ -2782,8 +2853,10 @@ The relay parses none of this (section 7.12).
 | `ephemeral_key`         | 3   | bytes           | 32                                                      |
 | `signed_prekey_id`      | 4   | uint32          | 0 to 2^32 - 1                                           |
 | `one_time_prekey_id`    | 5   | optional uint32 | Present or absent; 0 to 2^32 - 1 when present           |
+| `kem_ciphertext`        | 6   | bytes           | 1088 in an envelope of version 2 (section 41.6)         |
+| `pq_prekey_id`          | 7   | uint32          | 0 to 2^32 - 1, read in an envelope of version 2         |
 
-Section 16.7 gives the value of each field.
+Sections 16.7 and 41.6 give the value of each field.
 
 ### 19.4 Parsing and malformed envelopes
 
@@ -2794,14 +2867,17 @@ into a result, in this order
 [test: tests/client/test_envelope.py::test_field_that_breaks_its_length_is_bad_envelope]:
 
 1. A payload that does not parse as a `PeerMessage` gets the result BAD_ENVELOPE.
-2. `version` is read before any other rule is applied. When it is not 1, 0 included, the
-   result is UNSUPPORTED_VERSION, whatever the other fields hold.
-3. With `version` 1, the result is BAD_ENVELOPE when one of these holds:
+2. `version` is read before any other rule is applied. When it is neither 1 nor 2, 0
+   included, the result is UNSUPPORTED_VERSION, whatever the other fields hold.
+3. With `version` 1 or 2, the result is BAD_ENVELOPE when one of these holds:
    - `header` is not 40 bytes;
    - `ciphertext` is shorter than 284 bytes, or its length less 28 is not a multiple of
      256;
    - `initial_header` is present and its `identity_dh_key` is not 32 bytes, its
-     `identity_dh_signature` is not 64 bytes or its `ephemeral_key` is not 32 bytes.
+     `identity_dh_signature` is not 64 bytes or its `ephemeral_key` is not 32 bytes;
+   - `version` is 2, `initial_header` is present and its `kem_ciphertext` is not 1088
+     bytes
+     [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
 
 A field that the schema of the client does not have is ignored. As in section 7.3, a
 payload that parses is not valid by that alone, and nothing depends on how the peer
@@ -2812,7 +2888,7 @@ A client that reads a `version` it does not implement decrypts nothing and chang
 nothing: it reports that the contact uses a version of the end-to-end protocol that this
 client does not implement, and acks the message (section 20.2). The `version` field is
 not authenticated at this point; the first byte of the session associated data binds
-every message that decrypts to version 1 (section 16.5).
+every message that decrypts to the version of its session (sections 16.5 and 41.10).
 
 ### 19.5 Content
 
@@ -2872,28 +2948,31 @@ of 256 bytes.
 
 ### 19.7 The largest text
 
-MAX_TEXT_BYTES is 65019: a text of more bytes in UTF-8 is not sent, and the client
+MAX_TEXT_BYTES is 63995: a text of more bytes in UTF-8 is not sent, and the client
 refuses it with the result TEXT_TOO_LONG. The client checks the length before any other
 step of L1 (section 20.2): a text that is refused fetches no bundle and starts no key
 agreement
 [test: tests/client/test_session.py::test_text_too_long_is_refused_before_any_bundle_or_key_agreement]
-[test: tests/client/test_envelope.py::test_largest_text_fills_254_blocks_and_one_byte_more_is_refused].
+[test: tests/client/test_envelope.py::test_largest_text_fills_250_blocks_and_one_byte_more_is_refused].
 
 The number follows from the payload limit of section 7.12, 65472 bytes, for the longest
 envelope:
 
 | Part                                                                       | Bytes  |
 |----------------------------------------------------------------------------|--------|
-| `Content`: tag 1, length 3, text 65019                                     | 65023  |
-| P: the `Content` and one byte `80`, 254 blocks of 256                      | 65024  |
-| `ciphertext`: P, nonce 12, tag 16                                          | 65052  |
-| `ciphertext` as a field: tag 1, length 3                                   | 65056  |
+| `Content`: tag 1, length 3, text 63995                                     | 63999  |
+| P: the `Content` and one byte `80`, 250 blocks of 256                      | 64000  |
+| `ciphertext`: P, nonce 12, tag 16                                          | 64028  |
+| `ciphertext` as a field: tag 1, length 3                                   | 64032  |
 | `header` as a field: tag 1, length 1, 40                                   | 42     |
-| `version` as a field: tag 1, value 1                                       | 2      |
-| `initial_header` as a field: tag 1, length 2, and at most 146 (keys 34 and 34, signature 66, two ids of at most 6 each) | 149 |
-| The payload                                                                | 65249  |
+| `version` as a field: tag 1, value 1 or 2                                  | 2      |
+| `initial_header` as a field: tag 1, length 2, and at most 1243 (keys 34 and 34, signature 66, two prekey ids of at most 6 each, `kem_ciphertext` 1091, `pq_prekey_id` at most 6) | 1246 |
+| The payload                                                                | 65322  |
 
-One more block of 256 bytes makes 65505 and does not fit. The limit is one number for
+One more block of 256 bytes makes 65578 and does not fit. The limit of version 1 was
+65019, four blocks more, sized to the initial header of section 16.7. The limit is the
+sender's: a client of version 2 reads the longer texts that a client of version 1
+sends. The limit is one number for
 every message, with or without an initial header, so that a text that was accepted for
 sending fits whatever the state of the session. A text with a quote or a timer of part 5
 is bound by the length of its whole `Content`, MAX_CONTENT_BYTES (section 38.4). A receiver applies no limit of its own to
@@ -2951,7 +3030,7 @@ that state. The client does what the table says
 | Event                                                                                              | N        | C0                                             | C1                                             |
 |----------------------------------------------------------------------------------------------------|----------|------------------------------------------------|------------------------------------------------|
 | I1. The pair of its `sender` and `message_id` is a seen id                                         | STRANGER | DUPLICATE                                      | DUPLICATE                                      |
-| I2. Its payload is no envelope of version 1 (section 19.4)                                         | STRANGER | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      |
+| I2. Its payload is no envelope of version 1 or 2 (section 19.4)                                       | STRANGER | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      | FAIL: UNSUPPORTED_VERSION or BAD_ENVELOPE      |
 | I3. It carries an initial header that fails step 1 or 2 of section 16.8                            | STRANGER | FAIL: BAD_INITIAL_HEADER or IDENTITY_KEY_MISMATCH | FAIL: BAD_INITIAL_HEADER or IDENTITY_KEY_MISMATCH |
 | I4. It carries an initial header with a record whose session is in the list, and that session decrypts it | STRANGER | none                                    | ACCEPT                                         |
 | I5. It carries an initial header with a record whose session is in the list, and that session does not decrypt it | STRANGER | none                            | FAIL: DECRYPT_FAILED                           |
@@ -2979,6 +3058,13 @@ How the conditions are decided
   takes the message.
 - At this level every result of a decryption that is no plaintext counts as
   DECRYPT_FAILED, whatever the ratchet returned for a single session.
+- I4, I5, I9 and I10: a session decrypts only a message whose envelope carries the
+  version of the session; one of another version counts as one that does not decrypt
+  (section 41.10)
+  [test: tests/client/test_pqxdh_sessions.py::test_x3dh_session_made_before_keeps_working_in_both_directions].
+- I7 and I8: for an envelope of version 2 the steps are those of section 41.7. For one of
+  version 1 they do not run: the result is X3DH_REFUSED (I8)
+  [test: tests/client/test_pqxdh_sessions.py::test_new_session_of_version_1_is_refused_and_changes_nothing].
 
 ### 20.3 The actions
 
@@ -2990,7 +3076,7 @@ How the conditions are decided
 | ACCEPT     | Removes the padding and reads the `Content` (sections 19.5 and 19.6). It shows the text                                 | In one transaction (section 22.2): the new state of the session that decrypted, which moves to the head of the list and drops its initial header; the seen id; the text | Yes, after the commit |
 | ACCEPT-NEW | As ACCEPT, for the session that step 8 of section 16.8 made                                                            | As ACCEPT, and in the same transaction what step 9 of section 16.8 lists. The new session enters the list at its head; a fourth session is deleted | Yes, after the commit |
 | SEND       | Encrypts the text on the sending session (section 17.6), with the initial header while the session holds one, and sends the Send | In one transaction (section 22.2), before the Send leaves: the new state of the session, the outbox row and the text | No Deliver to ack     |
-| START      | Sends a FetchBundle for the contact and runs section 16.6 with the Bundle. A failure is reported with its result: NOT_FOUND, BAD_BUNDLE, IDENTITY_KEY_MISMATCH or ZERO_DH | On success, in one transaction, the new session at the head of the list and, when the contact had none, the pin (section 16.6, step 8); a fourth session is deleted. On failure nothing: no session and no pin | No Deliver to ack     |
+| START      | Sends a FetchBundle for the contact and runs section 41.5 with the Bundle. A failure is reported with its result: NOT_FOUND, BAD_BUNDLE, IDENTITY_KEY_MISMATCH, PQ_PREKEY_MISSING or ZERO_DH | On success, in one transaction, the new session at the head of the list and, when the contact had none, the pin (section 16.6, step 8); a fourth session is deleted. On failure nothing: no session and no pin | No Deliver to ack     |
 | REFUSE     | Does nothing and reports NOT_A_CONTACT. A client sends to a contact only                                               | Nothing                                                                | No Deliver to ack     |
 | GAP        | Tells the user how many messages of the contact are missing: the number of skipped keys that were removed without use  | Nothing more                                                           | No Deliver to ack     |
 
@@ -3154,7 +3240,8 @@ client does this, in this order
    SIGNED_PREKEY_ROTATION_SECONDS, 604800 seconds or 7 days, ago or longer, it makes a
    new one: a key pair from 32 random bytes, the next id, and a signature over the
    string of section 4.4. It saves the key, with the time of the clock, before it
-   uploads it.
+   uploads it. With it, in the same transaction, it makes its last-resort post-quantum
+   prekey, and it also rotates when the newest signed prekey has none (section 42.2).
 3. Upload. When the relay has not confirmed the newest signed prekey with a
    BundleStored, the client sends an UploadBundle that carries it (section 21.4)
    [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
@@ -3201,6 +3288,8 @@ The grace period
 - The relay sends no notice when the number falls (section 9.4). A client MAY refill
   during a connection as well, from the last count the relay reported less the number
   of initial messages it accepted since then that named a one-time prekey.
+- The one-time post-quantum prekeys follow the same rules with their own constants
+  (section 42.2).
 - The private key of a one-time prekey is deleted when the initial message that names
   it is accepted (section 16.8, step 9), and not when a message that names it fails
   [test: tests/client/test_session.py::test_stored_responder_session_holds_neither_the_secret_nor_the_signed_prekey]
@@ -3216,8 +3305,8 @@ The grace period
 ### 21.4 The upload
 
 - An UploadBundle carries the X25519 identity key with its signature, the newest signed
-  prekey with its id and its signature, and the new one-time prekeys, if any
-  (section 7.8).
+  prekey with its id and its signature, its last-resort post-quantum prekey, and the new
+  one-time prekeys of both kinds, if any (sections 7.8 and 42.2).
 - After a LoggedIn a client sends at most one UploadBundle for the steps of sections
   21.2 and 21.3, before any Send of that login (section 23.3) [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox]. A
   rotation or a refill during the connection (sections 21.2 and 21.3) is a further
@@ -3251,8 +3340,9 @@ A client keeps, for one identity
 [test: tests/client/test_client_store.py::test_store_holds_what_section_22_1_lists]:
 
 - the seed of the identity and the private key of its X25519 identity key;
-- the private keys of its signed prekeys and of its one-time prekeys with their ids, the
-  two counters of section 21.1 and the times that section 21.2 needs
+- the private keys of its signed prekeys, of its one-time prekeys and of its
+  post-quantum prekeys with their ids, the counters of sections 21.1 and 42.2 and the
+  times that section 21.2 needs
   [test: tests/client/test_lifecycle.py::test_rotation_follows_the_age_of_the_newest_signed_prekey]
   [test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart];
 - its contacts with their pinned X25519 identity keys;
@@ -3421,17 +3511,20 @@ This is the wait of the action Back off of section 11.1 [test: tests/client/test
 | SKIPPED_KEYS_CAP               | 2000    | keys     | The most skipped keys one session stores (section 17.8)                    |
 | SKIPPED_KEY_STEPS              | 5       | steps    | The DH ratchet steps after which the skipped keys of a chain are purged (section 17.8) |
 | PADDING_BLOCK                  | 256     | bytes    | The block to which a plaintext is padded (section 19.6)                    |
-| MAX_TEXT_BYTES                 | 65019   | bytes    | The longest text a client sends, in UTF-8 (section 19.7)                   |
+| MAX_TEXT_BYTES                 | 63995   | bytes    | The longest text a client sends, in UTF-8 (section 19.7)                   |
 | MAX_SESSIONS                   | 3       | sessions | The most sessions a client keeps for one contact (section 20.1)            |
 | SEEN_ID_SECONDS                | 3196800 | seconds  | The time a seen id is kept, 37 days (section 20.4)                         |
 | SIGNED_PREKEY_ROTATION_SECONDS | 604800  | seconds  | The age at which a signed prekey is replaced, 7 days (section 21.2)        |
 | SIGNED_PREKEY_GRACE_SECONDS    | 3196800 | seconds  | The time a replaced signed prekey keeps its private key, 37 days (section 21.2) |
 | ONE_TIME_PREKEY_REFILL_BELOW   | 50      | keys     | The count below which a client uploads one-time prekeys (section 21.3)     |
 | ONE_TIME_PREKEY_HELD_MAX       | 1000    | keys     | The most one-time prekey private keys a client holds (section 21.3)        |
+| PQ_ONE_TIME_PREKEY_REFILL_BELOW | 20     | keys     | The count below which a client uploads one-time post-quantum prekeys (section 42.2) |
+| PQ_ONE_TIME_PREKEY_HELD_MAX    | 400     | keys     | The most one-time post-quantum prekey private keys a client holds (section 42.2) |
 | RETRY_MAX_SECONDS              | 60      | seconds  | The cap of w in the two schedules (sections 23.4 and 23.5)                 |
 
 - MAX_SKIP, SKIPPED_KEYS_CAP, SKIPPED_KEY_STEPS, PADDING_BLOCK and MAX_TEXT_BYTES are
-  constants of end-to-end protocol version 1. Two clients that differ in one of them
+  constants of the end-to-end protocol; MAX_TEXT_BYTES is that of version 2
+  (section 19.7). Two clients that differ in one of them
   disagree on which messages decrypt or fit. The vectors and the tests of the ratchet
   hold the first three
   [test: tests/crypto/test_ratchet.py::test_constants_are_those_of_section_24_1]
@@ -3440,7 +3533,7 @@ This is the wait of the action Back off of section 11.1 [test: tests/client/test
   two, because the padded plaintext is an input of a ratchet vector: the tests of the
   session hold the padding and the largest text
   [test: tests/client/test_envelope.py::test_padding_adds_the_mark_and_zero_bytes_up_to_the_next_block]
-  [test: tests/client/test_envelope.py::test_largest_text_fills_254_blocks_and_one_byte_more_is_refused]
+  [test: tests/client/test_envelope.py::test_largest_text_fills_250_blocks_and_one_byte_more_is_refused]
   [test: tests/client/test_session.py::test_largest_text_fits_a_payload_with_an_initial_header].
 - The other values are the defaults of a client. SEEN_ID_SECONDS and
   SIGNED_PREKEY_GRACE_SECONDS are built on the default of MESSAGE_TTL_SECONDS
@@ -3463,7 +3556,7 @@ their results have names, which a negative test vector states as its `error`
 | TOO_MANY_SKIPPED        | Section 17.7             | The header asks for more than MAX_SKIP skipped keys in one chain                 |
 | CHAIN_EXHAUSTED         | Sections 17.6 and 17.9   | The message number 2^32 - 1: a sending chain at its end, or a header that names it |
 | NO_SENDING_CHAIN        | Section 17.6             | An encryption on a state without a sending chain: a responder before its first decryption |
-| UNSUPPORTED_VERSION     | Section 19.4             | The `version` of an envelope is not 1                                            |
+| UNSUPPORTED_VERSION     | Section 19.4             | The `version` of an envelope is neither 1 nor 2                                  |
 | BAD_ENVELOPE            | Section 19.4             | The payload is not a `PeerMessage`, or a field breaks its length                 |
 | BAD_PADDING             | Section 19.6             | A plaintext that decrypted has no padding                                        |
 | BAD_CONTENT             | Section 19.5             | A plaintext that decrypted does not parse as a `Content`                         |
@@ -3473,6 +3566,9 @@ their results have names, which a negative test vector states as its `error`
 | DUPLICATE               | Section 20.3             | The pair of sender and message id of a Deliver is a seen id                      |
 | REPLAYED_INITIAL        | Section 20.3             | An initial message matches a record whose session is gone                        |
 | NO_SESSION              | Section 20.3             | A message without an initial header came from a contact without a session        |
+| PQ_PREKEY_MISSING       | Section 5.4, check 5     | A Bundle carries no post-quantum prekey                                          |
+| UNKNOWN_PQ_PREKEY       | Section 41.7             | The client holds no post-quantum prekey private key with the id of the initial header |
+| X3DH_REFUSED            | Section 41.10            | An initial message of version 1 matches no record: a new session of version 1    |
 
 IDENTITY_KEY_MISMATCH is the name of section 11.4 with the same meaning: another X25519
 identity key than the pinned one, in a bundle there and in an initial header here.
@@ -3520,6 +3616,9 @@ A vector of the ratchet is one step of a scripted conversation and records
 The conversation covers messages in order and out of order, lost messages, several DH
 ratchet steps and the negative cases of section 17.7.
 
+A vector of the key agreement of version 2 records the same and what the KEM adds: the
+post-quantum prekey with its signed string, the encapsulation and SS (section 43).
+
 Appendix A writes out one such run in full, in hex.
 
 ## 25. Deviations and what is missing
@@ -3552,7 +3651,7 @@ as the initial ciphertext.
 
 | Double Ratchet, Revision 4                                               | This protocol                                                              | Reason                                                                     |
 |--------------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------------------------|
-| Double Ratchet sections 4, 5 and 6: header encryption, the Sparse Post-Quantum Ratchet and the Triple Ratchet | Double Ratchet sections 2 and 3 only | Each is a second protocol. The header is readable for the relay, and there is no post-quantum protection (section 25.4) |
+| Double Ratchet sections 4, 5 and 6: header encryption, the Sparse Post-Quantum Ratchet and the Triple Ratchet | Double Ratchet sections 2 and 3 only | Each is a second protocol. The header is readable for the relay, and the ratchet has no post-quantum step (section 25.4) |
 | ENCRYPT is recommended as SIV or as CBC with HMAC (Double Ratchet section 7.2) | ChaCha20-Poly1305 with a random nonce that is sent, which Double Ratchet section 3.1 permits | CryptoKit has no SIV mode, and both libraries have this AEAD. The random nonce is the hedge against a key used twice |
 | DH: "no need to check for invalid public keys" (Double Ratchet section 7.2) | An all-zero output fails the decryption (section 16.3)                  | The Python library raises on it and CryptoKit does not: one rule for both  |
 | The associated data is the AD of the key agreement and the header        | The session associated data, the message id and the header (section 18.2)  | The message id is the key by which copies are dropped, so it has to be authentic |
@@ -3563,7 +3662,7 @@ as the initial ciphertext.
 | MKSKIPPED "raises an exception if too many elements are stored"; deletion after an interval is advised (Double Ratchet sections 3.2 and 8.4) | A cap of 2000 that removes the oldest key, and a purge after 5 DH ratchet steps (section 17.8) | A session that only failed at the cap could stay stuck. Deletion follows events, not a timer (Double Ratchet section 8.7) |
 | The state has no counter of DH ratchet steps                             | DHSTEPS (section 17.2)                                                     | The purge needs it                                                         |
 | The size of the counters is left open                                    | u32; a chain ends at 2^32 - 2 (section 17.9)                               | A width has to be written down                                             |
-| Double Ratchet section 7.1 joins the ratchet to PQXDH                    | To the key agreement of section 16, in the same way: SK, the associated data, the signed prekey as the first ratchet key | Section 25.4                                                   |
+| Double Ratchet section 7.1 joins the ratchet to PQXDH                    | To the key agreement of section 41, and of section 16 for the sessions made before, in the same way: SK, the associated data, the signed prekey as the first ratchet key | Section 25.4 |
 
 Kept as written: the state variables and the initialisation of Double Ratchet sections
 3.2 and 3.3; KDF_RK and KDF_CK as Double Ratchet section 7.2 recommends them; the order
@@ -3582,19 +3681,20 @@ receipts, and no expiry of a session by time.
 
 ### 25.4 What Signal runs and this protocol lacks
 
-The two specifications that this protocol follows are not what the Signal applications
-run.
-
-- Signal's key agreement is PQXDH: it adds a post-quantum key encapsulation to the
-  Diffie-Hellman values. This protocol has X3DH Revision 1.
+- Signal's key agreement is PQXDH, and so is that of every new session here (part 6,
+  with the deviations of section 41.11). The sessions made before by X3DH Revision 1
+  stay as they were.
 - Signal's ratchet is the Triple Ratchet: the Double Ratchet together with the Sparse
   Post-Quantum Ratchet, sections 5 and 6 of Revision 4. This protocol has the Double
   Ratchet alone.
 
-This protocol has no post-quantum protection of any kind. Whoever records its traffic
-and later has a quantum computer that breaks X25519 can open what was recorded; the
-healing of the Double Ratchet does not help against that (Double Ratchet, section 8.11).
-Nothing is reserved for a post-quantum step but the two version numbers.
+The post-quantum protection is therefore that of the key agreement: SK of a session of
+version 2 stays secret against whoever records the traffic and later breaks X25519, and
+every key of the ratchet descends from SK. The ratchet adds none: after a compromise of
+the state of a session, its healing rests on X25519 alone, so an attacker with a quantum
+computer who once holds a root key follows every later DH ratchet step (Double Ratchet,
+section 8.11; threat model, "Post-quantum protection"). The sessions of version 1 have no
+post-quantum protection of any kind.
 
 ### 25.5 Deniability
 
@@ -3644,8 +3744,9 @@ environment, or has no user before a later stage of the project.
 - Expiry of identities.
 - Proof of work.
 - Hiding the sender from the relay, and encryption of the message header.
-- Post-quantum key agreement and a post-quantum ratchet (section 25.4). Nothing is
-  reserved for them beyond the two version numbers.
+- A post-quantum ratchet (section 25.4), post-quantum signatures and with them any
+  protection against an active attacker with a quantum computer (PQXDH section 4.8).
+  Nothing is reserved for them beyond the version numbers.
 - Verification of keys by a safety number.
 - Several devices per identity, groups and calls.
 - Any claim of deniability (section 25.5).
@@ -3685,8 +3786,10 @@ environment, or has no user before a later stage of the project.
   https://signal.org/docs/specifications/doubleratchet/
 - M. Marlinspike, T. Perrin, "The Sesame Algorithm: Session Management for Asynchronous
   Message Encryption", Revision 2, https://signal.org/docs/specifications/sesame/
-- E. Kret, R. Schmidt, "The PQXDH Key Agreement Protocol", Revision 3,
-  https://signal.org/docs/specifications/pqxdh/
+- E. Kret, R. Schmidt, "The PQXDH Key Agreement Protocol", Revision 3, 2023-05-24, last
+  updated 2024-01-23, https://signal.org/docs/specifications/pqxdh/
+- NIST FIPS 203, "Module-Lattice-Based Key-Encapsulation Mechanism Standard", August
+  2024, https://doi.org/10.6028/NIST.FIPS.203
 - IANA, WebSocket Close Code Number Registry,
   https://www.iana.org/assignments/websocket/websocket.xhtml
 - C2SP, "age", the age-encryption.org/v1 file format, section "Payload",
@@ -4292,7 +4395,7 @@ the name, the size of the image, the thumbnail or the caption to the file:
 ### 32.3 Lengths
 
 The longest attachment within the limits of section 32.1 makes a `Content` of 20965
-bytes [test: tests/client/test_envelope.py::test_longest_attachment_is_the_content_of_section_32_3_and_decodes], far below the 65023 bytes of the longest text (section 19.7). It so fits a message
+bytes [test: tests/client/test_envelope.py::test_longest_attachment_is_the_content_of_section_32_3_and_decodes], far below the 63999 bytes of the longest text (section 19.7). It so fits a message
 whatever the state of the session.
 
 | Part                                                          | Bytes |
@@ -4614,7 +4717,7 @@ as everywhere in this protocol (section 19.4)
 
 The longest profile within the limits of section 35.2 makes a `Content` of 16753 bytes
 [test: tests/client/test_envelope.py::test_longest_profile_is_the_content_of_section_35_4_and_decodes],
-below the 65023 bytes of the longest text (section 19.7), so it fits a message whatever
+below the 63999 bytes of the longest text (section 19.7), so it fits a message whatever
 the state of the session.
 
 | Part                                                              | Bytes |
@@ -4903,7 +5006,7 @@ nothing. A field that the client does not know is ignored, as everywhere in this
 
 ### 38.4 Lengths
 
-MAX_CONTENT_BYTES is 65023, the `Content` of the longest text of section 19.7, which fits
+MAX_CONTENT_BYTES is 63999, the `Content` of the longest text of section 19.7, which fits
 a message whatever the state of the session. For a text alone the limit MAX_TEXT_BYTES of
 section 19.7 is the same rule. A reply, a text with a timer and an edit are bound by the
 length of their whole `Content`
@@ -4912,12 +5015,12 @@ length of their whole `Content`
 | Part                                                                             | Bytes |
 |----------------------------------------------------------------------------------|-------|
 | An edit: `message_id`, tag 1, length 1, 16                                       | 18    |
-| The `text` of the longest edit: tag 1, length 3, 64997                           | 65001 |
-| The `Content`: tag 1, length 3 and the `Edit`                                    | 65023 |
+| The `text` of the longest edit: tag 1, length 3, 63973                           | 63977 |
+| The `Content`: tag 1, length 3 and the `Edit`                                    | 63999 |
 | A reply: the longest `quote`, tag 1, length 2; `message_id` 18, `own` 2, `text` tag 1, length 2, 256 | 282 |
 | `expires_after` of MAX_TIMER_SECONDS: tag 1, value 4                             | 5     |
-| The `text` of the longest reply with both: tag 1, length 3, 64732                | 64736 |
-| The `Content` of that reply                                                      | 65023 |
+| The `text` of the longest reply with both: tag 1, length 3, 63708                | 63712 |
+| The `Content` of that reply                                                      | 63999 |
 
 A receipt of MAX_RECEIPT_IDS ids makes a `Content` of 18006 bytes, a deletion one of 20.
 
@@ -5153,7 +5256,7 @@ receipt and cannot be edited
 
 | Name              | Value   | Unit    | Meaning                                                   |
 |-------------------|---------|---------|-----------------------------------------------------------|
-| MAX_CONTENT_BYTES | 65023   | bytes   | The longest `Content` a client sends (section 38.4)      |
+| MAX_CONTENT_BYTES | 63999   | bytes   | The longest `Content` a client sends (section 38.4)      |
 | MAX_QUOTE_BYTES   | 256     | bytes   | The longest `text` of a quote a client sends              |
 | MAX_RECEIPT_IDS   | 1000    | ids     | The most ids of one receipt a client sends                |
 | MAX_TIMER_SECONDS | 2419200 | seconds | The longest timer, four weeks                             |
@@ -5214,10 +5317,409 @@ booleans, a text a JSON string, and every other value a hex string.
   do, so the bytes of `content` and `plaintext` are exact.
 - A negative vector records no intermediate.
 
+## 41. Post-quantum key agreement
+
+### 41.1 What it is
+
+Part 6 specifies the key agreement of end-to-end protocol version 2: PQXDH, Revision 3
+(E. Kret, R. Schmidt, 2023-05-24, last updated 2024-01-23), with ML-KEM-768 of FIPS 203
+as its KEM. It is the key agreement of section 16 with one more input: a shared secret
+that the initiator encapsulates to a post-quantum prekey of the responder, so that SK
+stays secret against whoever records the traffic and later breaks X25519 (PQXDH
+section 4.7). Every new session of a client of version 2 is made by this section, as
+initiator and as responder; section 16 stays the key agreement of the sessions made
+before (section 41.10)
+[test: tests/client/test_pqxdh_sessions.py::test_new_session_is_pqxdh_of_version_2_and_texts_go_both_ways].
+
+Everything of section 16 holds unless this part says otherwise: the keys of 16.2, the
+function DH of 16.3 with its refusal of an all-zero output, the four Diffie-Hellman
+values and their order, the session associated data of 16.5 with its version byte, the
+checks of 5.4, the records of 20.4. The ratchet of section 17 takes SK and the session
+associated data as it takes those of section 16. Section 41.11 lists the deviations from
+the text of PQXDH with their reasons.
+
+### 41.2 The keys
+
+The keys of section 16.2, and two more of the responder:
+
+| Key     | Kind                                            | Made                                   | Role |
+|---------|-------------------------------------------------|----------------------------------------|------|
+| PQSPK_B | Last-resort post-quantum prekey, ML-KEM-768, with a u32 id, signed (section 4.5) | By B, one with every signed prekey (section 42.2) | Takes the encapsulation when the relay holds no one-time post-quantum prekey of B |
+| PQOPK_B | One-time post-quantum prekey, ML-KEM-768, with a u32 id, signed (section 4.5) | By B, in batches (section 42.2) | Takes the encapsulation of one key agreement |
+
+PQPK_B is the one of the two that a Bundle carries in `pq_prekey`: a one-time one when
+the relay handed one out, else the last-resort one (section 42.1). The initiator cannot
+tell them apart and treats both alike; the responder tells them apart by the id
+(section 42.2).
+
+### 41.3 The KEM
+
+The KEM is ML-KEM-768 of FIPS 203, from the vetted library of each platform:
+`cryptography.hazmat.primitives.asymmetric.mlkem.MLKEM768PrivateKey` and
+`MLKEM768PublicKey` in the Python package cryptography, `MLKEM768.PrivateKey` and
+`MLKEM768.PublicKey` of CryptoKit (macOS 26).
+
+| Value                | Length | Form                                                                      |
+|----------------------|--------|---------------------------------------------------------------------------|
+| Private key          | 64     | The seed d \|\| z of ML-KEM.KeyGen_internal (FIPS 203, section 6.1): `from_seed_bytes` and `private_bytes_raw`; `init(seedRepresentation:publicKey:)` and `seedRepresentation` |
+| Public key, PQPK     | 1184   | The encapsulation key ek: `public_bytes_raw` and `from_public_bytes`; `rawRepresentation` and `init(rawRepresentation:)` |
+| Ciphertext, CT       | 1088   | `encapsulate()` returns (SS, CT) in Python and `encapsulated` in CryptoKit |
+| Shared secret, SS    | 32     | `decapsulate(CT)`; in CryptoKit the bytes of the returned `SymmetricKey`  |
+
+- A private key is the 64 random bytes of its seed. A client stores the seed and nothing
+  else of the key; both libraries load it.
+- PQKEM-ENC(PQPK) is ML-KEM.Encaps of FIPS 203, with random bytes that the library draws
+  itself: neither library takes them as an argument. PQKEM-DEC is ML-KEM.Decaps.
+- A public key is loaded with the input check of FIPS 203, section 7.2: its length and
+  the modulus check of its coefficients. Both libraries run the check when they load a
+  key and refuse one that fails it; this protocol treats a refusal as BAD_BUNDLE
+  (section 5.4, check 7)
+  [test: tests/crypto/test_pqxdh.py::test_bundle_that_fails_a_check_reaches_no_encapsulation]
+  [test: tests/crypto/test_pqxdh_vectors.py::test_negative_vectors_raise_their_named_error].
+- Decapsulation of a ciphertext of the right length never fails: ML-KEM rejects
+  implicitly, and another ciphertext gives another shared secret, so the key agreement
+  derives another SK and the message does not decrypt
+  [test: tests/crypto/test_pqxdh.py::test_another_ciphertext_gives_the_responder_another_secret].
+- ML-KEM puts a hash of the public key into its shared secret, so a ciphertext made for
+  one public key does not carry the same secret to another (PQXDH section 4.12). That is
+  why the session associated data does not carry PQPK.
+
+### 41.4 The key derivation and the session associated data
+
+SK is one call of HKDF (RFC 5869), as PQXDH section 2.2 defines KDF
+[test: tests/crypto/test_pqxdh_vectors.py::test_every_recorded_value_recomputes_without_the_core]:
+
+| Parameter          | Value                                                                    |
+|--------------------|--------------------------------------------------------------------------|
+| Hash               | SHA-256                                                                  |
+| Salt               | 32 bytes `00`                                                            |
+| Input key material | With a one-time prekey: F \|\| DH1 \|\| DH2 \|\| DH3 \|\| DH4 \|\| SS, 192 bytes. Without: F \|\| DH1 \|\| DH2 \|\| DH3 \|\| SS, 160 bytes. F is 32 bytes `ff` |
+| Info               | ASCII `sotto/2 pqxdh_CURVE25519_SHA-256_ML-KEM-768`, 43 bytes: the four parameters info, curve, hash and pqkem of PQXDH joined by `_` |
+| Output length      | 32 bytes                                                                 |
+
+The session associated data is the 161 bytes of section 16.5 with the version byte `02`
+[test: tests/crypto/test_pqxdh.py::test_both_sides_derive_the_same_secret_and_associated_data_of_version_2].
+Neither the ciphertext nor PQPK is part of it (section 41.3).
+
+### 41.5 The initiator
+
+The initiator runs these steps in this order, for a contact and with a Bundle that it
+fetched for this key agreement
+[test: tests/crypto/test_pqxdh.py::test_both_sides_derive_the_same_secret_and_associated_data_of_version_2]
+[test: tests/crypto/test_pqxdh.py::test_bundle_that_fails_a_check_reaches_no_encapsulation].
+One Bundle starts at most one session.
+
+1. It runs the seven checks of section 5.4 on the Bundle and stops at the first that
+   fails. No later step runs for a bundle that failed a check.
+2. It makes EK_A, a new X25519 key pair from 32 random bytes.
+3. It computes DH1 to DH4 as step 3 of section 16.6 does, DH4 only with a one-time
+   prekey.
+4. When one of the outputs is 32 zero bytes, the key agreement ends with ZERO_DH.
+5. It computes (CT, SS) = PQKEM-ENC(PQPK_B), with PQPK_B the `pq_prekey.key` of the
+   Bundle (section 41.3).
+6. It derives SK (section 41.4) and builds the session associated data (section 41.4).
+7. It deletes the private key of EK_A, DH1 to DH4, SS and the input of the key
+   derivation: the key agreement of the core hands back SK, the session associated data,
+   CT and the id of PQPK_B, and nothing else
+   [test: tests/crypto/test_pqxdh.py::test_key_agreement_hands_back_the_secret_the_data_and_the_header_fields_only].
+8. Step 8 of section 16.6, with the initial header of section 41.6.
+
+A key agreement that ends in a failure stores nothing, a pin included
+[test: tests/client/test_pqxdh_sessions.py::test_bundle_without_a_pq_prekey_ends_start_with_pq_prekey_missing_and_stores_nothing].
+A bundle without a one-time prekey starts a session, as in section 16.6; a bundle without
+a post-quantum prekey starts none (check 5 of section 5.4, section 41.10).
+
+### 41.6 The initial header of version 2
+
+The `InitialHeader` of section 19.3 with the values of section 16.7 and two more
+[test: tests/client/test_pqxdh_sessions.py::test_new_session_is_pqxdh_of_version_2_and_texts_go_both_ways]:
+
+| Field            | Length | Value                                            |
+|------------------|--------|--------------------------------------------------|
+| `kem_ciphertext` | 1088   | CT of step 5 of section 41.5                     |
+| `pq_prekey_id`   | u32    | The `pq_prekey.id` of the Bundle                 |
+
+The rules of section 16.7 about when an initial header is sent and when it stops hold
+unchanged. The envelope of every message of the session carries `version` 2
+(section 41.10).
+
+### 41.7 The responder
+
+A client that received a Deliver from a contact with a payload of version 2 that carries
+an initial header runs the steps of section 16.8 with these changes
+[test: tests/client/test_pqxdh_sessions.py::test_one_time_pq_prekey_starts_one_session_and_is_deleted_only_when_accepted]
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]:
+
+1. Steps 1 and 2 of section 16.8 as written.
+2. Step 3 and step 4 of section 16.8 as written.
+3. A new step after step 4: among the post-quantum prekeys whose private key it holds,
+   the one-time ones and the last-resort ones of the signed prekeys that step 3 counts as
+   held, it finds the one whose id is `pq_prekey_id`. With none, the result is
+   UNKNOWN_PQ_PREKEY.
+4. Step 5 of section 16.8 as written, then SS = PQKEM-DEC(PQSK, `kem_ciphertext`) with
+   the private key of the previous step.
+5. Steps 6 and 7 of section 16.8 with the key derivation and the version byte of
+   section 41.4.
+6. Step 8 of section 16.8 as written. A message that does not decrypt changes nothing:
+   the post-quantum prekey keeps its private key.
+7. Step 9 of section 16.8, and in the same transaction the deletion of the private key of
+   the post-quantum prekey of step 3 when it is a one-time one. A last-resort one is
+   deleted with its signed prekey only (section 42.2).
+
+### 41.8 What is not authenticated
+
+Of the new fields, `pq_prekey.key` of a Bundle is covered by its signature (section 4.5);
+`pq_prekey.id` of a Bundle and both new fields of the initial header are covered by
+nothing. Each change ends in one of the three ways of section 16.9
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
+[test: tests/crypto/test_pqxdh_vectors.py::test_another_ciphertext_or_key_gives_another_secret_under_the_same_data]:
+
+| Change                                                                | What follows |
+|-----------------------------------------------------------------------|--------------|
+| The post-quantum prekey of a Bundle is taken out                      | START ends with PQ_PREKEY_MISSING and makes no session |
+| It is replaced by a key the relay made, under no valid signature      | BAD_BUNDLE |
+| The one-time post-quantum prekey is replaced by the last-resort one   | The session starts without the one-time post-quantum prekey; PQ secrecy then lasts as long as the last-resort key (threat model) |
+| One one-time post-quantum prekey is handed to two initiators          | The first initial message that B accepts starts its session and deletes the private key. The other: UNKNOWN_PQ_PREKEY, unless a classical one-time prekey of the same bundle fails first (UNKNOWN_ONE_TIME_PREKEY) |
+| `pq_prekey_id` of a Bundle or of an initial header is changed         | B holds no key with the id: UNKNOWN_PQ_PREKEY. Or another key: another SS, DECRYPT_FAILED |
+| `kem_ciphertext` of an initial header is changed                      | Another SS (section 41.3): DECRYPT_FAILED. A ciphertext of another length: BAD_ENVELOPE |
+| `version` of an envelope is changed                                   | Section 41.10: X3DH_REFUSED, DECRYPT_FAILED or UNSUPPORTED_VERSION |
+
+A message that matches a record (section 20.4) reads neither new field, as it reads
+neither prekey id.
+
+### 41.9 What each side deletes
+
+As section 16.10, and:
+
+| Value                         | Initiator                         | Responder |
+|-------------------------------|-----------------------------------|-----------|
+| SS and CT                     | SS in step 7 of section 41.5; CT is kept in the initial header until it stops (16.7) | SS after the key derivation; CT is not stored |
+| Private key of PQOPK_B        | Never holds it                    | In the transaction that accepts the initial message (section 41.7). Not deleted when a step fails |
+| Private key of PQSPK_B        | Never holds it                    | With its signed prekey, at the end of the grace period (section 42.2) |
+
+### 41.10 Versions and the transition
+
+A session carries the end-to-end version of the key agreement that made it: 1 for
+section 16, 2 for this section. It is the first byte of its session associated data
+(section 16.5).
+
+A client of version 2
+[test: tests/client/test_pqxdh_sessions.py::test_x3dh_session_made_before_keeps_working_in_both_directions]
+[test: tests/client/test_pqxdh_sessions.py::test_new_session_of_version_1_is_refused_and_changes_nothing]
+[test: tests/client/test_pqxdh_sessions.py::test_bundle_without_a_pq_prekey_ends_start_with_pq_prekey_missing_and_stores_nothing]
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]:
+
+- makes every new session by this section, as initiator and as responder;
+- puts the version of the sending session into the `version` of every envelope it
+  sends: a session made by section 16 before the client moved to version 2 goes on with
+  envelopes of version 1, in both directions, its initial header included;
+- reads envelopes of version 1 and 2 (section 19.4), and decrypts a message only on a
+  session of the version of its envelope;
+- refuses a new session of version 1: an initial message of version 1 that matches no
+  record (section 20.4) gets the result X3DH_REFUSED after steps 1 and 2 of
+  section 16.8, and changes nothing. One that matches a record belongs to a session made
+  before and is decrypted there;
+- refuses a bundle without a post-quantum prekey: START ends with PQ_PREKEY_MISSING.
+
+What a client and a relay of version 1 do with one of version 2, by the rules they
+already have:
+
+- A client of version 1 reads an envelope of version 2 as a version it does not
+  implement: UNSUPPORTED_VERSION, the message acked (section 19.4). Its bundles carry no
+  post-quantum prekey, so a client of version 2 starts no session with it, and its
+  initial messages of version 1 are refused. Two such clients keep the sessions they
+  made before and make no new one until the older client moves to version 2.
+- A relay of version 1 ignores the new fields of UploadBundle (section 7.3) and hands
+  out bundles without a post-quantum prekey: a client of version 2 behind it starts no
+  session. It reads `pq_one_time_prekey_count` of LoggedIn as 0 and uploads one-time
+  post-quantum prekeys after every login (section 42.2).
+
+The downgrade. A relay that strips the post-quantum prekey from bundles does not get a
+session without one: it gets a START that fails with a result the user sees. It cannot
+make a session of version 1 instead: a client of version 2 makes none, and the initial
+message of a session of version 1 is the work of a client that holds the X25519 private
+key of the sender, which the relay does not. A changed `version` gives DECRYPT_FAILED,
+because the version byte is part of the associated data of every message. What this does
+not protect against: a relay that refuses service, which it can always do, and an
+attacker with a quantum computer that forges the Ed25519 signatures of section 4.5
+(threat model, "Post-quantum protection").
+
+### 41.11 Deviations from PQXDH Revision 3
+
+| PQXDH Revision 3                                                         | This protocol                                                              | Reason |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------|--------|
+| The deviations of X3DH in section 25.1: XEdDSA, one identity key, Encode(PK), the AD | As section 25.1 says for X3DH                                   | The same reasons |
+| Sig(IK_B, EncodeKEM(PQPK)) with a byte for the KEM in front of the key   | Ed25519 over the string of section 4.5: a prefix that names ML-KEM-768, a zero byte, IKsig and the 1184 bytes of the key | The prefix does the job of the byte of EncodeKEM and keeps the string apart from the others of section 4 |
+| pqkem: an IND-CCA KEM, Kyber-1024 as the example                         | ML-KEM-768 of FIPS 203                                                     | The KEM that both libraries have; NIST category 3 |
+| The shared secret, the AD and the ratchet are left to the application    | AD is the 161 bytes of section 16.5 with the version byte 2; EncodeKEM(PQPK) is not appended | ML-KEM binds the public key into SS (PQXDH section 4.12) |
+| "Bob may keep the private key corresponding to the previous pair" for some time | The last-resort post-quantum prekey is made, replaced and deleted with its signed prekey (sections 21.2 and 42.2) | PQXDH replaces them as a pair; one lifetime keeps one rule for the records of section 20.4 |
+| The server provides a one-time post-quantum prekey if one exists         | The handout bucket of section 9.3 decides it with the classical one        | One bound on how fast the one-time keys of a target are taken |
+| No limit on the number of post-quantum prekeys                           | At most 40 one-time post-quantum prekeys stored per identity (section 12.1) | One UploadBundle carries them in one frame (section 42.2) |
+| An identifier for each key, IdKEM                                         | One id counter for both kinds of post-quantum prekey (section 42.2)        | The responder finds either kind by the id of the header |
+
+Kept as written: the KDF of PQXDH section 2.2 with F, a zero salt and the info string of
+the four parameters; the order DH1, DH2, DH3, DH4, SS; DH4 left out without a one-time
+prekey; the one-time post-quantum prekey preferred and the last-resort one in its place;
+the signatures over both kinds of post-quantum prekey; the deletion of SS by the
+initiator and of a one-time private key by the responder when its message is accepted.
+
+## 42. The post-quantum prekeys
+
+### 42.1 On the relay
+
+The relay stores the post-quantum prekeys as it stores the classical ones, and parses no
+key: it checks lengths and signatures only.
+
+- Upload (section 9.1). `pq_prekey` and every `pq_one_time_prekeys[]` of an
+  UploadBundle are optional as a whole; each one present has a key of 1184 bytes and a
+  signature of 64 bytes, else the frame is malformed (section 7.3)
+  [test: tests/test_pq_prekeys.py::test_malformed_pq_prekey_closes_with_1008_and_stores_nothing].
+  After the signature over the signed prekey (step 3 of section 9.1) the relay builds the
+  string of section 4.5 for each of them from the identity key of the connection and
+  verifies its signature; one that fails makes the answer BAD_BUNDLE and nothing of the
+  frame is stored
+  [test: tests/test_pq_prekeys.py::test_upload_with_a_pq_signature_that_fails_is_bad_bundle_and_stores_nothing].
+- In the transaction of step 4 of section 9.1: `pq_prekey`, when present, replaces the
+  stored last-resort key of the identity, and an upload without one keeps it; the
+  one-time ones are taken in the order of the frame, one whose id is stored is skipped,
+  and they are stored while the identity has fewer than PQ_ONE_TIME_PREKEY_CAP
+  [test: tests/test_pq_prekeys.py::test_later_last_resort_prekey_replaces_the_stored_one_and_an_upload_without_keeps_it]
+  [test: tests/test_pq_prekeys.py::test_one_time_pq_prekeys_are_stored_up_to_the_cap].
+- Fetch (section 9.3). In the transaction that hands out the classical one-time prekey,
+  the relay also takes the one-time post-quantum prekey that was stored first and deletes
+  it; the Bundle carries it in `pq_prekey`. Without one, or without a token of the
+  handout bucket, `pq_prekey` is the stored last-resort key; an identity without one gets
+  a Bundle without `pq_prekey`
+  [test: tests/test_pq_prekeys.py::test_one_time_pq_prekeys_go_out_once_in_their_order_then_the_last_resort_one]
+  [test: tests/test_pq_prekeys.py::test_bundle_of_an_identity_without_pq_prekeys_has_none].
+  A fetch takes one token of the handout bucket when either kind of one-time prekey went
+  out, and none otherwise
+  [test: tests/test_limits.py::test_one_handout_bucket_covers_both_kinds_of_one_time_prekey].
+- Counts (section 9.4). LoggedIn and BundleStored carry `pq_one_time_prekey_count`, the
+  number of one-time post-quantum prekeys stored for the identity
+  [test: tests/test_pq_prekeys.py::test_one_time_pq_prekeys_go_out_once_in_their_order_then_the_last_resort_one].
+- Storage. Two tables, one for the last-resort key of each identity and one for the
+  one-time keys, made when the database opens; a database of an earlier version opens and
+  gains them
+  [test: tests/test_storage.py::test_database_of_the_first_version_opens_and_gains_the_pq_prekey_tables].
+  Erasure is that of section 13 for the one-time prekeys.
+
+### 42.2 In the client
+
+- One counter of post-quantum prekey ids per identity, for both kinds, by the rules of
+  section 21.1. A responder tells the kinds apart by the id: a last-resort key belongs to
+  a signed prekey, a one-time key to none.
+- The last-resort key. Step 2 of section 21.2 makes it in the transaction that makes the
+  signed prekey: the two are one pair, uploaded together, replaced together and deleted
+  together at the end of the grace period of the signed prekey. Step 2 also rotates when
+  the newest signed prekey has no last-resort key, which is the case of a store of an
+  earlier version, while the counter can still give an id
+  [test: tests/client/test_pqxdh_sessions.py::test_store_of_the_first_version_opens_and_rotates_to_a_pq_prekey]
+  [test: tests/client/test_pqxdh_sessions.py::test_last_resort_pq_prekey_lives_and_dies_with_its_signed_prekey].
+  During the grace period the responder finds the last-resort key by its id
+  (section 41.7); after it the key counts as not held.
+- One-time keys mirror section 21.3: after every LoggedIn the client reads
+  `pq_one_time_prekey_count`, c; when c is less than PQ_ONE_TIME_PREKEY_REFILL_BELOW,
+  20, it makes PQ_ONE_TIME_PREKEY_CAP - c new ones, 40 - c with the default; it holds at
+  most PQ_ONE_TIME_PREKEY_HELD_MAX, 400, private keys of them and deletes the ones with
+  the lowest ids before a batch that would go over
+  [test: tests/client/test_pqxdh_sessions.py::test_pq_refill_tops_up_to_the_cap_below_the_threshold]
+  [test: tests/client/test_pqxdh_sessions.py::test_held_one_time_pq_prekeys_are_bounded_and_a_refused_upload_deletes_its_own].
+  Each key pair comes from a seed of 64 random bytes and is signed over the string of
+  section 4.5.
+- The upload (section 21.4) carries the last-resort key of the newest signed prekey and
+  the new one-time post-quantum prekeys in the one UploadBundle of the login. The rules
+  of section 21.4 about keys of an upload without an answer and of a refused upload hold
+  for them as for the classical one-time prekeys
+  [test: tests/client/test_pqxdh_sessions.py::test_held_one_time_pq_prekeys_are_bounded_and_a_refused_upload_deletes_its_own].
+  With the defaults, the largest UploadBundle, 100 classical and 40 post-quantum one-time
+  prekeys with the last-resort key, fits one frame
+  [test: tests/client/test_pqxdh_sessions.py::test_largest_upload_fits_one_frame].
+- Store. The client of this repository keeps the post-quantum prekeys in a table of its
+  own and their counter in another, made when the store opens: a store of an earlier
+  version opens and gains them
+  [test: tests/client/test_pqxdh_sessions.py::test_store_of_the_first_version_opens_and_rotates_to_a_pq_prekey].
+  The randomness of an encapsulation comes from the library, not from the one random
+  source of the client: neither library takes it as an argument.
+
+## 43. The test vectors of PQXDH
+
+### 43.1 The operations of `vectors/pqxdh.json`
+
+The file covers sections 4.5, 5.4 (checks 5 to 7), 41.3 to 41.7 and records what
+section 24.3 lists for a key agreement, with the values that the KEM adds
+[test: tests/crypto/test_pqxdh_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_pqxdh_vectors.py::test_positive_vectors_replay_byte_for_byte]
+[test: tests/crypto/test_pqxdh_vectors.py::test_negative_vectors_raise_their_named_error].
+It is written by `scripts/generate_vectors.py`. `contact_id` is text, the prekey ids are
+numbers, `initial_header` is an object, and every other value is a hex string.
+
+| Operation | Rule | `inputs` | `intermediates` | `outputs` | `error` |
+|-----------|------|----------|-----------------|-----------|---------|
+| `mlkem768-public-key` | 41.3 | `seed` | | `public_key` | |
+| `pqxdh-initiate` | 5.4, 41.5, steps 1 to 7 | `identity_key`, `identity_dh_private_key`, `ephemeral_private_key`, `contact_id`, `identity`, `identity_dh_key`, `identity_dh_signature`, `signed_prekey_id`, `signed_prekey_key`, `signed_prekey_signature`, `one_time_prekey_id`, `one_time_prekey_key`, `pq_prekey_id`, `pq_prekey_key`, `pq_prekey_signature`, `kem_randomness`, `kem_ciphertext`, `kem_shared_secret` | `identity_dh_string`, `signed_prekey_string`, `pq_prekey_string`, `dh1`, `dh2`, `dh3`, `dh4`, `kem_shared_secret`, `input_key_material` | `sk`, `session_associated_data`, `initial_header` | PQ_PREKEY_MISSING, BAD_BUNDLE, ZERO_DH |
+| `pqxdh-respond` | 41.7 | `identity_key`, `identity_dh_private_key`, `signed_prekey_private_key`, `one_time_prekey_private_key`, `pq_prekey_seed`, `sender`, `identity_dh_key`, `identity_dh_signature`, `ephemeral_key`, `kem_ciphertext`, `signed_prekey_id`, `one_time_prekey_id`, `pq_prekey_id` | `identity_dh_string`, `dh1`, `dh2`, `dh3`, `dh4`, `kem_shared_secret`, `input_key_material` | `sk`, `session_associated_data` | ZERO_DH |
+
+- `mlkem768-public-key`: the public key of a 64-byte seed by ML-KEM.KeyGen_internal.
+- `pqxdh-initiate` takes the Bundle of `check-bundle` (section 15.5) with the three
+  fields of `pq_prekey`, and the side that runs it as in `x3dh-initiate` (section 15.6).
+  `kem_ciphertext` and `kem_shared_secret` are the result of the encapsulation of step 5
+  of section 41.5 (section 43.2). `initial_header` holds `identity_dh_key`,
+  `ephemeral_key`, `signed_prekey_id`, `one_time_prekey_id` when present, `pq_prekey_id`
+  and `kem_ciphertext`: the fields of section 41.6 but the signature, which no vector
+  asks for (section 15.3).
+- `pqxdh-respond` is `x3dh-respond` (section 15.6) with `pq_prekey_seed`, the seed of the
+  post-quantum prekey that `pq_prekey_id` names, and `kem_ciphertext` of the header.
+- `kem_shared_secret` is SS, `input_key_material` the 160 or 192 bytes of section 41.4,
+  `pq_prekey_string` the 1242 bytes of section 4.5.
+- A vector with an `error` records the signed strings and no other intermediate, and a
+  negative `pqxdh-initiate` has no `kem_` inputs: it ends before the encapsulation.
+- The vectors of one name after the operation are the two sides of one key agreement
+  [test: tests/crypto/test_pqxdh_vectors.py::test_vectors_of_one_name_are_the_two_sides_of_one_key_agreement]:
+  `with-one-time-prekeys` uses a one-time prekey and a one-time post-quantum prekey,
+  `with-the-last-resort-pq-prekey` neither. `pqxdh-respond-replaced-kem-ciphertext`
+  receives the ciphertext of another encapsulation to the same key and
+  `pqxdh-respond-wrong-pq-prekey` decapsulates with another seed: both derive another SK
+  under the same session associated data
+  [test: tests/crypto/test_pqxdh_vectors.py::test_another_ciphertext_or_key_gives_another_secret_under_the_same_data].
+- The negative vectors: a Bundle without `pq_prekey` (PQ_PREKEY_MISSING), a post-quantum
+  prekey signed by another identity or with the lowest bit of byte 32 of its signature
+  changed, a validly signed key whose first coefficient is 4095, above q, which fails the
+  modulus check of FIPS 203 (BAD_BUNDLE), and the keys of small order of section 15.6
+  (ZERO_DH).
+
+### 43.2 Fixed randomness
+
+ML-KEM key generation and encapsulation are randomized, and a vector draws no random
+byte (section 15.2):
+
+- A key pair comes from a fixed 64-byte seed d || z through ML-KEM.KeyGen_internal of
+  FIPS 203, which both libraries accept (`from_seed_bytes`, `seedRepresentation`).
+- An encapsulation is ML-KEM.Encaps_internal(ek, m) of FIPS 203, section 6.2, with a
+  fixed 32-byte m, `kem_randomness`. FIPS 203 permits it for testing. Neither library
+  of section 41.3 takes m, so the generator runs it through the OpenSSL command line
+  (3.5 or later: `openssl pkeyutl -encap -pkeyopt hexikme:<m>`), and the vector records
+  m with what it gives, `kem_ciphertext` and `kem_shared_secret`.
+- An implementation whose library takes no m replays `pqxdh-initiate` with
+  `kem_ciphertext` and `kem_shared_secret` as the result of its encapsulation, and
+  checks them by the `pqxdh-respond` vector of the same name, whose decapsulation of
+  `kem_ciphertext` gives `kem_shared_secret`
+  [test: tests/crypto/test_pqxdh_vectors.py::test_every_recorded_value_recomputes_without_the_core].
+  Its own encapsulation is checked by a round trip with its own decapsulation and by the
+  tests of the session.
+
+### 43.3 The file
+
+The schema is that of section 15.2 [test: tests/crypto/test_pqxdh_vectors.py::test_file_has_the_schema_and_unique_names];
+the generator writes the same file every time it runs. The ratchet vectors of section
+15.7 stay on the session of `vectors/x3dh.json`: the ratchet takes SK and the session
+associated data of either key agreement alike.
+
 ## Appendix A. One key agreement and two messages in hex
 
-This appendix holds one run of the protocol written out in hex, every value in the order
-in which sections 16 to 19 compute it. The values are taken from the vector files of
+This appendix holds one run of the protocol of version 1 written out in hex, every value
+in the order in which sections 16 to 19 compute it. A run of version 2 differs in its key
+agreement only, which `vectors/pqxdh.json` holds (section 43). The values are taken from the vector files of
 sections 15.6 and 15.7, so that the text and the vectors cannot differ
 [test: tests/crypto/test_ratchet_vectors.py::test_appendix_a_is_taken_from_the_vector_files].
 Each value is named by its vector, its object and its key; a long value is broken into
