@@ -93,6 +93,13 @@ from sotto.crypto.ratchet import (
     kdf_ck,
     kdf_rk,
 )
+from sotto.crypto.safety_number import (
+    FINGERPRINT_VERSION,
+    digits,
+    identity_fingerprint,
+    qr_payload,
+    safety_number,
+)
 from sotto.crypto.x3dh import KeyAgreement, dh, initiate, respond
 from sotto.proto.sotto_pb2 import (
     Attachment,
@@ -2055,6 +2062,51 @@ def pqxdh_vectors() -> list[PqVector]:
     ]
 
 
+def safety_number_side(identity_key: bytes) -> tuple[bytes, bytes]:
+    """The first input of the hash chain of section 44.2 and the fingerprint."""
+    user_id = encode_user_id(identity_key).encode("ascii")
+    first_input = FINGERPRINT_VERSION + identity_key + user_id + identity_key
+    return first_input, identity_fingerprint(identity_key)
+
+
+def safety_number_vector(case: str, identity_key: bytes, contact: bytes) -> Vector:
+    first_input, own = safety_number_side(identity_key)
+    contact_first_input, theirs = safety_number_side(contact)
+    intermediates: Fields = {
+        "fingerprint_input": first_input.hex(),
+        "contact_fingerprint_input": contact_first_input.hex(),
+        "fingerprint": own.hex(),
+        "contact_fingerprint": theirs.hex(),
+        "digits": digits(own),
+        "contact_digits": digits(theirs),
+    }
+    outputs: Fields = {
+        "safety_number": safety_number(identity_key, contact),
+        "qr_payload": qr_payload(identity_key, contact),
+    }
+    inputs: Fields = {
+        "identity_key": identity_key.hex(),
+        "contact_identity_key": contact.hex(),
+    }
+    return passes(
+        f"safety-number-{case}",
+        "safety-number",
+        inputs,
+        outputs,
+        intermediates=intermediates,
+    )
+
+
+def safety_number_vectors() -> list[Vector]:
+    """Both sides of two pairs: Bob and Alice, and Alice with Mallory in Bob's place."""
+    return [
+        safety_number_vector("alice-bob", ALICE, BOB),
+        safety_number_vector("bob-alice", BOB, ALICE),
+        safety_number_vector("alice-mallory", ALICE, MALLORY),
+        safety_number_vector("mallory-alice", MALLORY, ALICE),
+    ]
+
+
 FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "identity.json": identity_vectors,
     "x3dh.json": x3dh_vectors,
@@ -2063,6 +2115,7 @@ FILES: dict[str, Callable[[], Sequence[Mapping[str, object]]]] = {
     "profile.json": profile_vectors,
     "content.json": content_vectors,
     "pqxdh.json": pqxdh_vectors,
+    "safety-number.json": safety_number_vectors,
 }
 
 

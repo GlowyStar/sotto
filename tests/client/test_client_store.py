@@ -4,8 +4,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from client_harness import rows
 
 from sotto.client.store import Store, StoreModeError
+
+CONTACT = bytes([0x42]) * 32
 
 
 @pytest.fixture
@@ -96,5 +99,61 @@ def test_store_holds_what_section_22_1_lists(tmp_path: Path) -> None:
         "signed_prekeys",
         "timers",
         "uploads",
+        "verified_contacts",
     ]
     store.close()
+
+
+def test_mark_survives_a_reopen_and_leaves_with_the_contact(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "store.db"
+    store = Store(path)
+    with store.transaction():
+        store.add_contact(CONTACT)
+        store.mark_verified(CONTACT)
+    store.close()
+
+    store = Store(path)
+    kept = store.is_verified(CONTACT)
+    with store.transaction():
+        store.remove_contact(CONTACT)
+        store.add_contact(CONTACT)
+    added_again = store.is_verified(CONTACT)
+    store.close()
+
+    assert (kept, added_again) == (True, False)
+
+
+def test_mark_and_its_clear_change_no_other_row(tmp_path: Path) -> None:
+    store = Store(tmp_path / "data" / "store.db")
+    with store.transaction():
+        store.add_contact(CONTACT)
+    before = rows(store)
+
+    with store.transaction():
+        store.mark_verified(CONTACT)
+    marked = rows(store)
+    with store.transaction():
+        store.clear_verified(CONTACT)
+    cleared = rows(store)
+    store.close()
+
+    assert marked == before | {"verified_contacts": [(CONTACT,)]}
+    assert cleared == before
+
+
+def test_store_without_the_table_of_marks_opens_and_gains_it(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "store.db"
+    store = Store(path)
+    with store.transaction():
+        store.add_contact(CONTACT)
+        store.connection.execute("DROP TABLE verified_contacts")
+    store.close()
+
+    store = Store(path)
+    unmarked = store.is_verified(CONTACT)
+    with store.transaction():
+        store.mark_verified(CONTACT)
+    marked = store.is_verified(CONTACT)
+    store.close()
+
+    assert (unmarked, marked) == (False, True)
