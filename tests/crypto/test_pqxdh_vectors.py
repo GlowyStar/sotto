@@ -217,11 +217,18 @@ def test_vectors_of_one_name_are_the_two_sides_of_one_key_agreement(case: str) -
 
 @pytest.mark.parametrize("case", ["replaced-kem-ciphertext", "wrong-pq-prekey"])
 def test_another_ciphertext_or_key_gives_another_secret_under_the_same_data(case: str) -> None:
-    honest = BY_NAME["pqxdh-respond-with-one-time-prekeys"]["outputs"]
-    changed = BY_NAME[f"pqxdh-respond-{case}"]["outputs"]
+    honest = BY_NAME["pqxdh-respond-with-one-time-prekeys"]
+    changed = BY_NAME[f"pqxdh-respond-{case}"]
+    dh_outputs = ("dh1", "dh2", "dh3", "dh4")
 
-    assert changed["sk"] != honest["sk"]
-    assert changed["session_associated_data"] == honest["session_associated_data"]
+    assert changed["outputs"]["sk"] != honest["outputs"]["sk"]
+    assert (
+        changed["outputs"]["session_associated_data"]
+        == honest["outputs"]["session_associated_data"]
+    )
+    assert [changed["intermediates"][key] for key in dh_outputs] == [
+        honest["intermediates"][key] for key in dh_outputs
+    ]
 
 
 @pytest.mark.parametrize("vector", POSITIVE, ids=name_of)

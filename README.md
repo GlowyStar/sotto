@@ -51,9 +51,10 @@ opens one.
 - The relay routes ciphertext and keeps a message only until its recipient confirms it.
   It still sees who talks to whom, when and how much.
 - Key agreement and message encryption follow Signal's public PQXDH and Double Ratchet
-  specifications. A new session agrees its key with X25519 and ML-KEM-768, so recorded
-  traffic stays closed to a later quantum computer; the ratchet stays classical, and
-  nothing protects against an attacker who has such a computer at the time of the
+  specifications. A new session agrees its key with X25519 and ML-KEM-768, so the
+  recorded messages of such a session stay closed to a later quantum computer. Sessions
+  made by X3DH before and all the metadata stay open to it; the ratchet stays classical,
+  and nothing protects against an attacker who has such a computer at the time of the
   session ([threat model](docs/threat-model.md#post-quantum-protection)). The primitives
   come from vetted libraries only.
 - The protocol is written down, and shared test vectors keep the implementations in step:

@@ -500,7 +500,7 @@ The lengths of the fields were checked before, when the frame was parsed (sectio
 | 4   | `signed_prekey.signature` verifies under `identity` over the string of section 4.4, built from `identity` and `signed_prekey.key` | BAD_BUNDLE |
 | 5   | `pq_prekey` is present                                                                        | PQ_PREKEY_MISSING     |
 | 6   | `pq_prekey.signature` verifies under `identity` over the string of section 4.5, built from `identity` and `pq_prekey.key` | BAD_BUNDLE |
-| 7   | `pq_prekey.key` loads as an ML-KEM-768 public key: the check of FIPS 203, section 7.2 (section 41.3) | BAD_BUNDLE |
+| 7   | `pq_prekey.key` passes the check of an ML-KEM-768 public key of FIPS 203, section 7.2, run as section 41.3 says | BAD_BUNDLE |
 
 - When all seven pass and the client has no pin for the contact, it pins `identity_dh_key`
   in the transaction that stores the session made from the bundle (section 16.6, step 8)
@@ -5380,12 +5380,18 @@ The KEM is ML-KEM-768 of FIPS 203, from the vetted library of each platform:
   else of the key; both libraries load it.
 - PQKEM-ENC(PQPK) is ML-KEM.Encaps of FIPS 203, with random bytes that the library draws
   itself: neither library takes them as an argument. PQKEM-DEC is ML-KEM.Decaps.
-- A public key is loaded with the input check of FIPS 203, section 7.2: its length and
-  the modulus check of its coefficients. Both libraries run the check when they load a
-  key and refuse one that fails it; this protocol treats a refusal as BAD_BUNDLE
-  (section 5.4, check 7)
+- A public key passes the input check of FIPS 203, section 7.2, before it is used: its
+  length and the modulus check of its coefficients. It is check 7 of section 5.4, and
+  this protocol treats a refusal as BAD_BUNDLE. The Python package runs the check when it
+  loads a key, in `from_public_bytes`, and refuses one that fails it
   [test: tests/crypto/test_pqxdh.py::test_bundle_that_fails_a_check_reaches_no_encapsulation]
   [test: tests/crypto/test_pqxdh_vectors.py::test_negative_vectors_raise_their_named_error].
+- CryptoKit runs the check only when it encapsulates: `init(rawRepresentation:)` loads a
+  key that fails it, and `encapsulate()` refuses that key, by a test of the macOS client;
+  nothing in this repository runs CryptoKit. A client whose library defers the check
+  runs one encapsulation to the key as check 7 and drops its result. The check so stays
+  in step 1 of section 41.5, and a key that fails it is refused before any
+  Diffie-Hellman value is computed.
 - Decapsulation of a ciphertext of the right length never fails: ML-KEM rejects
   implicitly, and another ciphertext gives another shared secret, so the key agreement
   derives another SK and the message does not decrypt
@@ -5482,7 +5488,8 @@ Of the new fields, `pq_prekey.key` of a Bundle is covered by its signature (sect
 `pq_prekey.id` of a Bundle and both new fields of the initial header are covered by
 nothing. Each change ends in one of the three ways of section 16.9
 [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
-[test: tests/crypto/test_pqxdh_vectors.py::test_another_ciphertext_or_key_gives_another_secret_under_the_same_data]:
+[test: tests/crypto/test_pqxdh_vectors.py::test_another_ciphertext_or_key_gives_another_secret_under_the_same_data]
+[test: tests/client/test_pqxdh_sessions.py::test_message_of_version_1_made_version_2_is_refused_and_changes_nothing]:
 
 | Change                                                                | What follows |
 |-----------------------------------------------------------------------|--------------|
@@ -5492,7 +5499,7 @@ nothing. Each change ends in one of the three ways of section 16.9
 | One one-time post-quantum prekey is handed to two initiators          | The first initial message that B accepts starts its session and deletes the private key. The other: UNKNOWN_PQ_PREKEY, unless a classical one-time prekey of the same bundle fails first (UNKNOWN_ONE_TIME_PREKEY) |
 | `pq_prekey_id` of a Bundle or of an initial header is changed         | B holds no key with the id: UNKNOWN_PQ_PREKEY. Or another key: another SS, DECRYPT_FAILED |
 | `kem_ciphertext` of an initial header is changed                      | Another SS (section 41.3): DECRYPT_FAILED. A ciphertext of another length: BAD_ENVELOPE |
-| `version` of an envelope is changed                                   | Section 41.10: X3DH_REFUSED, DECRYPT_FAILED or UNSUPPORTED_VERSION |
+| `version` of an envelope is changed                                   | Section 41.10: X3DH_REFUSED, DECRYPT_FAILED or UNSUPPORTED_VERSION. An initial header of version 1 put under the version 2 has no `kem_ciphertext`: BAD_ENVELOPE (section 19.4) |
 
 A message that matches a record (section 20.4) reads neither new field, as it reads
 neither prekey id.
@@ -5531,6 +5538,18 @@ A client of version 2
   before and is decrypted there;
 - refuses a bundle without a post-quantum prekey: START ends with PQ_PREKEY_MISSING.
 
+A session of version 1 that its responder had not accepted when the responder moved to
+version 2 carries no text any more. The responder holds no such session, so its
+initiator sends every message of it with the initial header of version 1 (section 16.7),
+and the responder refuses each one with X3DH_REFUSED, for as long as the session stays
+the sending session of the initiator (section 20.1). Nothing tells the initiator: a FAIL
+sends nothing to the peer (section 20.3), and the refused messages are gone. The way out,
+once the initiator is of version 2 as well, is a reset of section 20.6 by either user. A
+reset by the initiator makes a session of version 2 for its next text. A reset by the
+responder makes one whose first message the initiator accepts at the head of its list,
+and the initiator sends on it from then on
+[test: tests/client/test_pqxdh_sessions.py::test_session_of_version_1_that_was_never_accepted_is_refused_until_a_reset].
+
 What a client and a relay of version 1 do with one of version 2, by the rules they
 already have:
 
@@ -5548,11 +5567,21 @@ The downgrade. A relay that strips the post-quantum prekey from bundles does not
 session without one: it gets a START that fails with a result the user sees. It cannot
 make a session of version 1 instead: a client of version 2 makes none, and the initial
 message of a session of version 1 is the work of a client that holds the X25519 private
-key of the sender, which the relay does not. A changed `version` gives DECRYPT_FAILED,
-because the version byte is part of the associated data of every message. What this does
-not protect against: a relay that refuses service, which it can always do, and an
-attacker with a quantum computer that forges the Ed25519 signatures of section 4.5
-(threat model, "Post-quantum protection").
+key of the sender, which the relay does not. What this does not protect against: a relay
+that refuses service, which it can always do, and an attacker with a quantum computer
+that forges the Ed25519 signatures of section 4.5 (threat model, "Post-quantum
+protection").
+
+A changed `version` moves no message to a session of another version. The `version` of
+an envelope is part of no associated data: the version byte that the associated data of
+every message carries is the one of its session (section 16.5). The client refuses the
+mismatch by the rule of section 20.2: it decrypts a message only on a session of the
+version of its envelope. A changed `version` so gives DECRYPT_FAILED, X3DH_REFUSED for an
+initial message without a record, BAD_ENVELOPE for an initial header of version 1 put
+under the version 2, or UNSUPPORTED_VERSION for a `version` that is neither 1 nor 2
+(sections 19.4 and 41.8)
+[test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged]
+[test: tests/client/test_pqxdh_sessions.py::test_message_of_version_1_made_version_2_is_refused_and_changes_nothing].
 
 ### 41.11 Deviations from PQXDH Revision 3
 
@@ -5829,7 +5858,9 @@ Two users compare in one of two ways:
   match. Any other text, the QR code of an id or a payload of another version among them,
   is no safety number of version 1: the client says so and gives no verdict.
 
-A match shows that the two clients hold the same two identity keys. A client that holds
+A match shows that the two clients hold the same two identity keys, up to the 30 digits
+of each side, or, for a scanned QR code, up to the 32 bytes of each fingerprint that its
+payload holds. A client that holds
 another key in place of the contact's, an id replaced on its way, shows another number
 than the contact's client does
 [test: tests/crypto/test_safety_number_vectors.py::test_an_id_substituted_on_its_way_gives_another_number]:

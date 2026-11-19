@@ -495,16 +495,33 @@ Someone who takes the device, reads its disk, or gets a copy of the data directo
 client: from a backup, a synchronised folder, another account with the rights to read it,
 or a program that runs as the user.
 
-- Nothing is encrypted at rest. The data directory holds the seed of the identity, every
-  private key, the state of every session and the text of every message that was sent
-  and received (protocol, section 22.1). Whoever can read it has all of that, and with a
-  client that implements part 3 also the files it received, the blobs of its unfinished
-  uploads and the key of every attachment in its message log (protocol, section 33.7).
+How a client keeps its store is its own matter (protocol, section 22.4). Unless a bullet
+names the macOS client, this section is about the command-line client of this
+repository: a reference tool, whose data directory lies in the clear under its file
+modes.
+
+- The command-line client encrypts nothing at rest. Its data directory holds the seed of
+  the identity, every private key, the state of every session and the text of every
+  message that was sent and received (protocol, section 22.1). Whoever can read it has
+  all of that, and as the client implements part 3 also the files it received, the blobs
+  of its unfinished uploads and the key of every attachment in its message log
+  (protocol, section 33.7).
 - The file modes are the whole protection: the directory is 0700, the file 0600, and the
   client of this repository refuses to start on wider modes
   [test: tests/client/test_client_store.py::test_start_is_refused_when_a_mode_gives_a_right_to_the_group_or_others]. That
   stops another account of the same machine. It does not stop the administrator of the
   machine, a program that runs as the user, a backup, or anyone with the disk.
+- The macOS client encrypts its store. Its document `docs/key-storage.md`, in the
+  repository sotto-mac, says how in "Decision (2026-11-19)" and what it covers in "What
+  it protects and what it does not": the whole store is encrypted with SQLCipher under a
+  random key that lies on disk only wrapped to a Secure Enclave key of that Mac, and
+  every use of the Secure Enclave key needs the user's presence, Touch ID or the Mac
+  password. That stops someone at the keyboard who does not know the Mac password, and a
+  copy of the data directory that is read on another Mac or offline. It does not stop
+  anyone who knows the Mac password, nor code that runs as the user, such as malware
+  that uses the store while it is open. What that client writes outside its store is
+  listed in the same document, "What is written outside the store". No test of this
+  repository holds any of this: it is the claim of that document.
 - A copy of the data directory clones the identity. Whoever holds the copy is the user
   for the relay and for every contact: it logs in, receives the queue and can ack it
   away, reads the message log, decrypts what arrives on the copied sessions, sends on
@@ -686,7 +703,9 @@ users who hold each other's ids hold each other's keys.
 - The verified mark is the user's own note in the store (protocol, section 45). It never
   leaves the device, and the peer does not learn it
   [test: tests/client/test_client_store.py::test_mark_and_its_clear_change_no_other_row].
-  The store is not encrypted: whoever can write the data directory can set or clear it.
+  The store of the command-line client is not encrypted: whoever can write its data
+  directory can set or clear the mark. In any client, so can code that runs as the user
+  ("A thief of the device or of the data directory").
 - The pinned X25519 identity key protects against a later bundle that carries another
   X25519 key under the same id
   [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].
@@ -787,8 +806,9 @@ What it protects:
 - The messages of a session of version 2 against that attacker as long as it only
   records. SK rests on the X25519 values and on the shared secret of ML-KEM-768, and
   every key of the ratchet descends from SK, so breaking X25519 alone opens nothing that
-  was recorded
-  [test: tests/crypto/test_pqxdh.py::test_both_sides_derive_the_same_secret_and_associated_data_of_version_2]
+  was recorded. Another ciphertext, or another post-quantum key, gives another SK under
+  the same X25519 values
+  [test: tests/crypto/test_pqxdh_vectors.py::test_another_ciphertext_or_key_gives_another_secret_under_the_same_data]
   [test: tests/crypto/test_pqxdh_vectors.py::test_every_recorded_value_recomputes_without_the_core].
 - A relay cannot take that protection away from a new session. It can strip the
   post-quantum prekey from a bundle, and the session then does not start: the user sees
