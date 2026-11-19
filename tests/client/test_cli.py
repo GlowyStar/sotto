@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pty
+import re
 import signal
 import sys
 import termios
@@ -38,11 +39,13 @@ from sotto.client.transport import (
     server_name_of,
 )
 from sotto.crypto.identity import decode_user_id
+from sotto.crypto.safety_number import safety_number
 from sotto.proto.sotto_pb2 import Attachment, Profile
 
 PATIENCE_SECONDS = 10
 SOTTO = Path(sys.executable).with_name("sotto")
 JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 40
+ROW_OF_GROUPS = re.compile(r"[0-9]{5} [0-9]{5} [0-9]{5} [0-9]{5}")
 
 
 def test_peer_text_is_printed_with_control_characters_escaped() -> None:
@@ -107,7 +110,8 @@ def test_seed_is_neither_an_argument_nor_printed(
     main(["--data-dir", str(alice), "add", "bob", bob_id])
     main(["--data-dir", str(alice), "id"])
     main(["--data-dir", str(alice), "contacts"])
-    for command in ("init", "id", "add", "contacts", "chat", "reset", "send-file", "profile"):
+    commands = ("init", "id", "add", "contacts", "chat", "reset", "send-file", "profile")
+    for command in (*commands, "verify"):
         with pytest.raises(SystemExit):
             main([command, "--help"])
     output = capsys.readouterr()
@@ -511,6 +515,40 @@ def test_read_receipts_are_shown_and_turned_off_and_on(
         "read receipts: off\n",
         "read receipts: on\n",
     )
+
+
+def test_verify_shows_one_number_on_both_sides_then_marks_and_clears(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    alice, bob = tmp_path / "alice", tmp_path / "bob"
+    alice_id = run(capsys, alice, "init").strip()
+    bob_id = run(capsys, bob, "init").strip()
+    run(capsys, alice, "add", "bob", bob_id)
+    run(capsys, bob, "add", "alice", alice_id)
+
+    at_alice = run(capsys, alice, "verify", "bob").splitlines()
+    at_bob = run(capsys, bob, "verify", "alice").splitlines()
+    marked = run(capsys, alice, "verify", "bob", "mark")
+    listed = run(capsys, alice, "contacts")
+    shown_marked = run(capsys, alice, "verify", "bob").splitlines()[-1]
+    cleared = run(capsys, alice, "verify", "bob", "clear")
+    listed_after_the_clear = run(capsys, alice, "contacts")
+    unknown = refused(capsys, alice, "verify", "carol")
+
+    number = safety_number(decode_user_id(alice_id), decode_user_id(bob_id))
+    prefix, own_half, contact_half = at_alice[4].removeprefix("qr payload: ").split(" ")
+    assert at_alice[0] == "safety number with bob:"
+    assert all(ROW_OF_GROUPS.fullmatch(row) for row in at_alice[1:4])
+    assert "".join(at_alice[1:4]).replace(" ", "") == number
+    assert at_bob[1:4] == at_alice[1:4]
+    assert at_bob[4] == f"qr payload: {prefix} {contact_half} {own_half}"
+    assert (at_alice[5], at_bob[5]) == ("bob is not verified", "alice is not verified")
+    assert marked == "bob is verified\n"
+    assert listed == f"bob {bob_id} verified\n"
+    assert shown_marked == "bob is verified"
+    assert cleared == "bob is not verified\n"
+    assert listed_after_the_clear == f"bob {bob_id}\n"
+    assert "no contact is named carol" in unknown
 
 
 def texts_in(data_directory: Path) -> list[str]:

@@ -218,6 +218,11 @@ TABLES = (
         read_receipts INTEGER NOT NULL
     ) STRICT
     """,
+    """
+    CREATE TABLE IF NOT EXISTS verified_contacts (
+        contact BLOB PRIMARY KEY
+    ) STRICT, WITHOUT ROWID
+    """,
 )
 
 ADD_SESSION = """
@@ -825,6 +830,7 @@ class Store:
         self._change("DELETE FROM profiles WHERE contact = ?", (contact,))
         self._change("DELETE FROM profile_sends WHERE contact = ?", (contact,))
         self._change("DELETE FROM timers WHERE contact = ?", (contact,))
+        self._change("DELETE FROM verified_contacts WHERE contact = ?", (contact,))
         self._change("DELETE FROM sessions WHERE contact = ?", (contact,))
         self._change("DELETE FROM contacts WHERE identity_key = ?", (contact,))
         self._change(DELETE_ORPHAN_RECORDS, ())
@@ -1078,6 +1084,18 @@ class Store:
             "INSERT INTO timers VALUES (?, ?) ON CONFLICT DO UPDATE SET seconds = ?",
             (contact, seconds, seconds),
         )
+
+    def is_verified(self, contact: bytes) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM verified_contacts WHERE contact = ?", (contact,)
+        ).fetchone()
+        return row is not None
+
+    def mark_verified(self, contact: bytes) -> None:
+        self._change("INSERT OR IGNORE INTO verified_contacts VALUES (?)", (contact,))
+
+    def clear_verified(self, contact: bytes) -> None:
+        self._change("DELETE FROM verified_contacts WHERE contact = ?", (contact,))
 
     def read_receipts(self) -> bool:
         row = self.connection.execute("SELECT read_receipts FROM settings").fetchone()

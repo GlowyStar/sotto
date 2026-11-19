@@ -25,6 +25,9 @@ protocol: a peer, the device with its store, and what the keys of a session cove
 - Replies, edits, delete for both, receipts and the disappearing timer rest on part 5 of
   the protocol (section 38). They are messages between the two clients and add nothing
   that the relay reads; the command-line client implements them.
+- The safety number and the verified mark rest on part 7 of the protocol (section 44).
+  Nothing of them reaches the relay; the command-line client implements them, except
+  the scan of a QR code.
 
 ## The attackers
 
@@ -643,6 +646,9 @@ compromise is total and permanent.
   contact.
 - The messages of before the compromise are covered by what "Forward secrecy and
   post-compromise security" says, and by nothing more.
+- The safety number does not show it. The holder of the old keys has the same identity
+  key, so the number stays the same and a verified mark stays set (protocol,
+  section 45.2).
 
 ## The id and its channel
 
@@ -658,9 +664,29 @@ users who hold each other's ids hold each other's keys.
   The user then has a valid session with the wrong identity. Done to both sides, this
   puts the attacker between them: it reads every message and passes it on in a session
   of its own.
-- Nothing later repairs a substituted id. There is no safety number and no other
-  comparison of keys after the fact, and no session, pin or warning shows the
-  substitution: the client holds exactly the key it was given.
+- The safety number finds a substituted id after the fact (protocol, section 44). Two
+  users who compare it over an authentic channel, in person for one, see one number when
+  their clients hold the same two identity keys, and a client that holds a replaced id
+  shows another number than the client of the peer
+  [test: tests/crypto/test_safety_number_vectors.py::test_an_id_substituted_on_its_way_gives_another_number].
+  Without a comparison nothing shows the substitution: no session, pin or warning does,
+  as the client holds exactly the key it was given.
+- What a matching number does not show:
+  - Who holds the keys now. A thief of the seed has the same identity key
+    ("Compromise of the identity").
+  - Anything about a comparison over a channel that the attacker controls. A number
+    read out in the chat itself or sent through the relay passes the attacker, who can
+    change it.
+  - More than the digits hold. They are 30 per side, cut from each fingerprint: two
+    keys can share them, and an attacker can search for a key with the digits of the
+    peer's key, at 5200 computations of SHA-512 per try. The QR payload compares 32
+    bytes of each fingerprint.
+  - Anything about the devices: what "A peer" and "A thief of the device or of the data
+    directory" say holds as before.
+- The verified mark is the user's own note in the store (protocol, section 45). It never
+  leaves the device, and the peer does not learn it
+  [test: tests/client/test_client_store.py::test_mark_and_its_clear_change_no_other_row].
+  The store is not encrypted: whoever can write the data directory can set or clear it.
 - The pinned X25519 identity key protects against a later bundle that carries another
   X25519 key under the same id
   [test: tests/crypto/test_identity.py::test_pinned_x25519_identity_key_refuses_another_one].

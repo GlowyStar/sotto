@@ -584,6 +584,16 @@ class Client:
             self.store.set_timer(contact, seconds)
         return sealed.outgoing
 
+    def mark_verified(self, contact: bytes) -> None:
+        """Keeps that the user compared the safety number of the contact and it matched;
+        the mark stays on this device (section 45)."""
+        with self.store.transaction():
+            self.store.mark_verified(contact)
+
+    def clear_verified(self, contact: bytes) -> None:
+        with self.store.transaction():
+            self.store.clear_verified(contact)
+
     def read_receipts(self) -> bool:
         return self.store.read_receipts()
 

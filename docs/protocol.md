@@ -5,8 +5,9 @@ sections 16 to 25: the end-to-end protocol between two clients. Sections 26 and 
 both parts. Part 3, sections 28 to 34: attachments, that is, files and photos. Part 4,
 sections 35 to 37: the profile, a display name and an avatar. Part 5, sections 38 to 40:
 replies, edits, deletion for both, receipts and the disappearing timer. Part 6, sections
-41 to 43: the post-quantum key agreement PQXDH, end-to-end version 2. Appendix A follows
-section 43.
+41 to 43: the post-quantum key agreement PQXDH, end-to-end version 2. Part 7, sections 44
+to 46: the safety number of two identity keys and the verified mark. Appendix A follows
+section 46.
 
 ## 1. Status and scope
 
@@ -46,11 +47,15 @@ Part 6 specifies the key agreement of every new session: PQXDH, X25519 with ML-K
 the post-quantum prekeys that the relay stores and hands out, and the transition from the
 key agreement of section 16 (section 41).
 
+Part 7 specifies the safety number that two clients compute from the identity keys of
+their users, so that the users can compare it, and the mark that a client keeps for a
+contact whose number its user compared (section 44).
+
 ### 1.2 Status
 
 - No security audit. Nobody has reviewed this protocol or its implementations for
   security. Do not rely on it to protect anything that matters.
-- Every guarantee of parts 1 to 6 carries a citation (section 2.6), which names the
+- Every guarantee of parts 1 to 7 carries a citation (section 2.6), which names the
   test that holds it.
 - Field numbers and signed byte layouts are frozen from the moment they are merged
   (sections 4.1 and 7.2).
@@ -63,7 +68,8 @@ key agreement of section 16 (section 41).
 | End-to-end protocol version | 2     | Sections 3 and 5, the key statements of sections 4.3 to 4.5, sections 16 to 25, sections 29, 32 and 33, sections 35 and 36, sections 38 and 39, and sections 41 and 42. Version 1 is that of the sessions made by section 16 (section 41.10) |
 
 The two numbers change independently. Section 14 says where each appears on the wire and
-what a client does with a relay protocol version it does not know.
+what a client does with a relay protocol version it does not know. The safety number of
+part 7 is on no wire and has a version of its own (section 44.1).
 
 ### 1.4 Specified in part 2
 
@@ -1828,6 +1834,8 @@ The sixth is `vectors/content.json` of part 5, whose operations section 40 names
 The seventh is `vectors/pqxdh.json` of part 6, whose operations section 43 names
 [test: tests/crypto/test_pqxdh_vectors.py::test_positive_vectors_replay_byte_for_byte]
 [test: tests/crypto/test_pqxdh_vectors.py::test_negative_vectors_raise_their_named_error].
+The eighth is `vectors/safety-number.json` of part 7, whose operation section 46 names
+[test: tests/crypto/test_safety_number_vectors.py::test_positive_vectors_replay_byte_for_byte].
 
 ### 15.2 The schema of a vector file
 
@@ -3352,8 +3360,8 @@ A client keeps, for one identity
   the message id, the recipient and the bytes of the payload;
 - the message log: the texts it sent and received.
 
-Section 33.7 adds what part 3 keeps, section 36.1 what part 4 keeps, and section 39.10
-what part 5 keeps.
+Section 33.7 adds what part 3 keeps, section 36.1 what part 4 keeps, section 39.10 what
+part 5 keeps, and section 45 the verified mark of part 7.
 
 No frame and no payload carries the seed or a private key [test: tests/client/test_transport.py::test_steps_after_the_login_upload_once_then_send_the_outbox].
 
@@ -3747,7 +3755,6 @@ environment, or has no user before a later stage of the project.
 - A post-quantum ratchet (section 25.4), post-quantum signatures and with them any
   protection against an active attacker with a quantum computer (PQXDH section 4.8).
   Nothing is reserved for them beyond the version numbers.
-- Verification of keys by a safety number.
 - Several devices per identity, groups and calls.
 - Any claim of deniability (section 25.5).
 - Encryption of the client store, and key storage in a keychain or in hardware.
@@ -3786,6 +3793,9 @@ environment, or has no user before a later stage of the project.
   https://signal.org/docs/specifications/doubleratchet/
 - M. Marlinspike, T. Perrin, "The Sesame Algorithm: Session Management for Asynchronous
   Message Encryption", Revision 2, https://signal.org/docs/specifications/sesame/
+- Signal Messenger, libsignal, `rust/protocol/src/fingerprint.rs` and
+  `rust/protocol/src/proto/fingerprint.proto` at commit
+  `956e1cab1d68291c92f2fcca3c29ec6c3b367e28`, https://github.com/signalapp/libsignal
 - E. Kret, R. Schmidt, "The PQXDH Key Agreement Protocol", Revision 3, 2023-05-24, last
   updated 2024-01-23, https://signal.org/docs/specifications/pqxdh/
 - NIST FIPS 203, "Module-Lattice-Based Key-Encapsulation Mechanism Standard", August
@@ -5714,6 +5724,224 @@ The schema is that of section 15.2 [test: tests/crypto/test_pqxdh_vectors.py::te
 the generator writes the same file every time it runs. The ratchet vectors of section
 15.7 stay on the session of `vectors/x3dh.json`: the ratchet takes SK and the session
 associated data of either key agreement alike.
+
+## 44. The safety number
+
+### 44.1 What part 7 is
+
+Part 7 specifies the safety number: 60 digits, and the text of a QR code, that a client
+computes from the identity key of its user and the identity key of a contact. The two
+clients of a pair compute the same number. Two users compare it, in person or over
+another channel on which they know whom they hear and nobody can change what is said,
+and so check that each id reached the other unchanged (section 3.2; threat model, "The
+id and its channel"). Part 7 adds no frame, no field and no rule of the relay: the number
+is computed on each device, and nothing of part 7 travels.
+
+The construction is the numeric fingerprint of libsignal, the safety number of Signal, as
+its source defines it at commit `956e1cab1d68291c92f2fcca3c29ec6c3b367e28` of 2026-11-18:
+`rust/protocol/src/fingerprint.rs` and `rust/protocol/src/proto/fingerprint.proto`. The
+hash chain of section 44.2 replays libsignal's own test vector
+[test: tests/crypto/test_safety_number_vectors.py::test_fingerprint_replays_the_test_vector_of_libsignal].
+Section 44.6 lists the deviations with their reasons.
+
+Part 7 changes neither version number of section 1.3: no frame and no payload carries the
+number. It has a version of its own, the safety number version, 1, which the QR payload
+carries (section 44.4). A change of the construction or of its inputs is a new version.
+
+The command-line client of this repository implements part 7 except the scan of a QR
+code: it prints the payload and has no camera. Every rule of part 7 carries a citation
+like the rules of the other parts (section 1.2); the rule of a client that scans
+(section 44.5) is held by the vectors of the two sides of a pair.
+
+### 44.2 The fingerprint of one side
+
+The fingerprint F(IK) of an identity key IK is 64 bytes. ID is the user id of IK, its 64
+ASCII characters (section 3.2):
+
+```
+H_0   = SHA-512(0x0000 || IK || ID || IK)
+H_i   = SHA-512(H_(i-1) || IK)   for i = 1 to 5199
+F(IK) = H_5199
+```
+
+- IK is the 32 bytes of the identity key (section 3.1), with no byte in front. The first
+  input is 130 bytes: two zero bytes, the key, the id and the key again.
+- SHA-512 is that of RFC 6234: `hashlib.sha512` in Python, `SHA512.hash(data:)` in
+  CryptoKit. The chain is 5200 computations of SHA-512
+  [test: tests/crypto/test_safety_number_vectors.py::test_positive_vectors_replay_byte_for_byte].
+
+### 44.3 The number
+
+The 30 digits of a side are made from bytes 0 to 29 of its fingerprint, cut into six
+pieces of 5 bytes. Each piece is read as a big-endian integer of 40 bits, taken modulo
+100000 and written as five decimal digits, with zeros in front when it has fewer. The six
+groups are written in the order of their pieces.
+
+The safety number of the user U and the contact C is the 30 digits of F(IK_U) and the 30
+digits of F(IK_C), the smaller first, as one string of 60 digits; two strings of digits of
+one length compare as the numbers they write. Both sides put the same string first, so
+the user and the contact compute one number
+[test: tests/crypto/test_safety_number_vectors.py::test_vectors_of_one_pair_are_the_two_sides_of_one_comparison]
+[test: tests/crypto/test_safety_number_vectors.py::test_vectors_cover_both_orders_and_a_digit_group_with_a_leading_zero].
+
+A client shows the number as twelve groups of five digits, in order, one space between two
+groups; it MAY lay the groups out in rows. The command-line client prints three rows of
+four groups
+[test: tests/client/test_cli.py::test_verify_shows_one_number_on_both_sides_then_marks_and_clears].
+The number of `safety-number-alice-bob` (section 46)
+[test: tests/crypto/test_safety_number_vectors.py::test_example_of_section_44_3_is_the_number_of_its_vector]:
+
+```
+76328 04469 60496 75513
+19525 78194 98359 58641
+56177 03296 04713 61842
+```
+
+### 44.4 The QR payload
+
+The QR code that the client of U shows for the contact C holds this ASCII text of 151
+characters, with no line end:
+
+| Offset | Length | Field     | Value                                                       |
+|--------|--------|-----------|-------------------------------------------------------------|
+| 0      | 21     | prefix    | `sotto-safety-number-1`                                     |
+| 21     | 1      | separator | a space                                                     |
+| 22     | 64     | own       | bytes 0 to 31 of F(IK_U), in lowercase hex (section 2.1)    |
+| 86     | 1      | separator | a space                                                     |
+| 87     | 64     | contact   | bytes 0 to 31 of F(IK_C), in lowercase hex                  |
+
+The payload of the client of C holds the same two halves in the other order
+[test: tests/crypto/test_safety_number_vectors.py::test_vectors_of_one_pair_are_the_two_sides_of_one_comparison].
+The `1` of the prefix is the safety number version; like the prefixes of section 14.3,
+the prefix is a constant that no implementation parses. A payload is never an id: the QR
+code of an id holds 64 characters (section 3.4).
+
+### 44.5 Comparing
+
+Two users compare in one of two ways:
+
+- They read the 60 digits of their two clients, group by group.
+- One client scans the QR code of the other. The scanned text matches when it equals the
+  payload of the contact's side: the prefix, a space, the contact's half, a space and the
+  user's own half, which is the payload of section 44.4 with its halves swapped
+  [test: tests/crypto/test_safety_number_vectors.py::test_vectors_of_one_pair_are_the_two_sides_of_one_comparison].
+  A text that has the form of section 44.4 and differs is a safety number that does not
+  match. Any other text, the QR code of an id or a payload of another version among them,
+  is no safety number of version 1: the client says so and gives no verdict.
+
+A match shows that the two clients hold the same two identity keys. A client that holds
+another key in place of the contact's, an id replaced on its way, shows another number
+than the contact's client does
+[test: tests/crypto/test_safety_number_vectors.py::test_an_id_substituted_on_its_way_gives_another_number]:
+for the same number, the 30 digits of the other key would have to be those of the
+contact's key. The X25519 identity keys are covered through the identity keys that sign
+them (sections 4.3 and 5.3). The threat model says what a match does not show ("The id
+and its channel").
+
+A safety number that does not match is a reason not to set the mark of section 45. What
+the two users do then is theirs: exchange their ids again over an authentic channel.
+
+### 44.6 Deviations from libsignal
+
+| libsignal at `956e1ca`                                                   | This protocol                                                              | Reason |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------|--------|
+| The key in the hash is the serialized `IdentityKey`, 33 bytes: the type byte `05` and a Curve25519 key | The 32 bytes of the Ed25519 identity key, with no byte in front | The identity key of this protocol is Ed25519 (section 25.1), and `05` names a Curve25519 key. A public key of this protocol has no type byte |
+| The stable identifier is the application's: a phone number for version 1, a service id for version 2 | The user id of section 3.2, its 64 ASCII characters | This protocol has no other identifier of a user. The id is the key, so the input fixes nothing that the key does not fix; it keeps the chain of libsignal with this protocol's identifier in its place |
+| The scannable form is the protobuf message `CombinedFingerprints`: `version`, `local_fingerprint.content`, `remote_fingerprint.content` | The ASCII text of section 44.4: the version in the prefix, then the two halves in hex in the same order | A QR payload of this protocol is text (section 3.4), and the command-line client prints it. Protobuf serialization is not canonical (section 4.1, rule 4) |
+| A scanner tells a version mismatch apart from a mismatch                  | A text without the form of section 44.4 is no safety number of version 1 and gets no verdict | The prefix carries the version |
+| The scanned halves are compared in constant time                          | Compared as text                                                            | A fingerprint is computed from public keys and is no secret |
+| The iteration count and the version are arguments that the application chooses | Fixed: 5200 and version 1                                            | One value for both clients; 5200 is the count of libsignal's test vectors |
+
+Kept as written: the hash version `0x0000` in front of the first input; SHA-512; the key,
+the identifier and the key in the first input, the output and the key in each later one;
+5200 computations; the 30 digits from bytes 0 to 29, six pieces of 5 bytes modulo 100000;
+the smaller string first, 60 digits; the first 32 bytes of each fingerprint in the
+scannable form, the showing side's own first; the comparison of the scanned halves with
+the own ones swapped.
+
+## 45. The verified mark
+
+### 45.1 What it means
+
+A client keeps one mark per contact: verified or not. The user sets it after the safety
+number of the contact matched in a comparison of section 44.5, and clears it whenever the
+user chooses. The mark is the user's note about one id: that the user compared it with the
+person it belongs to. It proves nothing to anyone else and changes nothing else that the
+client does: a contact without the mark sends and receives as before.
+
+### 45.2 When it is lost
+
+- The user clears it.
+- The contact is removed: the mark goes with it, and the same id added again starts
+  without one
+  [test: tests/client/test_client_store.py::test_mark_survives_a_reopen_and_leaves_with_the_contact].
+- A store of an earlier version opens with no contact marked
+  [test: tests/client/test_client_store.py::test_store_without_the_table_of_marks_opens_and_gains_it].
+
+Nothing else clears it, a restart of the client included
+[test: tests/client/test_client_store.py::test_mark_survives_a_reopen_and_leaves_with_the_contact].
+The protocol has no change of key for a contact. A contact is its identity key
+(section 3.2): a new key is a new contact, with another number and no mark. The X25519
+identity key of a contact is pinned, and a bundle or an initial header with another one
+is refused with IDENTITY_KEY_MISMATCH (section 5.3). So the client never uses a key that
+the comparison did not cover. Signal clears its mark when the key of a contact changes,
+because Signal then goes on with the new key; here such a key is refused, and the
+refusal is shown as before. A client shows a contact whose mark was cleared as one that
+never had it. A client of an earlier version keeps the mark it does not know when it
+removes a contact, so the same id removed there and added again under a later client
+shows as verified: the mark is about the same key, and nothing else follows from it.
+
+### 45.3 It stays on the device
+
+No frame, no payload and no member of `Content` carries the mark, and the peer does not
+learn that it was set or cleared. Setting or clearing it changes no other row of the
+store and queues nothing for the relay
+[test: tests/client/test_client_store.py::test_mark_and_its_clear_change_no_other_row].
+
+### 45.4 The command-line client
+
+The client of this repository keeps the mark in the table `verified_contacts` of its
+store, one row per marked contact, made when the store opens, so that a store of an
+earlier version gains it. `sotto verify NAME` prints the safety number in three rows of
+four groups, the QR payload and whether the contact is verified; `sotto verify NAME mark`
+sets the mark, `sotto verify NAME clear` clears it, and `sotto contacts` prints
+`verified` after the id of a marked contact. None of them dials the relay
+[test: tests/client/test_cli.py::test_verify_shows_one_number_on_both_sides_then_marks_and_clears].
+
+## 46. The test vectors of the safety number
+
+The vectors of part 7 are the file `vectors/safety-number.json`, in the schema of section
+15.2, written by `scripts/generate_vectors.py` with the code of part 7
+[test: tests/crypto/test_safety_number_vectors.py::test_file_has_the_schema_and_unique_names]
+[test: tests/crypto/test_safety_number_vectors.py::test_vectors_use_the_operations_and_keys_of_the_document]
+[test: tests/crypto/test_safety_number_vectors.py::test_positive_vectors_replay_byte_for_byte].
+`digits`, `contact_digits`, `safety_number` and `qr_payload` are JSON strings, and every
+other value is a hex string. Every vector is positive: no input of the operation fails.
+
+| Operation       | Rule         | `inputs`                               | `intermediates` | `outputs`                     | `error` |
+|-----------------|--------------|----------------------------------------|-----------------|-------------------------------|---------|
+| `safety-number` | 44.2 to 44.4 | `identity_key`, `contact_identity_key` | `fingerprint_input`, `contact_fingerprint_input`, `fingerprint`, `contact_fingerprint`, `digits`, `contact_digits` | `safety_number`, `qr_payload` | |
+
+- `identity_key` is the identity key of the side that runs the operation and
+  `contact_identity_key` that of its contact. `fingerprint_input` is the first input of
+  the chain of section 44.2, 130 bytes, `fingerprint` the 64 bytes of F and `digits` the
+  30 digits of section 44.3, all three of the own key; the `contact_` values are the same
+  for the key of the contact.
+- The cases are the two sides of two pairs: `safety-number-alice-bob` and
+  `safety-number-bob-alice`, and `safety-number-alice-mallory` and
+  `safety-number-mallory-alice`, in which Alice holds Mallory's key in place of Bob's.
+  The keys are the identity keys of the seeds `01`, `03` and `02` repeated 32 times. The
+  two vectors of a pair have one `safety_number` and payloads with swapped halves
+  [test: tests/crypto/test_safety_number_vectors.py::test_vectors_of_one_pair_are_the_two_sides_of_one_comparison];
+  Alice's number with Mallory is not Bob's number with Alice
+  [test: tests/crypto/test_safety_number_vectors.py::test_an_id_substituted_on_its_way_gives_another_number].
+  The cases hold each order of the two halves and a group of digits with a zero in front
+  [test: tests/crypto/test_safety_number_vectors.py::test_vectors_cover_both_orders_and_a_digit_group_with_a_leading_zero].
+- libsignal's test `fingerprint_test_v1`, with its keys of 33 bytes and its phone numbers
+  as identifiers, runs through the chain of section 44.2 and gives libsignal's display
+  string and both of its scannable halves
+  [test: tests/crypto/test_safety_number_vectors.py::test_fingerprint_replays_the_test_vector_of_libsignal].
+  It is no vector of the file: its inputs are not those of the operation.
 
 ## Appendix A. One key agreement and two messages in hex
 

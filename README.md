@@ -27,14 +27,16 @@ opens one.
   caps queues and rate-limits frames. The frames are protobuf messages, whose schema is
   `proto/sotto.proto`, and the shared test vectors are in `vectors/`.
 - The protocol is written down ahead of the code. [docs/protocol.md](docs/protocol.md)
-  holds six parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
+  holds seven parts. Part 1 is identity, the prekey bundle and the relay protocol. Part 2
   is the end-to-end protocol: the key agreement, the Double Ratchet, message encryption,
   the session rules and the client store. Part 3 is files and photos: the blob cipher,
   resumable uploads and downloads through the relay and the attachment of a message.
   Part 4 is the profile: a display name and an avatar that a client sends to its
   contacts. Part 5 is replies, edits, delete for both, delivery and read receipts and
   disappearing messages. Part 6 is the post-quantum key agreement of every new session,
-  X25519 with ML-KEM-768, and the transition from the classical one.
+  X25519 with ML-KEM-768, and the transition from the classical one. Part 7 is the
+  safety number, Signal's numeric fingerprint of the two identity keys, and the mark of
+  a contact whose number you compared.
   [docs/threat-model.md](docs/threat-model.md)
   has two halves as well. The relay half lists
   [what the relay learns](docs/threat-model.md#what-the-relay-learns),
@@ -90,6 +92,19 @@ Python 3.14 and Docker.
    uv run sotto --data-dir alice add bob <the id that bob printed>      # terminal 1
    uv run sotto --data-dir bob add alice <the id that alice printed>    # terminal 2
    ```
+
+   Check that each id arrived unchanged: both commands print the same safety number, 60
+   digits in three rows, and a QR payload with the two halves the other way round.
+   Compare the digits together, then mark the contact:
+
+   ```sh
+   uv run sotto --data-dir alice verify bob         # terminal 1
+   uv run sotto --data-dir bob verify alice         # terminal 2
+   uv run sotto --data-dir alice verify bob mark    # after the numbers matched
+   ```
+
+   `sotto contacts` then shows `verified` after Bob's id, and `verify bob clear` drops
+   the mark. The mark stays on Alice's device: Bob does not learn of it.
 
 4. Chat, Bob first: an identity can receive once its client has connected one time,
    because that is when its prekey bundle reaches the relay.
@@ -173,8 +188,9 @@ What the alpha does not do yet:
   and the message log.
 - One device per identity, one-to-one chats, texts and files. No groups, no thumbnails
   from the command line and no history view: a chat prints what arrives while it runs.
-- Nothing checks that an id belongs to the person you think; ids are compared out of
-  band, by you.
+- Nothing checks that an id belongs to the person you think, unless you compare the
+  safety number with that person, in person or over a channel you trust; the client
+  only keeps your mark. The command-line client cannot scan a QR code.
 - No security audit.
 
 ## Run the relay

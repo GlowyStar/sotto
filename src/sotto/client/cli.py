@@ -45,6 +45,7 @@ from sotto.client.transport import (
     Written,
 )
 from sotto.crypto.identity import CryptoError, encode_user_id
+from sotto.crypto.safety_number import qr_payload, safety_number
 
 DEFAULT_RELAY = "ws://127.0.0.1:8765/ws"
 DEFAULT_DATA_DIRECTORY = Path.home() / ".sotto"
@@ -72,6 +73,8 @@ UNFINISHED_KEY = re.compile(r"\x1b(\[[0-?]*[ -/]*|O)?\Z")
 TIMER = re.compile(r"([0-9]{1,7})([smhdw])")
 TIMER_UNITS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
 QUOTE_SHOWN = 60
+GROUP_DIGITS = 5
+ROW_DIGITS = 20
 
 type Commands = argparse._SubParsersAction[argparse.ArgumentParser]
 
@@ -145,6 +148,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     receipts.add_argument("state", nargs="?", choices=("on", "off"))
     receipts.set_defaults(command=_read_receipts)
+
+    verify = commands.add_parser(
+        "verify", help="show the safety number of a contact; mark it verified or clear that"
+    )
+    verify.add_argument("name", help="the local name of the contact")
+    verify.add_argument("action", nargs="?", choices=("mark", "clear"))
+    verify.set_defaults(command=_verify)
     return parser
 
 
@@ -222,8 +232,9 @@ def _contacts(arguments: argparse.Namespace) -> int:
     with _client(arguments) as client:
         for contact, name in _names(client).items():
             sent = client.store.profile(contact)
+            mark = " verified" if client.store.is_verified(contact) else ""
             note = "" if sent is None else f" {_profile_note(client, sent)}"
-            print(f"{name} {encode_user_id(contact)}{note}")
+            print(f"{name} {encode_user_id(contact)}{mark}{note}")
     return 0
 
 
@@ -277,6 +288,29 @@ def _show_profile(arguments: argparse.Namespace) -> int:
         if arguments.avatar_to is not None:
             _write_avatar(arguments.avatar_to, avatar)
     return 0
+
+
+def _verify(arguments: argparse.Namespace) -> int:
+    with _client(arguments) as client:
+        contact = _contact_named(client, arguments.name)
+        if arguments.action == "mark":
+            client.mark_verified(contact)
+        elif arguments.action == "clear":
+            client.clear_verified(contact)
+        else:
+            _print_safety_number(client, contact, arguments.name)
+        state = "verified" if client.store.is_verified(contact) else "not verified"
+        print(f"{arguments.name} is {state}")
+    return 0
+
+
+def _print_safety_number(client: Client, contact: bytes, name: str) -> None:
+    number = safety_number(client.identity_key, contact)
+    print(f"safety number with {name}:")
+    for row in range(0, len(number), ROW_DIGITS):
+        groups = range(row, row + ROW_DIGITS, GROUP_DIGITS)
+        print(" ".join(number[start : start + GROUP_DIGITS] for start in groups))
+    print(f"qr payload: {qr_payload(client.identity_key, contact)}")
 
 
 def _read_receipts(arguments: argparse.Namespace) -> int:
