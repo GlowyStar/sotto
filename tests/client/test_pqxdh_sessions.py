@@ -61,6 +61,10 @@ def pq_ids_of(upload: PrekeyUpload | None) -> list[int]:
     return [prekey.id for prekey in upload.pq_one_time_prekeys]
 
 
+def made_version_2(envelope: PeerMessage) -> None:
+    envelope.version = 2
+
+
 def make_x3dh_session(alice: Client, bob: Client, relay: Relay) -> None:
     """The session of version 1 that Alice started and Bob accepted before both moved to
     version 2: section 16 run by hand on both stores, as a client of version 1 left them."""
@@ -218,6 +222,48 @@ def test_new_session_of_version_1_is_refused_and_changes_nothing(
 
     assert (received.text, received.result, received.ack) == (None, "X3DH_REFUSED", True)
     assert rows(bob.store) == store_before
+
+
+@pytest.mark.parametrize("resetting", ["initiator", "responder"])
+def test_session_of_version_1_that_was_never_accepted_is_refused_until_a_reset(
+    alice: Client, bob: Client, relay: Relay, resetting: str
+) -> None:
+    relay.publish(alice)
+    make_x3dh_session(alice, bob, relay)
+    with bob.store.transaction():
+        bob.store.connection.execute("DELETE FROM records")
+        bob.store.connection.execute("DELETE FROM sessions")
+    refused = [send(relay, alice, bob, f"refused {number}") for number in range(2)]
+    assert [bob.receive(delivered).result for delivered in refused] == ["X3DH_REFUSED"] * 2
+
+    if resetting == "initiator":
+        alice.start_session(bob.identity_key, relay.fetch(bob.identity_key))
+    else:
+        bob.start_session(alice.identity_key, relay.fetch(alice.identity_key))
+        assert alice.receive(send(relay, bob, alice, "reset")).text == "reset"
+    after = send(relay, alice, bob, "after the reset")
+
+    assert PeerMessage.FromString(after.payload).version == 2
+    assert bob.receive(after).text == "after the reset"
+
+
+def test_message_of_version_1_made_version_2_is_refused_and_changes_nothing(
+    alice: Client, bob: Client, relay: Relay
+) -> None:
+    make_x3dh_session(alice, bob, relay)
+    initial = send(relay, alice, bob, "initial")
+    store_before = rows(bob.store)
+
+    assert bob.receive(edit_envelope(initial, made_version_2)).result == "BAD_ENVELOPE"
+    assert rows(bob.store) == store_before
+    assert bob.receive(initial).text == "initial"
+    assert alice.receive(send(relay, bob, alice, "reply")).text == "reply"
+    later = send(relay, alice, bob, "later")
+    store_before = rows(bob.store)
+
+    assert bob.receive(edit_envelope(later, made_version_2)).result == "DECRYPT_FAILED"
+    assert rows(bob.store) == store_before
+    assert bob.receive(later).text == "later"
 
 
 def test_store_of_the_first_version_opens_and_rotates_to_a_pq_prekey(
