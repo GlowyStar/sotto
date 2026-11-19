@@ -96,21 +96,20 @@ def initiate(
         pinned_identity_dh_key=pinned_identity_dh_key,
     )
 
-    signed_prekey = bundle.signed_prekey.key
-    dh_outputs = [
-        dh(identity_dh_private_key, signed_prekey),
-        dh(ephemeral_private_key, bundle.identity_dh_key),
-        dh(ephemeral_private_key, signed_prekey),
-    ]
-    if bundle.one_time_prekey is not None:
-        dh_outputs.append(dh(ephemeral_private_key, bundle.one_time_prekey.key))
-
-    initiator = identity_key + derive_x25519_public_key(identity_dh_private_key)
-    responder = bundle.identity + bundle.identity_dh_key
-    ephemeral_key = derive_x25519_public_key(ephemeral_private_key)
+    dh_outputs = initiator_dh_outputs(
+        bundle,
+        identity_dh_private_key=identity_dh_private_key,
+        ephemeral_private_key=ephemeral_private_key,
+    )
     return KeyAgreement(
-        shared_secret=_derive_shared_secret(dh_outputs),
-        associated_data=END_TO_END_VERSION + initiator + responder + ephemeral_key,
+        shared_secret=derive_shared_secret(b"".join(dh_outputs), info=KEY_DERIVATION_INFO),
+        associated_data=initiator_associated_data(
+            END_TO_END_VERSION,
+            bundle,
+            identity_key=identity_key,
+            identity_dh_private_key=identity_dh_private_key,
+            ephemeral_private_key=ephemeral_private_key,
+        ),
     )
 
 
@@ -147,14 +146,47 @@ def respond(
     """
     _require_length("identity_key", identity_key, KEY_LENGTH)
     _require_length("ephemeral_key", ephemeral_key, KEY_LENGTH)
+    check_initial_header(
+        sender_identity_key,
+        identity_dh_key=sender_identity_dh_key,
+        signature=sender_identity_dh_signature,
+        pinned_identity_dh_key=pinned_identity_dh_key,
+    )
+
+    dh_outputs = responder_dh_outputs(
+        identity_dh_private_key=identity_dh_private_key,
+        signed_prekey_private_key=signed_prekey_private_key,
+        one_time_prekey_private_key=one_time_prekey_private_key,
+        sender_identity_dh_key=sender_identity_dh_key,
+        ephemeral_key=ephemeral_key,
+    )
+    initiator = sender_identity_key + sender_identity_dh_key
+    responder = identity_key + derive_x25519_public_key(identity_dh_private_key)
+    return KeyAgreement(
+        shared_secret=derive_shared_secret(b"".join(dh_outputs), info=KEY_DERIVATION_INFO),
+        associated_data=END_TO_END_VERSION + initiator + responder + ephemeral_key,
+    )
+
+
+def check_initial_header(
+    sender_identity_key: bytes,
+    *,
+    identity_dh_key: bytes,
+    signature: bytes,
+    pinned_identity_dh_key: bytes | None,
+) -> None:
+    """Steps 1 and 2 of section 16.8, before any Diffie-Hellman value.
+
+    Raises:
+        BadInitialHeaderError: The signature does not verify under the sender.
+        IdentityKeyMismatchError: The key is not the pinned one.
+    """
     if pinned_identity_dh_key is not None:
         _require_length("pinned_identity_dh_key", pinned_identity_dh_key, KEY_LENGTH)
 
     try:
         verify_identity_dh_key(
-            sender_identity_key,
-            identity_dh_key=sender_identity_dh_key,
-            signature=sender_identity_dh_signature,
+            sender_identity_key, identity_dh_key=identity_dh_key, signature=signature
         )
     except BadBundleError as error:
         raise BadInitialHeaderError(
@@ -162,12 +194,45 @@ def respond(
         ) from error
 
     has_pin = pinned_identity_dh_key is not None
-    carries_another_key = sender_identity_dh_key != pinned_identity_dh_key
+    carries_another_key = identity_dh_key != pinned_identity_dh_key
     if has_pin and carries_another_key:
         raise IdentityKeyMismatchError(
             "the initial header carries another X25519 identity key than the pinned one"
         )
 
+
+def initiator_dh_outputs(
+    bundle: Bundle, *, identity_dh_private_key: bytes, ephemeral_private_key: bytes
+) -> list[bytes]:
+    """DH1 to DH4 of step 3 of section 16.6, DH4 only with a one-time prekey.
+
+    Raises:
+        ZeroDhError: A key of the bundle has small order.
+    """
+    signed_prekey = bundle.signed_prekey.key
+    dh_outputs = [
+        dh(identity_dh_private_key, signed_prekey),
+        dh(ephemeral_private_key, bundle.identity_dh_key),
+        dh(ephemeral_private_key, signed_prekey),
+    ]
+    if bundle.one_time_prekey is not None:
+        dh_outputs.append(dh(ephemeral_private_key, bundle.one_time_prekey.key))
+    return dh_outputs
+
+
+def responder_dh_outputs(
+    *,
+    identity_dh_private_key: bytes,
+    signed_prekey_private_key: bytes,
+    one_time_prekey_private_key: bytes | None,
+    sender_identity_dh_key: bytes,
+    ephemeral_key: bytes,
+) -> list[bytes]:
+    """DH1 to DH4 of step 5 of section 16.8, DH4 only with a one-time prekey.
+
+    Raises:
+        ZeroDhError: `sender_identity_dh_key` or `ephemeral_key` has small order.
+    """
     dh_outputs = [
         dh(signed_prekey_private_key, sender_identity_dh_key),
         dh(identity_dh_private_key, ephemeral_key),
@@ -175,20 +240,30 @@ def respond(
     ]
     if one_time_prekey_private_key is not None:
         dh_outputs.append(dh(one_time_prekey_private_key, ephemeral_key))
-
-    initiator = sender_identity_key + sender_identity_dh_key
-    responder = identity_key + derive_x25519_public_key(identity_dh_private_key)
-    return KeyAgreement(
-        shared_secret=_derive_shared_secret(dh_outputs),
-        associated_data=END_TO_END_VERSION + initiator + responder + ephemeral_key,
-    )
+    return dh_outputs
 
 
-def _derive_shared_secret(dh_outputs: list[bytes]) -> bytes:
+def initiator_associated_data(
+    version: bytes,
+    bundle: Bundle,
+    *,
+    identity_key: bytes,
+    identity_dh_private_key: bytes,
+    ephemeral_private_key: bytes,
+) -> bytes:
+    """The 161 bytes of section 16.5 under the version byte of the key agreement."""
+    initiator = identity_key + derive_x25519_public_key(identity_dh_private_key)
+    responder = bundle.identity + bundle.identity_dh_key
+    ephemeral_key = derive_x25519_public_key(ephemeral_private_key)
+    return version + initiator + responder + ephemeral_key
+
+
+def derive_shared_secret(key_material: bytes, *, info: bytes) -> bytes:
+    """SK of section 16.4, or of section 41.4 with the shared secret of the KEM."""
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=SHARED_SECRET_LENGTH,
         salt=KEY_DERIVATION_SALT,
-        info=KEY_DERIVATION_INFO,
+        info=info,
     )
-    return hkdf.derive(KEY_MATERIAL_PREFIX + b"".join(dh_outputs))
+    return hkdf.derive(KEY_MATERIAL_PREFIX + key_material)

@@ -6,6 +6,7 @@ from google.protobuf.message import DecodeError
 
 from sotto.crypto.blob import DIGEST_LENGTH, FILE_KEY_LENGTH, MAX_FILE_BYTES
 from sotto.crypto.identity import KEY_LENGTH, SIGNATURE_LENGTH, CryptoError
+from sotto.crypto.pqxdh import KEM_CIPHERTEXT_LENGTH
 from sotto.crypto.ratchet import HEADER_LENGTH, MESSAGE_NONCE_LENGTH, TAG_LENGTH
 from sotto.proto.sotto_pb2 import (
     Attachment,
@@ -19,10 +20,12 @@ from sotto.proto.sotto_pb2 import (
     Timer,
 )
 
-VERSION = 1
+X3DH_VERSION = 1
+PQXDH_VERSION = 2
+VERSIONS = frozenset({X3DH_VERSION, PQXDH_VERSION})
 PADDING_BLOCK = 256
-MAX_TEXT_BYTES = 65019
-MAX_CONTENT_BYTES = 65023
+MAX_TEXT_BYTES = 63995
+MAX_CONTENT_BYTES = 63999
 PADDING_MARK = b"\x80"
 SEALING_OVERHEAD = MESSAGE_NONCE_LENGTH + TAG_LENGTH
 BLOB_ID_LENGTH = 16
@@ -374,14 +377,14 @@ def parse_envelope(payload: bytes) -> PeerMessage:
 
     Raises:
         BadEnvelopeError: The payload is no PeerMessage, or a field breaks its length.
-        UnsupportedVersionError: The version is not 1.
+        UnsupportedVersionError: The version is neither 1 nor 2.
     """
     try:
         envelope = PeerMessage.FromString(payload)
     except DecodeError as error:
         raise BadEnvelopeError("the payload is not a PeerMessage") from error
 
-    if envelope.version != VERSION:
+    if envelope.version not in VERSIONS:
         raise UnsupportedVersionError(f"the envelope has version {envelope.version}")
 
     padded_length = len(envelope.ciphertext) - SEALING_OVERHEAD
@@ -400,4 +403,8 @@ def parse_envelope(payload: bytes) -> PeerMessage:
         )
         if lengths != (KEY_LENGTH, SIGNATURE_LENGTH, KEY_LENGTH):
             raise BadEnvelopeError("a field of the initial header breaks its length")
+        is_pqxdh = envelope.version == PQXDH_VERSION
+        has_another_ciphertext = len(initial_header.kem_ciphertext) != KEM_CIPHERTEXT_LENGTH
+        if is_pqxdh and has_another_ciphertext:
+            raise BadEnvelopeError("the KEM ciphertext of the header breaks its length")
     return envelope

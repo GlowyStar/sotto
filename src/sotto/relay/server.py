@@ -20,6 +20,7 @@ from sotto.crypto.identity import (
     LoginRefusedError,
     verify_identity_dh_key,
     verify_login,
+    verify_pq_prekey,
     verify_signed_prekey,
 )
 from sotto.proto.sotto_pb2 import (
@@ -55,6 +56,7 @@ from sotto.relay.settings import Settings
 from sotto.relay.storage import (
     BlobNotFoundError,
     BlobTooLargeError,
+    Fetched,
     QueueFullError,
     QuotaFullError,
     Storage,
@@ -243,10 +245,13 @@ class Relay:
         try:
             connection.logger.info("logged in")
             self.metrics.count("sotto_logins_total")
-            count = self.storage.count_one_time_prekeys(identity_key)
             logged_in = ServerFrame(
                 logged_in=LoggedIn(
-                    one_time_prekey_count=count, blob_max_bytes=self.settings.blob_max_bytes
+                    one_time_prekey_count=self.storage.count_one_time_prekeys(identity_key),
+                    blob_max_bytes=self.settings.blob_max_bytes,
+                    pq_one_time_prekey_count=self.storage.count_pq_one_time_prekeys(
+                        identity_key
+                    ),
                 )
             )
             await connection.send(logged_in.SerializeToString())
@@ -363,8 +368,18 @@ class Relay:
                 signed_prekey=signed_prekey.key,
                 signature=signed_prekey.signature,
             )
-            count = self.storage.store_bundle(
-                identity_key, upload, cap=self.settings.one_time_prekey_cap
+            pq_prekeys = list(upload.pq_one_time_prekeys)
+            if upload.HasField("pq_prekey"):
+                pq_prekeys.append(upload.pq_prekey)
+            for pq_prekey in pq_prekeys:
+                verify_pq_prekey(
+                    identity_key, pq_prekey=pq_prekey.key, signature=pq_prekey.signature
+                )
+            counts = self.storage.store_bundle(
+                identity_key,
+                upload,
+                cap=self.settings.one_time_prekey_cap,
+                pq_cap=self.settings.pq_one_time_prekey_cap,
             )
         except BadBundleError:
             return ServerFrame(error=Error(code=ErrorCode.BAD_BUNDLE))
@@ -372,7 +387,10 @@ class Relay:
             return ServerFrame(error=Error(code=ErrorCode.IDENTITY_KEY_MISMATCH))
         except StorageFullError:
             return ServerFrame(error=Error(code=ErrorCode.STORAGE_FULL))
-        return ServerFrame(bundle_stored=BundleStored(one_time_prekey_count=count))
+        stored = BundleStored(
+            one_time_prekey_count=counts.one_time, pq_one_time_prekey_count=counts.pq_one_time
+        )
+        return ServerFrame(bundle_stored=stored)
 
     def answer_send(self, sender: bytes, send: Send) -> ServerFrame:
         """Runs steps 2 to 6 of section 10.2; the recipient's delivery sends the message."""
@@ -403,16 +421,18 @@ class Relay:
         """Runs steps 2 to 4 of section 9.2, with the handout of section 9.3."""
         target = fetch.identity
         if self.handout_buckets.has_token(target):
-            bundle = self.storage.fetch_bundle(target)
+            fetched = self.storage.fetch_bundle(target)
         else:
             self.metrics.count("sotto_limit_refusals_total", kind="handout_bucket")
             bundle = self.storage.read_bundle(target)
-        if bundle is None:
+            fetched = None if bundle is None else Fetched(bundle=bundle, handed_out=False)
+        if fetched is None:
             return ServerFrame(error=Error(code=ErrorCode.NOT_FOUND, identity=target))
 
-        has_one_time_prekey = bundle.HasField("one_time_prekey")
-        if has_one_time_prekey:
+        bundle = fetched.bundle
+        if fetched.handed_out:
             self.handout_buckets.take(target)
+        has_one_time_prekey = bundle.HasField("one_time_prekey")
         handed_out = "yes" if has_one_time_prekey else "no"
         self.metrics.count("sotto_bundle_fetches_total", one_time_prekey=handed_out)
         return ServerFrame(bundle=bundle)

@@ -65,7 +65,7 @@ GOOD_INITIAL_HEADER = InitialHeader(
 
 
 def test_constants_are_those_of_section_24_1() -> None:
-    assert (PADDING_BLOCK, MAX_TEXT_BYTES) == (256, 65019)
+    assert (PADDING_BLOCK, MAX_TEXT_BYTES) == (256, 63995)
 
 
 @pytest.mark.parametrize(
@@ -111,11 +111,11 @@ def test_content_without_a_known_member_is_unknown_content() -> None:
             decode_content(pad(content))
 
 
-def test_largest_text_fills_254_blocks_and_one_byte_more_is_refused() -> None:
+def test_largest_text_fills_250_blocks_and_one_byte_more_is_refused() -> None:
     largest = "x" * MAX_TEXT_BYTES
 
-    assert len(Content(text=largest).SerializeToString()) == 65023
-    assert len(encode_text(largest)) == 254 * PADDING_BLOCK
+    assert len(Content(text=largest).SerializeToString()) == 63999
+    assert len(encode_text(largest)) == 250 * PADDING_BLOCK
     assert len(encode_text("")) == PADDING_BLOCK
     with pytest.raises(TextTooLongError):
         encode_text(largest + "x")
@@ -388,13 +388,13 @@ def test_longest_contents_are_those_of_section_38_4() -> None:
     longest_quote = Quote(
         message_id=bytes(16), own=True, text="\u00e9" * (MAX_QUOTE_BYTES // 2)
     )
-    longest_reply = "x" * 64732
+    longest_reply = "x" * 63708
     receipt = Content(receipt=Receipt(read=True, message_ids=[bytes(16)] * MAX_RECEIPT_IDS))
 
-    assert MAX_CONTENT_BYTES == 65023
-    assert len(unpad(encode_edit(bytes(16), "x" * 64997))) == MAX_CONTENT_BYTES
+    assert MAX_CONTENT_BYTES == 63999
+    assert len(unpad(encode_edit(bytes(16), "x" * 63973))) == MAX_CONTENT_BYTES
     with pytest.raises(TextTooLongError):
-        encode_edit(bytes(16), "x" * 64998)
+        encode_edit(bytes(16), "x" * 63974)
     reply = encode_text(longest_reply, quote=longest_quote, expires_after=MAX_TIMER_SECONDS)
     assert len(unpad(reply)) == MAX_CONTENT_BYTES
     with pytest.raises(TextTooLongError):

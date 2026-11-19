@@ -45,6 +45,26 @@ SCHEMA = (
         UNIQUE (identity_key, prekey_id)
     ) STRICT
     """,
+    # The signed last-resort post-quantum prekey of an identity and its one-time
+    # post-quantum prekeys (docs/protocol.md, section 42.1).
+    """
+    CREATE TABLE IF NOT EXISTS pq_prekeys (
+        identity_key BLOB PRIMARY KEY,
+        prekey_id INTEGER NOT NULL,
+        public_key BLOB NOT NULL,
+        signature BLOB NOT NULL
+    ) STRICT, WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pq_one_time_prekeys (
+        position INTEGER PRIMARY KEY,
+        identity_key BLOB NOT NULL,
+        prekey_id INTEGER NOT NULL,
+        public_key BLOB NOT NULL,
+        signature BLOB NOT NULL,
+        UNIQUE (identity_key, prekey_id)
+    ) STRICT
+    """,
     # AUTOINCREMENT never gives a position out twice, so the cursor of a delivery that
     # passed the newest row cannot miss a row stored after that row was deleted.
     """
@@ -97,6 +117,29 @@ STORE_ONE_TIME_PREKEY = """
     ON CONFLICT (identity_key, prekey_id) DO NOTHING
 """
 COUNT_ONE_TIME_PREKEYS = "SELECT count(*) FROM one_time_prekeys WHERE identity_key = ?"
+STORE_PQ_PREKEY = """
+    INSERT INTO pq_prekeys VALUES (?, ?, ?, ?)
+    ON CONFLICT (identity_key) DO UPDATE SET
+        prekey_id = excluded.prekey_id,
+        public_key = excluded.public_key,
+        signature = excluded.signature
+"""
+STORE_PQ_ONE_TIME_PREKEY = """
+    INSERT INTO pq_one_time_prekeys (identity_key, prekey_id, public_key, signature)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (identity_key, prekey_id) DO NOTHING
+"""
+COUNT_PQ_ONE_TIME_PREKEYS = """
+    SELECT count(*) FROM pq_one_time_prekeys WHERE identity_key = ?
+"""
+READ_PQ_PREKEY = """
+    SELECT prekey_id, public_key, signature FROM pq_prekeys WHERE identity_key = ?
+"""
+TAKE_OLDEST_PQ_ONE_TIME_PREKEY = """
+    DELETE FROM pq_one_time_prekeys
+    WHERE position = (SELECT min(position) FROM pq_one_time_prekeys WHERE identity_key = ?)
+    RETURNING prekey_id, public_key, signature
+"""
 READ_IDENTITY = """
     SELECT identity_dh_key, identity_dh_signature,
            signed_prekey_id, signed_prekey, signed_prekey_signature
@@ -196,6 +239,16 @@ class BlobPut(NamedTuple):
     completes: bool
 
 
+class PrekeyCounts(NamedTuple):
+    one_time: int
+    pq_one_time: int
+
+
+class Fetched(NamedTuple):
+    bundle: Bundle
+    handed_out: bool
+
+
 class Swept(NamedTuple):
     messages: int
     blobs: int
@@ -235,8 +288,15 @@ class Storage:
         count: int = row[0]
         return count
 
-    def store_bundle(self, identity_key: bytes, upload: UploadBundle, *, cap: int) -> int:
-        """Runs step 4 of docs/protocol.md, section 9.1, and returns the count of step 5.
+    def count_pq_one_time_prekeys(self, identity_key: bytes) -> int:
+        row = self.connection.execute(COUNT_PQ_ONE_TIME_PREKEYS, (identity_key,)).fetchone()
+        count: int = row[0]
+        return count
+
+    def store_bundle(
+        self, identity_key: bytes, upload: UploadBundle, *, cap: int, pq_cap: int
+    ) -> PrekeyCounts:
+        """Runs step 4 of docs/protocol.md, section 9.1, and returns the counts of step 5.
 
         Raises:
             IdentityKeyMismatchError: Another X25519 identity key is stored for the identity.
@@ -266,26 +326,52 @@ class Storage:
                     STORE_ONE_TIME_PREKEY, (identity_key, prekey.id, prekey.key)
                 )
                 count += stored.rowcount
-        return count
 
-    def fetch_bundle(self, identity: bytes) -> Bundle | None:
-        """Returns the bundle of an identity with the one-time prekey that was stored first.
+            if upload.HasField("pq_prekey"):
+                pq_prekey = upload.pq_prekey
+                pq_row = (identity_key, pq_prekey.id, pq_prekey.key, pq_prekey.signature)
+                self.connection.execute(STORE_PQ_PREKEY, pq_row)
+            pq_count = self.count_pq_one_time_prekeys(identity_key)
+            for pq_one_time_prekey in upload.pq_one_time_prekeys:
+                if pq_count >= pq_cap:
+                    break
+                pq_row = (
+                    identity_key,
+                    pq_one_time_prekey.id,
+                    pq_one_time_prekey.key,
+                    pq_one_time_prekey.signature,
+                )
+                pq_count += self.connection.execute(STORE_PQ_ONE_TIME_PREKEY, pq_row).rowcount
+        return PrekeyCounts(one_time=count, pq_one_time=pq_count)
 
-        The prekey is deleted in the transaction that reads the bundle. When that
-        transaction cannot be written, the bundle comes without a one-time prekey and the
-        stored ones stay. The result is None for an identity that is not registered.
+    def fetch_bundle(self, identity: bytes) -> Fetched | None:
+        """Returns the bundle of an identity with the one-time prekey and the one-time
+        post-quantum prekey that were stored first, and whether either went out.
+
+        The prekeys are deleted in the transaction that reads the bundle. When that
+        transaction cannot be written, the bundle comes without them and the stored ones
+        stay. The result is None for an identity that is not registered.
         """
         try:
             with self._write():
                 bundle = self.read_bundle(identity)
                 taken = self.connection.execute(TAKE_OLDEST_ONE_TIME_PREKEY, (identity,))
                 one_time_prekey = taken.fetchone()
+                taken = self.connection.execute(TAKE_OLDEST_PQ_ONE_TIME_PREKEY, (identity,))
+                pq_one_time_prekey = taken.fetchone()
         except StorageFullError:
-            return self.read_bundle(identity)
+            bundle = self.read_bundle(identity)
+            return None if bundle is None else Fetched(bundle=bundle, handed_out=False)
 
-        if bundle is not None and one_time_prekey is not None:
+        if bundle is None:
+            return None
+        if one_time_prekey is not None:
             bundle.one_time_prekey.id, bundle.one_time_prekey.key = one_time_prekey
-        return bundle
+        if pq_one_time_prekey is not None:
+            prekey_id, key, signature = pq_one_time_prekey
+            bundle.pq_prekey.CopyFrom(SignedPrekey(id=prekey_id, key=key, signature=signature))
+        handed_out = one_time_prekey is not None or pq_one_time_prekey is not None
+        return Fetched(bundle=bundle, handed_out=handed_out)
 
     def store_message(
         self, sender: bytes, send: Send, *, max_messages: int, max_bytes: int
@@ -460,18 +546,25 @@ class Storage:
         return page_count * page_size
 
     def read_bundle(self, identity: bytes) -> Bundle | None:
-        """Returns the bundle of an identity without a one-time prekey, None when unknown."""
+        """Returns the bundle of an identity without one-time prekeys, with its last-resort
+        post-quantum prekey when it has one; None for an identity that is not registered."""
         row = self.connection.execute(READ_IDENTITY, (identity,)).fetchone()
         if row is None:
             return None
 
         identity_dh_key, identity_dh_signature, prekey_id, prekey, prekey_signature = row
-        return Bundle(
+        bundle = Bundle(
             identity=identity,
             identity_dh_key=identity_dh_key,
             identity_dh_signature=identity_dh_signature,
             signed_prekey=SignedPrekey(id=prekey_id, key=prekey, signature=prekey_signature),
         )
+        pq_row = self.connection.execute(READ_PQ_PREKEY, (identity,)).fetchone()
+        if pq_row is not None:
+            pq_id, pq_key, pq_signature = pq_row
+            pq_prekey = SignedPrekey(id=pq_id, key=pq_key, signature=pq_signature)
+            bundle.pq_prekey.CopyFrom(pq_prekey)
+        return bundle
 
     @contextmanager
     def _write(self) -> Iterator[None]:

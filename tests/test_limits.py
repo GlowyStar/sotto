@@ -10,6 +10,7 @@ from relay_harness import (
     Clock,
     OpenClient,
     RawClient,
+    build_pq_upload,
     build_upload,
     make_public_key,
     messages_in,
@@ -267,3 +268,22 @@ async def test_fetch_of_a_target_without_one_time_prekeys_takes_no_handout_token
 
     assert not any(bundle.HasField("one_time_prekey") for bundle in without_keys)
     assert after_the_upload.one_time_prekey.id == 7
+
+
+async def test_one_handout_bucket_covers_both_kinds_of_one_time_prekey(
+    settings: Settings, open_client: OpenClient
+) -> None:
+    limited = replace(settings, handout_bucket_size=1)
+    owner_seed = os.urandom(32)
+    owner_key = derive_identity_key(owner_seed)
+    upload = build_pq_upload(owner_seed, 1, [2, 3])
+    upload.one_time_prekeys.add(id=7, key=make_public_key())
+
+    async with running_relay(limited) as url:
+        await register(open_client, url, owner_seed, upload)
+        fetcher = await log_in(open_client, url, os.urandom(32))
+        with_a_token, without_a_token = [await fetch(fetcher, owner_key) for _ in range(2)]
+
+    assert (with_a_token.one_time_prekey.id, with_a_token.pq_prekey.id) == (7, 2)
+    assert not without_a_token.HasField("one_time_prekey")
+    assert without_a_token.pq_prekey == upload.pq_prekey

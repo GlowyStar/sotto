@@ -45,6 +45,21 @@ TABLES = (
         private_key BLOB NOT NULL
     ) STRICT
     """,
+    # A post-quantum prekey with `signed_prekey_id` is the last-resort key of that signed
+    # prekey and is deleted with it; one without is a one-time key (section 42.2).
+    """
+    CREATE TABLE IF NOT EXISTS pq_prekeys (
+        prekey_id INTEGER PRIMARY KEY,
+        seed BLOB NOT NULL,
+        signed_prekey_id INTEGER UNIQUE
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pq_prekey_ids (
+        only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+        last_id INTEGER NOT NULL
+    ) STRICT
+    """,
     """
     CREATE TABLE IF NOT EXISTS contacts (
         identity_key BLOB PRIMARY KEY,
@@ -248,8 +263,31 @@ READ_SIGNED_PREKEY = """
     WHERE prekey_id = ? AND (replaced_at IS NULL OR replaced_at > ?)
 """
 READ_NEWEST_SIGNED_PREKEY = """
-    SELECT prekey_id, private_key, made_at, confirmed FROM signed_prekeys
-    WHERE replaced_at IS NULL
+    SELECT s.prekey_id, s.private_key, s.made_at, s.confirmed, p.prekey_id, p.seed
+    FROM signed_prekeys s LEFT JOIN pq_prekeys p ON p.signed_prekey_id = s.prekey_id
+    WHERE s.replaced_at IS NULL
+"""
+READ_PQ_PREKEY = """
+    SELECT seed, signed_prekey_id IS NULL FROM pq_prekeys
+    WHERE prekey_id = ? AND (signed_prekey_id IS NULL OR signed_prekey_id IN (
+        SELECT prekey_id FROM signed_prekeys WHERE replaced_at IS NULL OR replaced_at > ?
+    ))
+"""
+COUNT_PQ_PREKEY = """
+    UPDATE pq_prekey_ids SET last_id = last_id + 1
+    WHERE last_id < ? RETURNING last_id
+"""
+SEED_PQ_PREKEY_IDS = "INSERT OR IGNORE INTO pq_prekey_ids VALUES (1, 0)"
+DELETE_LOWEST_PQ_ONE_TIME_PREKEYS = """
+    DELETE FROM pq_prekeys WHERE prekey_id IN (
+        SELECT prekey_id FROM pq_prekeys WHERE signed_prekey_id IS NULL
+        ORDER BY prekey_id LIMIT ?
+    )
+"""
+DELETE_EXPIRED_PQ_PREKEYS = """
+    DELETE FROM pq_prekeys WHERE signed_prekey_id IN (
+        SELECT prekey_id FROM signed_prekeys WHERE replaced_at <= ?
+    )
 """
 READ_ONE_TIME_PREKEY = "SELECT private_key FROM one_time_prekeys WHERE prekey_id = ?"
 COUNT_SIGNED_PREKEY = """
@@ -391,11 +429,27 @@ class Identity:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class StoredPqPrekey:
+    prekey_id: int
+    seed: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StoredSignedPrekey:
+    """A signed prekey with its last-resort post-quantum prekey, which a store of the
+    first version lacks."""
+
     prekey_id: int
     private_key: bytes = field(repr=False)
     made_at: int
     confirmed: bool
+    pq_prekey: StoredPqPrekey | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HeldPqPrekey:
+    seed: bytes = field(repr=False)
+    is_one_time: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -405,6 +459,11 @@ class StoredSession:
     associated_data: bytes
     state: RatchetState
     initial_header: bytes | None
+
+    @property
+    def version(self) -> int:
+        """The end-to-end version of the key agreement that made the session (41.10)."""
+        return self.associated_data[0]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -540,6 +599,7 @@ class Store:
             for table in TABLES:
                 self.connection.execute(table)
             self.connection.execute(SEED_MESSAGE_NUMBER)
+            self.connection.execute(SEED_PQ_PREKEY_IDS)
 
     def close(self) -> None:
         self.connection.close()
@@ -590,13 +650,38 @@ class Store:
         row = self.connection.execute(READ_NEWEST_SIGNED_PREKEY).fetchone()
         if row is None:
             return None
-        prekey_id, private_key, made_at, confirmed = row
+        prekey_id, private_key, made_at, confirmed, pq_prekey_id, pq_seed = row
+        pq_prekey = None
+        if pq_prekey_id is not None:
+            pq_prekey = StoredPqPrekey(prekey_id=pq_prekey_id, seed=pq_seed)
         return StoredSignedPrekey(
             prekey_id=prekey_id,
             private_key=private_key,
             made_at=made_at,
             confirmed=confirmed == 1,
+            pq_prekey=pq_prekey,
         )
+
+    def pq_prekey(self, prekey_id: int, *, replaced_after: int) -> HeldPqPrekey | None:
+        """A one-time post-quantum prekey, or the last-resort one of a signed prekey that
+        is held by `signed_prekey`; any other counts as not held (section 42.2)."""
+        row = self.connection.execute(READ_PQ_PREKEY, (prekey_id, replaced_after)).fetchone()
+        if row is None:
+            return None
+        return HeldPqPrekey(seed=bytes(row[0]), is_one_time=row[1] == 1)
+
+    def pq_prekey_ids_left(self) -> int:
+        """The ids that the counter of post-quantum prekeys can still give."""
+        last_id: int = self.connection.execute("SELECT last_id FROM pq_prekey_ids").fetchone()[
+            0
+        ]
+        return LAST_PREKEY_ID - last_id
+
+    def pq_one_time_prekey_count(self) -> int:
+        count: int = self.connection.execute(
+            "SELECT count(*) FROM pq_prekeys WHERE signed_prekey_id IS NULL"
+        ).fetchone()[0]
+        return count
 
     def one_time_prekey_ids_left(self) -> int:
         """The ids that the counter of one-time prekeys can still give (section 21.1)."""
@@ -675,6 +760,7 @@ class Store:
     def delete_signed_prekeys(self, *, replaced_at_or_before: int) -> None:
         """Deletes the signed prekeys replaced at or before the time, with the records that
         name them and whose session is gone (section 21.2, step 1)."""
+        self._change(DELETE_EXPIRED_PQ_PREKEYS, (replaced_at_or_before,))
         self._change(
             "DELETE FROM signed_prekeys WHERE replaced_at <= ?", (replaced_at_or_before,)
         )
@@ -695,6 +781,28 @@ class Store:
 
     def delete_lowest_one_time_prekeys(self, count: int) -> None:
         self._change(DELETE_LOWEST_ONE_TIME_PREKEYS, (count,))
+
+    def add_pq_prekey(self, seed: bytes, *, signed_prekey_id: int | None) -> int | None:
+        """Saves a post-quantum prekey under the next id of its counter, the last-resort
+        key of `signed_prekey_id` or, without one, a one-time key; None, and nothing
+        saved, once the counter is at LAST_PREKEY_ID."""
+        counted = self._change(COUNT_PQ_PREKEY, (LAST_PREKEY_ID,)).fetchone()
+        if counted is None:
+            return None
+        prekey_id: int = counted[0]
+        self._change(
+            "INSERT INTO pq_prekeys VALUES (?, ?, ?)", (prekey_id, seed, signed_prekey_id)
+        )
+        return prekey_id
+
+    def delete_pq_one_time_prekey(self, prekey_id: int) -> None:
+        self._change(
+            "DELETE FROM pq_prekeys WHERE prekey_id = ? AND signed_prekey_id IS NULL",
+            (prekey_id,),
+        )
+
+    def delete_lowest_pq_one_time_prekeys(self, count: int) -> None:
+        self._change(DELETE_LOWEST_PQ_ONE_TIME_PREKEYS, (count,))
 
     def contacts(self) -> list[tuple[bytes, str | None]]:
         """Every contact with the local name the user gave it, by name."""

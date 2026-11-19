@@ -654,9 +654,9 @@ async def test_expired_signed_prekey_is_deleted_at_start_before_any_dial(
 ) -> None:
     clock = Clock()
     alice = Client(make_client("alice").store, clock=clock)
-    alice.make_prekeys(0)
+    alice.make_prekeys(0, 0)
     clock.advance(1)
-    alice.make_prekeys(0)
+    alice.make_prekeys(0, 0)
     clock.advance(SIGNED_PREKEY_GRACE_SECONDS + 1)
 
     def signed_prekeys() -> int:

@@ -496,7 +496,7 @@ async def test_blob_stored_is_sent_after_the_commit_of_the_piece(
 ) -> None:
     uploader, recipient_seed = os.urandom(32), os.urandom(32)
     recipient = derive_identity_key(recipient_seed)
-    storage.store_bundle(recipient, build_upload(recipient_seed), cap=100)
+    storage.store_bundle(recipient, build_upload(recipient_seed), cap=100, pq_cap=40)
     start = StartBlob(blob_id=os.urandom(16), recipient=recipient, length=100)
     storage.start_blob(uploader, start, max_bytes=100, quota_bytes=100)
     put = PutBlob(blob_id=start.blob_id, offset=0, data=os.urandom(100))
@@ -620,7 +620,7 @@ def test_deleted_blob_is_in_no_file_of_the_database_after_the_sweep(
 
     storage = Storage(settings.database, max_pages=settings.max_pages, clock=clock)
     with closing(storage):
-        storage.store_bundle(recipient, build_upload(recipient_seed), cap=100)
+        storage.store_bundle(recipient, build_upload(recipient_seed), cap=100, pq_cap=40)
         storage.start_blob(uploader, start, max_bytes=len(blob), quota_bytes=len(blob))
         for put in pieces_of(start, blob):
             storage.put_blob(uploader, put)

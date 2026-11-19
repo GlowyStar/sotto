@@ -23,6 +23,7 @@ from sotto.crypto.identity import (
     encode_user_id,
     identity_dh_string,
     login_string,
+    pq_prekey_string,
     sign_identity_dh_key,
     sign_login,
     sign_signed_prekey,
@@ -201,11 +202,17 @@ def test_signed_strings_of_two_purposes_never_coincide(
         ),
         identity_dh_string(identity_key=identity_key, identity_dh_key=identity_dh_key),
         signed_prekey_string(identity_key=other_identity_key, signed_prekey=signed_prekey),
+        pq_prekey_string(identity_key=identity_key, pq_prekey=signed_prekey * 37),
     ]
     prefixes = [string.split(b"\x00", 1)[0] for string in strings]
 
-    assert len(set(strings)) == 3
-    assert prefixes == [b"sotto/1 login", b"sotto/1 identity-dh", b"sotto/1 signed-prekey"]
+    assert len(set(strings)) == 4
+    assert prefixes == [
+        b"sotto/1 login",
+        b"sotto/1 identity-dh",
+        b"sotto/1 signed-prekey",
+        b"sotto/1 ml-kem-768-prekey",
+    ]
     assert strings[0].endswith(server_name.encode("ascii") + server_nonce + client_nonce)
 
 

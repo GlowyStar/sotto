@@ -580,7 +580,10 @@ What it does not cover, because it stays on disk:
   messages if it also recorded them.
 - The first messages of a session, on the side of the responder. They can be opened from
   the recorded traffic with the private keys of the responder's X25519 identity key and
-  signed prekey and, when one was used, of the one-time prekey. The one-time prekey
+  signed prekey and, when one was used, of the one-time prekey; for a session of
+  version 2 also with the private key of the post-quantum prekey it used, which a
+  one-time one loses when its first message is accepted and a last-resort one with its
+  signed prekey (protocol, section 42.2). The one-time prekey
   private key is deleted when the first of those messages is accepted. The private key
   of a signed prekey is deleted 37 days after the client made the next one, which it
   does after a login once the key is 7 days old: with the defaults about 44 days after
@@ -675,8 +678,11 @@ Everything in the envelope but the sealed text is readable (protocol, sections 1
   first of a session. The relay sees who started a session with whom, when, and when
   the initiator received the first answer, because the header stops then.
 - The initial header: the X25519 identity key of the sender with its signature, the
-  ephemeral key, and the ids of the prekeys that were used, which also tell whether the
-  session has a one-time prekey.
+  ephemeral key, the KEM ciphertext, and the ids of the prekeys that were used, which
+  also tell whether the session has a one-time prekey. The relay that handed out the
+  bundle knows whether the post-quantum prekey was a one-time one.
+- The version of a session in the `version` of every envelope: 1 for a session made by
+  X3DH before, 2 for one made by PQXDH.
 - The ratchet public key in the header of every message. It changes when the direction
   of a conversation turns, so it shows the turns even to someone who sees one direction
   only.
@@ -744,13 +750,50 @@ section 5.2).
     prekey exists, and without that key no key agreement runs (protocol, section 20.4)
     [test: tests/client/test_lifecycle.py::test_replayed_initial_message_gives_no_text_after_its_session_left_and_after_a_restart].
 
-## No post-quantum protection
+## Post-quantum protection
 
-The key agreement and the ratchet rest on X25519 alone (protocol, section 25.4). Whoever
-records the traffic of a relay and later has a quantum computer that breaks X25519 can
-open the recorded messages. The Signal applications run a post-quantum key agreement,
-PQXDH, and a post-quantum ratchet beside the Double Ratchet; this protocol has neither,
-and reserves nothing for them but its version numbers.
+Every new session is made by PQXDH, X25519 with ML-KEM-768 (protocol, part 6), and
+nothing else of the protocol is post-quantum. The attacker of this section records the
+traffic of a relay today and later has a quantum computer that breaks X25519 and Ed25519.
+
+What it protects:
+
+- The messages of a session of version 2 against that attacker as long as it only
+  records. SK rests on the X25519 values and on the shared secret of ML-KEM-768, and
+  every key of the ratchet descends from SK, so breaking X25519 alone opens nothing that
+  was recorded
+  [test: tests/crypto/test_pqxdh.py::test_both_sides_derive_the_same_secret_and_associated_data_of_version_2]
+  [test: tests/crypto/test_pqxdh_vectors.py::test_every_recorded_value_recomputes_without_the_core].
+- A relay cannot take that protection away from a new session. It can strip the
+  post-quantum prekey from a bundle, and the session then does not start: the user sees
+  PQ_PREKEY_MISSING. It cannot make a client start a session of version 1, and a client
+  refuses a new session of version 1 from a contact (protocol, section 41.10)
+  [test: tests/client/test_pqxdh_sessions.py::test_bundle_without_a_pq_prekey_ends_start_with_pq_prekey_missing_and_stores_nothing]
+  [test: tests/client/test_pqxdh_sessions.py::test_new_session_of_version_1_is_refused_and_changes_nothing]
+  [test: tests/client/test_hostile_relay.py::test_lying_relay_gives_no_text_and_leaves_the_store_unchanged].
+
+What it does not protect:
+
+- The sessions made before by X3DH: they go on with X25519 alone until one of the two
+  users resets them (protocol, sections 20.6 and 41.10)
+  [test: tests/client/test_pqxdh_sessions.py::test_x3dh_session_made_before_keeps_working_in_both_directions].
+- An active attacker with a quantum computer. The post-quantum prekeys are signed with
+  Ed25519 (protocol, section 4.5), so such an attacker in the place of the relay signs
+  keys of its own in the name of the responder and reads the session (PQXDH section 4.8).
+  Authentication is as classical as before: the protection is against recording, not
+  against an attacker that is in the middle at the time.
+- Healing after a compromise. The ratchet stays the Double Ratchet on X25519 (protocol,
+  section 25.4): whoever takes the state of a session and has a quantum computer follows
+  every later DH ratchet step of the recorded traffic, where the healing of "Forward
+  secrecy and post-compromise security" assumes that X25519 holds.
+- The first messages of a session without a one-time post-quantum prekey for longer
+  than the last-resort key lives. Their shared secret opens with the private key of the
+  last-resort post-quantum prekey, which the responder keeps as long as the signed prekey
+  it belongs to, about 44 days with the defaults (protocol, section 42.2). A relay that
+  hands out the last-resort key in place of a one-time one, or anyone who empties the
+  handout bucket, brings a session to this case.
+- What the relay learns: the metadata of "What the relay learns" is not encrypted and is
+  not post-quantum either.
 
 ## No claim of deniability
 

@@ -2,7 +2,12 @@
 
 from google.protobuf.message import DecodeError
 
-from sotto.crypto.identity import KEY_LENGTH, NONCE_LENGTH, SIGNATURE_LENGTH
+from sotto.crypto.identity import (
+    KEM_PUBLIC_KEY_LENGTH,
+    KEY_LENGTH,
+    NONCE_LENGTH,
+    SIGNATURE_LENGTH,
+)
 from sotto.proto.sotto_pb2 import (
     Ack,
     ClientFrame,
@@ -94,6 +99,13 @@ def _check_upload_bundle(upload: UploadBundle) -> None:
 
     for prekey in upload.one_time_prekeys:
         _require_length("one_time_prekeys[].key", prekey.key, KEY_LENGTH)
+
+    pq_prekeys = [("pq_one_time_prekeys[]", prekey) for prekey in upload.pq_one_time_prekeys]
+    if upload.HasField("pq_prekey"):
+        pq_prekeys.append(("pq_prekey", upload.pq_prekey))
+    for field, pq_prekey in pq_prekeys:
+        _require_length(f"{field}.key", pq_prekey.key, KEM_PUBLIC_KEY_LENGTH)
+        _require_length(f"{field}.signature", pq_prekey.signature, SIGNATURE_LENGTH)
 
 
 def _check_send(send: Send) -> None:

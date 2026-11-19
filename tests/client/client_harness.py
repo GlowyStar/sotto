@@ -66,20 +66,31 @@ class Relay:
     prekeys: dict[bytes, PrekeyUpload] = field(default_factory=dict)
     queues: dict[bytes, list[Delivered]] = field(default_factory=dict)
 
-    def publish(self, client: Client, *, one_time_count: int = 1) -> None:
-        self.prekeys[client.identity_key] = client.make_prekeys(one_time_count)
+    def publish(
+        self, client: Client, *, one_time_count: int = 1, pq_one_time_count: int = 0
+    ) -> None:
+        self.prekeys[client.identity_key] = client.make_prekeys(
+            one_time_count, pq_one_time_count
+        )
 
     def fetch(self, identity: bytes) -> Bundle:
-        """Hands out the bundle with the first one-time prekey, which leaves the relay."""
+        """Hands out the bundle with the first one-time prekey and the first one-time
+        post-quantum prekey, which leave the relay, else the last-resort one."""
         upload = self.prekeys[identity]
         one_time_prekeys = upload.one_time_prekeys
-        self.prekeys[identity] = replace(upload, one_time_prekeys=one_time_prekeys[1:])
+        pq_one_time_prekeys = upload.pq_one_time_prekeys
+        self.prekeys[identity] = replace(
+            upload,
+            one_time_prekeys=one_time_prekeys[1:],
+            pq_one_time_prekeys=pq_one_time_prekeys[1:],
+        )
         return Bundle(
             identity=identity,
             identity_dh_key=upload.identity_dh_key,
             identity_dh_signature=upload.identity_dh_signature,
             signed_prekey=upload.signed_prekey,
             one_time_prekey=one_time_prekeys[0] if one_time_prekeys else None,
+            pq_prekey=pq_one_time_prekeys[0] if pq_one_time_prekeys else upload.pq_prekey,
         )
 
     def send(self, sender: Client, outgoing: Outgoing) -> Delivered:

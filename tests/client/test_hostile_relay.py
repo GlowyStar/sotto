@@ -11,7 +11,12 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from sotto.client.session import SEEN_ID_SECONDS, Client, Delivered
-from sotto.crypto.identity import Bundle, sign_identity_dh_key, sign_signed_prekey
+from sotto.crypto.identity import (
+    Bundle,
+    sign_identity_dh_key,
+    sign_pq_prekey,
+    sign_signed_prekey,
+)
 from sotto.proto.sotto_pb2 import PeerMessage
 
 
@@ -69,6 +74,7 @@ def keys_of_bob_under_carols_signature(world: World) -> tuple[Client, Delivered]
     """Alice starts a session with Carol on the X25519 keys of Bob, signed by Carol, and the
     relay hands the message to Bob."""
     bob_bundle = world.relay.fetch(world.bob.identity_key)
+    assert bob_bundle.pq_prekey is not None
     carol_identity = world.carol.store.identity()
     assert carol_identity is not None
     carol_seed = carol_identity.seed
@@ -85,6 +91,10 @@ def keys_of_bob_under_carols_signature(world: World) -> tuple[Client, Delivered]
             ),
         ),
         one_time_prekey=bob_bundle.one_time_prekey,
+        pq_prekey=replace(
+            bob_bundle.pq_prekey,
+            signature=sign_pq_prekey(carol_seed, pq_prekey=bob_bundle.pq_prekey.key),
+        ),
     )
     outgoing = world.alice.send_text(world.carol.identity_key, "for carol", bundle=bundle)
     return world.bob, Delivered(
@@ -173,6 +183,27 @@ CASES: dict[str, Callable[[World], tuple[Client, Delivered]]] = {
     ),
     "replay": lambda world: (world.bob, world.accepted),
     "replay after its seen id is forgotten": replay_after_its_seen_id_is_forgotten,
+    "changed byte in the kem ciphertext": flip_initial_header_field("kem_ciphertext", 500),
+    "stripped kem ciphertext": lambda world: (
+        world.bob,
+        edit_envelope(
+            world.initial, lambda message: message.initial_header.ClearField("kem_ciphertext")
+        ),
+    ),
+    "changed post-quantum prekey id": lambda world: (
+        world.bob,
+        edit_envelope(
+            world.initial, lambda message: setattr(message.initial_header, "pq_prekey_id", 99)
+        ),
+    ),
+    "new session made version 1": lambda world: (
+        world.bob,
+        edit_envelope(world.initial, lambda message: setattr(message, "version", 1)),
+    ),
+    "later message made version 1": lambda world: (
+        world.bob,
+        edit_envelope(world.later, lambda message: setattr(message, "version", 1)),
+    ),
 }
 
 
@@ -196,6 +227,11 @@ RESULTS = {
     "stripped one-time prekey id": "DECRYPT_FAILED",
     "replay": "DUPLICATE",
     "replay after its seen id is forgotten": "DECRYPT_FAILED",
+    "changed byte in the kem ciphertext": "DECRYPT_FAILED",
+    "stripped kem ciphertext": "BAD_ENVELOPE",
+    "changed post-quantum prekey id": "UNKNOWN_PQ_PREKEY",
+    "new session made version 1": "X3DH_REFUSED",
+    "later message made version 1": "DECRYPT_FAILED",
 }
 
 
